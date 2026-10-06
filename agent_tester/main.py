@@ -632,7 +632,54 @@ def cmd_cases(settings: Settings, run_dir: Path, post: bool, pack_slug: str | No
     return 0
 
 
+UNREACHABLE_HINTS = ("Name or service not known", "Cannot connect to host", "Temporary failure in name resolution",
+                     "Connection refused", "nodename nor servname")
+
+
+def model_unreachable(e: BaseException | None) -> bool:
+    """True when the error chain is a DNS or connection failure (not a model or code error)."""
+    seen = 0
+    while e is not None and seen < 12:
+        name = type(e).__name__
+        if name in ("gaierror", "ClientConnectorDNSError", "ConnectError", "APIConnectionError") or \
+                any(h in str(e) for h in UNREACHABLE_HINTS):
+            return True
+        e, seen = (e.__cause__ or e.__context__), seen + 1
+    return False
+
+
+def model_host_ok(settings) -> str | None:
+    """Fail fast before fetching or planning: returns an error message when the model server's name doesn't resolve."""
+    import socket
+    from urllib.parse import urlparse
+    u = urlparse(settings.llm_base_url)
+    try:
+        socket.getaddrinfo(u.hostname, u.port or (443 if u.scheme == "https" else 80))
+        return None
+    except OSError as e:
+        return unreachable_msg(settings, e)
+
+
+def unreachable_msg(settings, e) -> str:
+    from urllib.parse import urlparse
+    host = urlparse(settings.llm_base_url).hostname
+    return (f"Can't reach the model server {host} ({type(e).__name__}). It only resolves on the Rolustech network: "
+            f"check the office network or VPN (`getent hosts {host}` should print an address), then run the "
+            "command again.")
+
+
 def main(argv=None) -> int:
+    try:
+        return _main(argv)
+    except Exception as e:  # noqa: BLE001
+        if not model_unreachable(e):
+            raise
+        from .config import Settings
+        print("\n" + unreachable_msg(Settings.load(), e))
+        return 4
+
+
+def _main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="agent_tester")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check")
@@ -691,6 +738,11 @@ def main(argv=None) -> int:
     lo.add_argument("run_dir", type=Path)
     a = ap.parse_args(argv)
     settings = Settings.load()
+    if a.cmd in ("test", "rerun", "resume", "onboard") and not getattr(a, "dry_run", False):
+        msg = model_host_ok(settings)
+        if msg:
+            print(msg)
+            return 4
     if a.cmd == "check":
         return cmd_check(settings)
     if a.cmd == "test":

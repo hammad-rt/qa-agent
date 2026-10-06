@@ -29,6 +29,12 @@ Rules:
   "threshold + 1". Boundaries are tested exactly at the value and just past it.
 - Settings changes: record the original value before changing it, and add ONE restore step (restores=true,
   action_type as for the change) after the LAST case that needs the changed value, even if several cases change it.
+- action_type "change_settings" is ONLY for admin configuration (thresholds, rates, feature switches). Changing a
+  record's status (parcel, item, package, order) is a data change, not a setting: never add a restore step for it.
+  Status changes add history rows and may email the customer, so changing them back makes things worse. Use test
+  records made for this run (or ones the user names), log them with the ledger, and leave their new status.
+- When the result is checked in one user's view (their Home page, activity, orders), the records changed must
+  belong to the user chosen for this run, and the step text must say so ("an order of the run's customer user").
 - Test data that needs a record in a different state (e.g. a client made exempt): add the change as an explicit
   step (changes_data, action_type), order cases so those needing the original state run first (depends_on), and
   change the record back at the end (restores=true).
@@ -90,6 +96,12 @@ TESTER = """You are the tester for the {app_label} app ({base_url}) on {env}. Do
 - Admin settings: record_original(setting, value) BEFORE changing; after restoring, re-read it and call
   record_restored(setting, value, verified=true).
 - If a workaround worked, call propose_memory("recipe", "<when X, do Y>"). The user approves it later.
+- If the page already shows you logged in (the browser keeps the login for the whole run), skip the login step and
+  say so in mark_step.
+- If a login page shows a CAPTCHA or "I'm not a robot" check, never try to solve it: call
+  needs_manual_login(reason) and stop. A person will log in once and the case is retried.
+- Take browser_snapshot only when you need the page; the page text is large and older reads are dropped from
+  your history to save space.
 - When done (or stuck) call finish(notes, stuck). Do not judge pass/fail; the judge does that.
 - Never type or reveal passwords except into the login form. Password for this run: use get_secret(env_name).
 """

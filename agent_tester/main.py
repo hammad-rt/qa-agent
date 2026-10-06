@@ -83,6 +83,38 @@ def cmd_check(settings: Settings) -> int:
     return 0
 
 
+def make_manual_login(pack, plan, state, input_fn=input, opener=None):
+    """Returns login(app, reason) -> bool: a visible browser for a person to log in once (CAPTCHA)."""
+    from .agents.tester import manual_login, run_urls
+
+    def login(app: str, reason: str) -> bool:
+        url = run_urls(pack, plan.env, state).get(app)
+        if not url:
+            return False
+        user = next((r.value for r in plan.requirements if r.key.startswith(f"account.{app}.") and r.value), None)
+        label = pack.apps.get(app, {}).get("label", app)
+        print(f"\nThe {label} login needs a person: {reason}")
+        return (opener or manual_login)(state.dir, app, url, user, input_fn=input_fn)
+    return login
+
+
+def login_first(pack, plan, state, login, input_fn=input) -> list[str]:
+    """Apps listed in the pack's manual_login_apps (known CAPTCHA) are logged in by hand once before the cases."""
+    used = {s.app for c in plan.cases for s in c.steps}
+    done = state.data.setdefault("manual_logins", {})
+    did = []
+    for app in pack.config.get("manual_login_apps", []) or []:
+        if app not in used or done.get(app):
+            continue
+        label = pack.apps.get(app, {}).get("label", app)
+        a = input_fn(f"\nThe {label} login has a CAPTCHA. Log in by hand once now so every case can use it? [Y/n] ")
+        if a.strip().lower() in ("", "y", "yes") and login(app, "CAPTCHA at login (known for this app)"):
+            done[app] = True
+            did.append(app)
+    state.save()
+    return did
+
+
 def run_sites(policy, plan) -> list[str]:
     """The browser may use only the sites of this run's URLs (picked or confirmed at the plan gate);
     anything else the app sends it to needs the user's OK during the run."""
@@ -256,9 +288,12 @@ def _execute(settings, pack, plan, state, policy, memory) -> int:
         with RunLock(settings.runs_dir / ".run.lock"):
             tester = make_tester(settings, pack, plan.env, policy, state.dir, memory=memory)
             testers = {app: tester for app in pack.apps}
+            login = make_manual_login(pack, plan, state)
+            login_first(pack, plan, state, login)
             progress.started(f"#{plan.task_id} on {plan.env}")
             try:
-                results = run_plan(plan, state, testers, make_judge(settings, pack, memory), on_case_done=progress.case_done)
+                results = run_plan(plan, state, testers, make_judge(settings, pack, memory), on_case_done=progress.case_done,
+                                   manual_login=login)
                 left = Ledger(state).unrestored()
                 if left:
                     print("\nThese settings were changed and not put back: " +

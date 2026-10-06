@@ -52,7 +52,8 @@ def playwright_toolset(run_dir: Path, app: str):
     out = run_dir / "shots"
     profile = run_dir / "profiles" / app
     profile.mkdir(parents=True, exist_ok=True)
-    args = ["-y", "@playwright/mcp@latest", "--headless", "--isolated", "--output-dir", str(out),
+    # one browser profile per app per run: logging in once (or a person solving a CAPTCHA once) lasts the run
+    args = ["-y", "@playwright/mcp@latest", "--headless", "--user-data-dir", str(profile), "--output-dir", str(out),
             "--viewport-size", "1366,900"]
     return Toolset(connection_params=StdioConnectionParams(
         server_params=StdioServerParameters(command="npx", args=args), timeout=60))
@@ -141,6 +142,12 @@ class TesterSession:
                 return {"error": f"{env_name} is not available for this run"}
             return {"value": os.environ[env_name]}
 
+        def needs_manual_login(reason: str) -> dict:
+            """Call when login is blocked by a CAPTCHA or robot check. Do not try to solve it."""
+            s.result.needs_login = redact(reason) or "CAPTCHA at login"
+            s.result.notes, s.result.stuck, s.finished = f"needs a manual login: {s.result.needs_login}", True, True
+            return {"ok": True, "next": "stop now; a person will log in and the case will be retried"}
+
         def finish(notes: str, stuck: bool = False) -> dict:
             """Call when your steps are done, or when you are stuck and cannot continue."""
             s.result.notes, s.result.stuck, s.finished = redact(notes), stuck, True
@@ -209,7 +216,8 @@ class TesterSession:
             s.result.screenshots += [x for x in out.get("screenshots", []) if x not in s.result.screenshots]
             return out
 
-        tools = [record_value, calculate, request_approval, mark_step, evidence_name, get_secret, finish, recall_lessons]
+        tools = [record_value, calculate, request_approval, mark_step, evidence_name, get_secret, finish, recall_lessons,
+                 needs_manual_login]
         if s.helpers and s.toolset is not None:
             tools.append(run_helper)
         if not s.brief.get("read_only"):
@@ -252,7 +260,13 @@ class TesterSession:
             blocked = self._check_page_site(tool.name, _text_of(tool_response))
             if blocked:
                 return {"error": blocked}
-            return _redact_obj(tool_response, self.keep_emails)
+            return _cap_obj(_redact_obj(tool_response, self.keep_emails), MAX_PAGE_CHARS)
+        return None
+
+    def before_model(self, callback_context, llm_request):
+        """Keep the model's history small: only the last KEEP_PAGE_READS browser results stay whole; older ones
+        are replaced by a one-line placeholder (the tester can take a new snapshot)."""
+        prune_history(getattr(llm_request, "contents", None) or [], KEEP_PAGE_READS)
         return None
 
     def _check_page_site(self, tool_name: str, text: str) -> str | None:
@@ -292,6 +306,74 @@ class TesterSession:
         self.state.log_action(case_id=self.case_id, app=self.app, tool=name, args=_safe_args(args),
                               plan_step=self.current_step, approval="denied", outcome=why)
         return {"error": f"Blocked: {why}. Do not retry this; continue or call finish()."}
+
+
+MAX_PAGE_CHARS = int(os.environ.get("TESTER_MAX_PAGE_CHARS", "30000"))   # ~8K tokens per page read
+KEEP_PAGE_READS = int(os.environ.get("TESTER_KEEP_PAGE_READS", "2"))
+TESTER_MAX_TOKENS = int(os.environ.get("TESTER_MAX_TOKENS", "2048"))
+DROPPED = "[older page read removed to save space; take a new browser_snapshot if you need the page]"
+
+
+def prune_history(contents, keep: int) -> int:
+    """Replace all but the last `keep` browser tool results in the request history. Returns how many were dropped."""
+    refs = []
+    for c in contents:
+        for p in (getattr(c, "parts", None) or []):
+            fr = getattr(p, "function_response", None)
+            if fr is not None and (getattr(fr, "name", "") or "").startswith("browser_"):
+                refs.append(fr)
+    dropped = 0
+    for fr in refs[:-keep] if keep > 0 else refs:
+        if fr.response != {"result": DROPPED}:
+            fr.response = {"result": DROPPED}
+            dropped += 1
+    return dropped
+
+
+def _cap_obj(o, limit: int):
+    if isinstance(o, str):
+        return o if len(o) <= limit else (o[:limit] + f"\n[... page text cut: {len(o) - limit} more characters. "
+                                          "Use browser_find, or scroll and snapshot again, for the rest.]")
+    if isinstance(o, dict):
+        return {k: _cap_obj(v, limit) for k, v in o.items()}
+    if isinstance(o, list):
+        return [_cap_obj(v, limit) for v in o]
+    return o
+
+
+def _is_context_error(e: BaseException) -> bool:
+    t = f"{type(e).__name__} {e}"
+    return "ContextWindow" in t or "maximum context length" in t
+
+
+def manual_login(run_dir: Path, app: str, url: str, username: str | None, input_fn=input, out=print) -> bool:
+    """Open a visible browser on the same profile the tester uses, so a person can log in (and solve a CAPTCHA)
+    once. The login then lasts for the rest of the run. Returns True when the person says they're done."""
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    profile = run_dir / "profiles" / app
+    profile.mkdir(parents=True, exist_ok=True)
+    args = ["-y", "@playwright/mcp@latest", "--user-data-dir", str(profile), "--output-dir", str(run_dir / "shots"),
+            "--viewport-size", "1366,900"]
+
+    async def go() -> bool:
+        async with stdio_client(StdioServerParameters(command="npx", args=args)) as (r, w):
+            async with ClientSession(r, w) as sess:
+                await sess.initialize()
+                await sess.call_tool("browser_navigate", {"url": url})
+                out(f"\nA browser window is open on {url}." + (f" Log in as {username}" if username else " Log in")
+                    + " (solve the CAPTCHA if there is one), wait for the home page, then press Enter here.")
+                ans = input_fn("  Press Enter when logged in, or type s to skip: ").strip().lower()
+                try:
+                    await sess.call_tool("browser_close", {})
+                except Exception:  # noqa: BLE001
+                    pass
+                return ans not in ("s", "skip", "n", "no")
+    try:
+        return asyncio.run(go())
+    except Exception as e:  # noqa: BLE001  no display, npx missing...
+        out(f"Couldn't open a browser window for the manual login ({type(e).__name__}: {e}).")
+        return False
 
 
 def _safe_args(args: dict) -> dict:
@@ -350,14 +432,21 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
                     + (" [changes data: needs approval]" if h.meta.get("changes_data") else "") for n, h in helpers.items())
             if brief.get("read_only"):
                 instr += "\nThis turn is READ-ONLY: log in and read values only. Never change anything."
-            agent = LlmAgent(name=f"tester_{app}", model=model(settings), instruction=lambda _c: instr,
-                             tools=[toolset, *sess.tools()],
-                             before_tool_callback=sess.before_tool, after_tool_callback=sess.after_tool)
+            agent = LlmAgent(name=f"tester_{app}", model=model(settings, max_tokens=TESTER_MAX_TOKENS),
+                             instruction=lambda _c: instr, tools=[toolset, *sess.tools()],
+                             before_tool_callback=sess.before_tool, after_tool_callback=sess.after_tool,
+                             before_model_callback=sess.before_model)
             prompt = "Your steps:\n" + json.dumps(brief, indent=1, default=str)
 
             async def go():
                 try:
                     await run_agent(agent, prompt, settings, trace_path=run_dir / "trace.jsonl")
+                except Exception as e:  # noqa: BLE001
+                    if not _is_context_error(e):
+                        raise
+                    sess.result.stuck, sess.finished = True, True
+                    sess.result.notes = ("the pages read in this case no longer fit in the model's memory "
+                                         f"({str(e)[:160]}); rerun the case or split it into smaller cases")
                 finally:
                     try:
                         await toolset.close()

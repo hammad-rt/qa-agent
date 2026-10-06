@@ -125,3 +125,14 @@ Phases 1-8 are built and covered by 121 offline tests. No live run yet: the LLM 
 staging must be reachable from the machine running the agent, and the Redmine API key and account passwords
 must be set. Nothing in code is task-specific, but that only gets proven by live runs on several different
 tasks (for example #180966, #165348 and a fresh one) and a passing `eval --live`.
+
+## CAPTCHA logins and tester memory (6 Oct, #180974)
+- Each app gets one browser profile per run (`runs/<run>/profiles/<app>`), so a login lasts the whole run.
+- Apps in the pack's `manual_login_apps` (Savostore: `portal`) ask at the start of the run to open a visible
+  browser where you log in once and solve the CAPTCHA. If a tester still meets a CAPTCHA it calls
+  `needs_manual_login`, you get the same window once, and the case is retried; if you skip it the case is BLOCKED.
+- The tester keeps only its last 2 page reads in history (`TESTER_KEEP_PAGE_READS`), page text is cut at
+  `TESTER_MAX_PAGE_CHARS` (30000), and its reply limit is `TESTER_MAX_TOKENS` (2048; the planner keeps
+  `LLM_MAX_TOKENS`). A context-length error ends that case as AGENT INCOMPLETE instead of pausing the run.
+- Planner: record status changes aren't settings (no restore step); records checked in a user's view must belong
+  to the run's chosen user; prefer test records made for the run and leave their new status.

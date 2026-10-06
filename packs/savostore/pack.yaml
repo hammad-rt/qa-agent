@@ -33,6 +33,9 @@ apps:
         password_env: SAVOSTORE_CRM_PASSWORD
         role_markers: ["Admin"]      # text that must be visible after login for the admin role
 
+# Apps whose login shows a CAPTCHA: a person logs in once in a visible browser before the cases run.
+manual_login_apps: [portal]
+
 # Known sites: pack URLs on these hosts don't need confirming at the plan gate. The browser itself is limited
 # to the sites of each run's URLs, and asks before using any other site (e.g. a payment page).
 allowlist:

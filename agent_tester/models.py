@@ -102,6 +102,7 @@ class StepResult(BaseModel):
     notes: str = ""
     stuck: bool = False
     limit_hit: bool = False
+    needs_login: str | None = None    # tester hit a CAPTCHA/robot check at login: a person has to log in once
 
 
 class CaseResult(BaseModel):

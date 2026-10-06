@@ -89,7 +89,8 @@ def restore_pass(plan: TestPlan, state: RunState, testers: dict[str, Tester], un
 
 
 def run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge: Judge,
-             on_case_done: Callable[[CaseResult], None] | None = None, max_retries: int = 1) -> dict[str, CaseResult]:
+             on_case_done: Callable[[CaseResult], None] | None = None, max_retries: int = 1,
+             manual_login: Callable[[str, str], bool] | None = None) -> dict[str, CaseResult]:
     state.checkpoint("run started", status="running")
     read_snapshot(plan, state, testers, "baseline")
     by_id = {c.id: c for c in plan.cases}
@@ -97,7 +98,7 @@ def run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge:
         if state.result(cid):
             continue                                  # resume: already done
         case = by_id[cid]
-        result = _run_case(plan, case, state, testers, judge, max_retries)
+        result = _run_case(plan, case, state, testers, judge, max_retries, manual_login)
         state.set_result(result)
         if on_case_done:
             on_case_done(result)
@@ -106,7 +107,7 @@ def run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge:
     return {cid: state.result(cid) for cid in execution_order(plan)}
 
 
-def _run_case(plan, case, state, testers, judge, max_retries) -> CaseResult:
+def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None) -> CaseResult:
     if case.skip_reason:
         return CaseResult(case_id=case.id, verdict="SKIPPED", expected=case.expected, note=case.skip_reason)
     for dep in case.depends_on:
@@ -139,6 +140,23 @@ def _run_case(plan, case, state, testers, judge, max_retries) -> CaseResult:
                 if attempt > max_retries:
                     state.checkpoint(f"paused in {case.id} ({app}): {type(e).__name__}: {e}", status="paused")
                     raise RunPaused(f"{case.id}: {e}") from e
+        if sr.needs_login:
+            done = state.data.setdefault("manual_logins", {})
+            if manual_login is not None and not done.get(app) and manual_login(app, sr.needs_login):
+                done[app] = True
+                state.save()
+                state.checkpoint(f"manual login on {app} done; retrying {case.id}")
+                try:
+                    sr = tester(app, brief, state)
+                except RunPaused:
+                    raise
+                except Exception as e:                # noqa: BLE001
+                    sr.notes = f"retry after manual login failed: {type(e).__name__}: {e}"
+            if sr.needs_login:
+                return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,
+                                  values={k: v for r in results for k, v in r.values.items()},
+                                  evidence=[s for r in results for s in r.screenshots],
+                                  note=f"login on {app} needs a person (CAPTCHA or robot check): {sr.needs_login}")
         results.append(sr)
         for k, v in sr.values.items():
             state.values.setdefault(k, {"value": v, "source": f"{case.id}/{app}"})

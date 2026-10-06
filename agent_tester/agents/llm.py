@@ -16,11 +16,11 @@ class LLMOutputError(RuntimeError):
     """The model kept returning output that could not be parsed or validated."""
 
 
-def model(settings: Settings, json_mode: bool = False):
+def model(settings: Settings, json_mode: bool = False, max_tokens: int | None = None):
     """json_mode asks the server for a syntactically valid JSON object (vLLM supports it). LLM_JSON_MODE=0 turns it off."""
     import os
     from google.adk.models.lite_llm import LiteLlm
-    extra = {"max_tokens": int(os.environ.get("LLM_MAX_TOKENS", "8192"))}   # the server's default is only 512
+    extra = {"max_tokens": max_tokens or int(os.environ.get("LLM_MAX_TOKENS", "8192"))}   # the server's default is only 512
     if json_mode and os.environ.get("LLM_JSON_MODE", "1") != "0":
         extra["response_format"] = {"type": "json_object"}
     return LiteLlm(model=f"openai/{settings.llm_model}", api_base=settings.llm_base_url, api_key=settings.llm_api_key, **extra)

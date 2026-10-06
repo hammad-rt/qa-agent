@@ -24,7 +24,34 @@ READ_ONLY_BROWSER = {"browser_snapshot", "browser_take_screenshot", "browser_wai
 BLOCKED_BROWSER = {"browser_evaluate", "browser_run_code", "browser_install", "browser_file_upload"}
 
 
-def playwright_toolset(run_dir: Path, app: str, allowed_hosts: list[str]):
+def browser_origins(allowed_hosts: list[str], urls: list[str]) -> list[str]:
+    """Playwright's --allowed-origins matches scheme://host:port exactly, so a site on a port
+    (staging5...:4225) needs its own origin; a bare https://host only covers port 443."""
+    from urllib.parse import urlparse
+    hosts = [h.lower() for h in allowed_hosts if h]
+    out = [f"https://{h}" for h in hosts]
+    for u in urls:
+        p = urlparse(u or "")
+        host = (p.hostname or "").lower()
+        if p.scheme in ("http", "https") and host and any(host == h or host.endswith("." + h) for h in hosts):
+            o = f"{p.scheme}://{host}" + (f":{p.port}" if p.port else "")
+            if o not in out:
+                out.append(o)
+    return out
+
+
+def run_urls(pack, env: str, state) -> dict:
+    """app -> base URL for this run: the URL resolved at the plan gate wins over pack.yaml (pre-prod etc.)."""
+    urls = {a: pack.url(a, env) for a in pack.apps if pack.url(a, env)}
+    plan = (getattr(state, "data", None) or {}).get("plan") or {}
+    for r in plan.get("requirements", []):
+        parts = (r.get("key") or "").split(".")
+        if len(parts) >= 3 and parts[0] == "env" and parts[1] == env and r.get("value"):
+            urls[parts[2]] = r["value"]
+    return urls
+
+
+def playwright_toolset(run_dir: Path, app: str, allowed_hosts: list[str], urls: list[str] | None = None):
     from mcp import StdioServerParameters
     try:
         from google.adk.tools.mcp_tool.mcp_toolset import McpToolset as Toolset
@@ -35,7 +62,7 @@ def playwright_toolset(run_dir: Path, app: str, allowed_hosts: list[str]):
     out = run_dir / "shots"
     profile = run_dir / "profiles" / app
     profile.mkdir(parents=True, exist_ok=True)
-    origins = ";".join(f"https://{h}" for h in allowed_hosts)
+    origins = ";".join(browser_origins(allowed_hosts, urls or []))
     args = ["-y", "@playwright/mcp@latest", "--headless", "--isolated", "--output-dir", str(out),
             "--viewport-size", "1366,900"]
     if origins:
@@ -283,11 +310,12 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
         was_ro = policy.read_only
         policy.read_only = bool(brief.get("read_only")) or was_ro
         try:
-            toolset = playwright_toolset(run_dir, app, policy.allow_hosts)
+            urls = run_urls(pack, env, state)
+            toolset = playwright_toolset(run_dir, app, policy.allow_hosts, list(urls.values()))
             sess = TesterSession(app, brief, state, policy, evidence, settings.max_tool_calls_per_case,
                                  settings.max_minutes_per_case, keep_emails=keep, memory=memory, ledger=Ledger(state),
                                  helpers=helpers, pack=pack, env=env, toolset=toolset)
-            instr = prompts.TESTER.format(app_label=pack.apps[app].get("label", app), base_url=pack.url(app, env), env=env)
+            instr = prompts.TESTER.format(app_label=pack.apps[app].get("label", app), base_url=urls.get(app) or pack.url(app, env), env=env)
             if helpers:
                 instr += "\nTested helpers (prefer them for these routine steps; call run_helper):\n" + "\n".join(
                     f"- {n}: {h.meta['description']} params {json.dumps(h.meta.get('params', {}))}"

@@ -127,4 +127,10 @@ def _run_case(plan, case, state, testers, judge, max_retries) -> CaseResult:
                               evidence=[s for r in results for s in r.screenshots],
                               note=f"tester on {app} {why}: {sr.notes}".strip())
     full_brief = brief_for(plan, case, list(range(len(case.steps))), state)
-    return judge(full_brief, state.actions_for(case.id), results, state)
+    try:
+        return judge(full_brief, state.actions_for(case.id), results, state)
+    except Exception as e:                        # noqa: BLE001  judge output unusable; keep the run going
+        return CaseResult(case_id=case.id, verdict="AGENT INCOMPLETE", expected=case.expected,
+                          values={k: v for r in results for k, v in r.values.items()},
+                          evidence=[s for r in results for s in r.screenshots],
+                          note=f"the judge could not decide: {type(e).__name__}: {str(e)[:300]}")

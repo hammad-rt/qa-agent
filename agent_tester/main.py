@@ -123,8 +123,15 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
             print(f"No earlier run links cases to bug {retest_bug}; the planner will pick cases related to it.")
             task_text += f"\n\nRETEST MODE: plan only the cases that check this fixed bug: {hint}"
     lessons_mem = open_memory(settings, pack)
-    plan = asyncio.run(plan_task(settings, pack, task_text, task_id, env, only_case=",".join(only) or None,
-                                 lessons=lessons_mem.as_prompt(lessons_mem.preload()), trace_path=state.dir / "trace.jsonl", generate=generate))
+    from .agents.llm import LLMOutputError
+    try:
+        plan = asyncio.run(plan_task(settings, pack, task_text, task_id, env, only_case=",".join(only) or None,
+                                     lessons=lessons_mem.as_prompt(lessons_mem.preload()), trace_path=state.dir / "trace.jsonl", generate=generate))
+    except LLMOutputError as e:
+        lessons_mem.store.close()
+        print(f"\nPlanning stopped: {e}")
+        state.checkpoint(f"planner output unusable: {e}", status="blocked")
+        return 4
     lessons_mem.store.close()
     if only:                                   # code enforces the case selection, whatever the planner returned
         from .modes import filter_plan

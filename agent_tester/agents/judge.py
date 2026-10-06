@@ -8,7 +8,7 @@ import json
 from ..config import Settings
 from ..models import CaseResult
 from . import prompts
-from .llm import extract_json, model, run_agent
+from .llm import model, run_json
 
 
 def enforce_rules(r: CaseResult, brief: dict, actions: list[dict], step_results: list,
@@ -37,7 +37,7 @@ def make_judge(settings: Settings, pack, memory=None):
 
     def judge(brief: dict, actions: list[dict], step_results: list, state) -> CaseResult:
         from google.adk.agents import LlmAgent
-        agent = LlmAgent(name="judge", model=model(settings), instruction=lambda _c: instr)
+        agent = LlmAgent(name="judge", model=model(settings, json_mode=True), instruction=lambda _c: instr)
         from ..ledger import Ledger
         unrestored = Ledger(state).unrestored(brief["case_id"])
         failure_text = brief.get("title", "") + " " + brief.get("expected", "") + " " + json.dumps(
@@ -51,11 +51,15 @@ def make_judge(settings: Settings, pack, memory=None):
             "evidence": [s for sr in step_results for s in sr.screenshots],
             "steps_done": sorted({n for sr in step_results for n in sr.steps_done}),
         }
-        raw = asyncio.run(run_agent(agent, json.dumps(payload, indent=1, default=str), settings,
-                                    trace_path=state.dir / "trace.jsonl", retry=True))
-        data = extract_json(raw)
-        data["case_id"] = brief["case_id"]
-        data.setdefault("expected", brief.get("expected", ""))
-        return enforce_rules(CaseResult.model_validate(data), brief, actions, step_results, unrestored)
+        def to_result(data: dict) -> CaseResult:
+            if not isinstance(data, dict):
+                raise ValueError("expected a JSON object")
+            data["case_id"] = brief["case_id"]
+            data.setdefault("expected", brief.get("expected", ""))
+            return CaseResult.model_validate(data)
+
+        r = asyncio.run(run_json(agent, json.dumps(payload, indent=1, default=str), settings, validate=to_result,
+                                 label=f"judge_{brief['case_id']}", raw_dir=state.dir, trace_path=state.dir / "trace.jsonl"))
+        return enforce_rules(r, brief, actions, step_results, unrestored)
 
     return judge

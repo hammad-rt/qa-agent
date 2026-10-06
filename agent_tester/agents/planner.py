@@ -5,7 +5,7 @@ from ..config import ROOT, Settings
 from ..models import TestPlan
 from ..redact import redact
 from . import prompts
-from .llm import extract_json, model, run_agent
+from .llm import model, run_json
 
 
 def build_planner(settings: Settings, pack, env: str):
@@ -14,12 +14,12 @@ def build_planner(settings: Settings, pack, env: str):
     instr = prompts.PLANNER.format(
         apps=", ".join(pack.apps), action_types=", ".join(pack.config.get("preapprovable_actions", []) + pack.config.get("always_ask_actions", [])),
         env=env, facts=pack.facts, core=core)
-    return LlmAgent(name="planner", model=model(settings), instruction=_static(instr))
+    return LlmAgent(name="planner", model=model(settings, json_mode=True), instruction=_static(instr))
 
 
 def build_reviewer(settings: Settings, task_text: str):
     from google.adk.agents import LlmAgent
-    return LlmAgent(name="reviewer", model=model(settings), instruction=_static(prompts.REVIEWER.format(task=task_text)))
+    return LlmAgent(name="reviewer", model=model(settings, json_mode=True), instruction=_static(prompts.REVIEWER.format(task=task_text)))
 
 
 def _static(s: str):
@@ -35,15 +35,21 @@ async def plan_task(settings: Settings, pack, task_text: str, task_id: int, env:
     ask = f"Task #{task_id}:\n{task_text}\n\n" + (f"Saved lessons for this project (apply them, cite ids in inferred_source):\n{lessons}\n\n" if lessons else "") + (f"Plan ONLY these cases: {only_case}.\n" if only_case else "") + (prompts.GENERATE if generate else "")
     feedback = ""
     for _ in range(max_rounds):
-        raw = await run_agent(planner, ask + feedback, settings, trace_path=trace_path, retry=True)
-        data = extract_json(raw)
-        data.setdefault("task_id", task_id)
-        data["env"] = env
-        plan = TestPlan.model_validate(data)
+        def to_plan(data: dict) -> TestPlan:
+            if not isinstance(data, dict):
+                raise ValueError("expected a JSON object")
+            data.setdefault("task_id", task_id)
+            data["env"] = env
+            return TestPlan.model_validate(data)
+
+        raw_dir = trace_path.parent if trace_path else None
+        plan = await run_json(planner, ask + feedback, settings, validate=to_plan, label="planner",
+                              raw_dir=raw_dir, trace_path=trace_path)
         if generate:                           # code marks generated cases, whatever the model said
             from ..casegen import mark_generated
             plan = mark_generated(plan)
-        review = extract_json(await run_agent(reviewer, plan.model_dump_json(indent=1), settings, trace_path=trace_path, retry=True))
+        review = await run_json(reviewer, plan.model_dump_json(indent=1), settings, label="reviewer",
+                                raw_dir=raw_dir, trace_path=trace_path)
         if review.get("ok"):
             return plan
         feedback = "\n\nReviewer problems to fix:\n- " + "\n- ".join(review.get("problems", []))

@@ -23,8 +23,13 @@ class Policy:
     log: list[dict] = field(default_factory=list)
     read_only: bool = False          # baseline/final reads and preflight: anything needing approval is refused
 
+    def can_preapprove(self, action_type: str) -> bool:
+        if self.env == "prod" or action_type in self.always_ask or action_type not in self.preapprovable:
+            return False
+        return not ("staging" in action_type and self.env != "staging")
+
     def preapprove(self, action_types: list[str]) -> None:
-        bad = [a for a in action_types if a in self.always_ask or a not in self.preapprovable]
+        bad = [a for a in action_types if not self.can_preapprove(a)]
         if bad:
             raise PolicyViolation(f"cannot pre-approve: {bad}")
         self.preapproved |= set(action_types)
@@ -56,7 +61,7 @@ class Policy:
         if self.read_only:
             self.log.append({"action": action, "type": action_type, "approval": "denied", "why": "read-only"})
             raise PolicyViolation(f"read-only step, not allowed: {action}")
-        if action_type and action_type in self.preapproved and action_type not in self.always_ask and self.env != "prod":
+        if action_type and action_type in self.preapproved and self.can_preapprove(action_type):
             self.log.append({"action": action, "type": action_type, "approval": "pre_approved"})
             return "pre_approved"
         if self.approver is None:

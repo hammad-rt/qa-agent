@@ -184,13 +184,23 @@ class HelperContext:
     shot_prefix: str = ""
 
     def url(self, path: str = "") -> str:
-        base = (self.pack.url(self.app, self.env) or "").rstrip("/")
+        base = self.pack.url(self.app, self.env) or ""
+        plan = (getattr(self.state, "data", None) or {}).get("plan") or {}
+        for r in plan.get("requirements", []):
+            if r.get("key") == f"env.{self.env}.{self.app}" and r.get("value"):
+                base = r["value"]
+        base = base.rstrip("/")
         return path if path.startswith("http") else f"{base}/{path.lstrip('/')}" if path else base + "/"
 
     def account(self, name: str) -> dict:
-        acc = self.pack.accounts(self.app).get(name)
-        if not acc:
-            raise HelperError(f"no account '{name}' for app {self.app} in pack.yaml")
+        """The user chosen for this run (asked at the plan gate) wins over pack.yaml; role markers stay from the pack."""
+        acc = dict(self.pack.accounts(self.app).get(name) or {})
+        plan = (getattr(self.state, "data", None) or {}).get("plan") or {}
+        for r in plan.get("requirements", []):
+            if r.get("key") == f"account.{self.app}.{name}" and r.get("value"):
+                acc.update(username=r["value"], password_env=r.get("secret_env") or acc.get("password_env"))
+        if not acc.get("username"):
+            raise HelperError(f"no account '{name}' for app {self.app}: not chosen at the plan gate or in pack.yaml")
         return acc
 
 

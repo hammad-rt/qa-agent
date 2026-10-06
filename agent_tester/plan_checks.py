@@ -39,8 +39,8 @@ def check_plan(plan: TestPlan) -> list[str]:
                 issues.append(f"{c.id} step {i+1}: changes data/money but has no approval or action type")
             if s.inferred and not (s.inferred_reason and s.inferred_source):
                 issues.append(f"{c.id} step {i+1}: inferred step without reason and source")
-        if c.type == CaseType.ADMIN_CONFIG and not any(s.restores for s in c.steps):
-            issues.append(f"{c.id}: admin case has no restore step")
+        if c.type == CaseType.ADMIN_CONFIG and not _restored_later(plan, c):
+            issues.append(f"{c.id}: admin case has no restore step (in it or in a later case)")
         if c.generated and not c.skip_reason and not c.expected.strip() and not c.open_question:
             issues.append(f"{c.id}: generated case has no expected result and no question for the user")
         if c.generated and c.expected.strip() and not c.expected_source:
@@ -63,6 +63,39 @@ def check_plan(plan: TestPlan) -> list[str]:
         if r.status != "resolved" and not r.question:
             issues.append(f"requirement {r.key}: not resolved and no question for the user")
     return issues
+
+
+def _restored_later(plan: TestPlan, case) -> bool:
+    try:
+        order = execution_order(plan)
+    except RecursionError:
+        order = [c.id for c in plan.cases]
+    by_id = {c.id: c for c in plan.cases}
+    later = order[order.index(case.id):] if case.id in order else [case.id]
+    return any(s.restores for cid in later for s in by_id[cid].steps)
+
+
+def autofix(plan: TestPlan, preapprovable: list[str] | None = None) -> TestPlan:
+    """Fixed-code repairs the planner often misses:
+    - settings changed but never restored: one labelled restore step after the last case that changes settings;
+    - pre-approvals limited to what the pack allows (always-ask actions are asked each time)."""
+    from .models import Step
+    plan = plan.model_copy(deep=True)
+    if preapprovable is not None:
+        plan.preapprovable_actions = [a for a in plan.preapprovable_actions if a in preapprovable]
+    order = execution_order(plan)
+    by_id = {c.id: c for c in plan.cases}
+    changers = [cid for cid in order
+                if by_id[cid].type == CaseType.ADMIN_CONFIG or any(s.action_type == "change_settings" for s in by_id[cid].steps)]
+    if changers and not any(s.restores for cid in order[order.index(changers[0]):] for s in by_id[cid].steps):
+        last = by_id[changers[-1]]
+        apps = [s.app for cid in changers for s in by_id[cid].steps if s.changes_data and s.app not in ("none", "redmine")]
+        app = apps[-1] if apps else (last.steps[-1].app if last.steps else "none")
+        last.steps.append(Step(
+            text="Put every setting changed in this run back to its recorded original value, re-read it and call record_restored",
+            app=app, changes_data=True, action_type="change_settings", restores=True, inferred=True,
+            inferred_reason="settings changed by the run must be restored", inferred_source="core rule"))
+    return plan
 
 
 def execution_order(plan: TestPlan) -> list[str]:

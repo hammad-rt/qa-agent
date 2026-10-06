@@ -45,6 +45,7 @@ class Requirement(BaseModel):
     status: Literal["resolved", "unverified", "failed_check", "missing"] = "missing"
     check_note: str | None = None
     question: str | None = None
+    default: str | None = None        # suggested answer shown at the plan gate (Enter keeps it), e.g. last-used username
 
 
 class PlannedCase(BaseModel):
@@ -67,7 +68,7 @@ class PlannedCase(BaseModel):
 
 class TestPlan(BaseModel):
     task_id: int
-    env: Literal["staging", "prod"] = "staging"
+    env: Literal["staging", "preprod", "prod"] = "staging"
     cases_source: Literal["task", "generated"] = "task"
     cases: list[PlannedCase] = Field(default_factory=list)
     requirements: list[Requirement] = Field(default_factory=list)

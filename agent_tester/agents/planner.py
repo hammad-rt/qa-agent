@@ -28,11 +28,14 @@ def _static(s: str):
 
 
 async def plan_task(settings: Settings, pack, task_text: str, task_id: int, env: str, only_case: str | None = None,
-                    max_rounds: int = 3, lessons: str = "", trace_path=None, generate: bool = False) -> TestPlan:
+                    max_rounds: int = 3, lessons: str = "", trace_path=None, generate: bool = False,
+                    answers: dict | None = None, preapprovable: list[str] | None = None) -> TestPlan:
     task_text = redact(task_text)
     planner = build_planner(settings, pack, env)
     reviewer = build_reviewer(settings, task_text)
-    ask = f"Task #{task_id}:\n{task_text}\n\n" + (f"Saved lessons for this project (apply them, cite ids in inferred_source):\n{lessons}\n\n" if lessons else "") + (f"Plan ONLY these cases: {only_case}.\n" if only_case else "") + (prompts.GENERATE if generate else "")
+    ask = f"Task #{task_id}:\n{task_text}\n\n" + (f"Saved lessons for this project (apply them, cite ids in inferred_source):\n{lessons}\n\n" if lessons else "") + (f"Plan ONLY these cases: {only_case}.\n" if only_case else "") + (prompts.GENERATE if generate else "") + (
+        "\nUser answers at the plan gate (binding):\n" + "\n".join(f"- {k}: {v}" for k, v in answers.items()) + "\n"
+        if answers else "")
     feedback = ""
     for _ in range(max_rounds):
         def to_plan(data: dict) -> TestPlan:
@@ -50,7 +53,11 @@ async def plan_task(settings: Settings, pack, task_text: str, task_id: int, env:
             plan = mark_generated(plan)
         review = await run_json(reviewer, plan.model_dump_json(indent=1), settings, label="reviewer",
                                 raw_dir=raw_dir, trace_path=trace_path)
-        if review.get("ok"):
+        from ..plan_checks import autofix, check_plan
+        plan = autofix(plan, preapprovable)
+        fixed_issues = [i for i in check_plan(plan) if not i.startswith("requirement ")]
+        problems = ([] if review.get("ok") else list(review.get("problems", []))) + fixed_issues
+        if not problems:
             return plan
-        feedback = "\n\nReviewer problems to fix:\n- " + "\n- ".join(review.get("problems", []))
+        feedback = "\n\nProblems to fix (reviewer and plan checks):\n- " + "\n- ".join(problems)
     return plan

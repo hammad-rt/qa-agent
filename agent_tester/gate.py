@@ -37,11 +37,35 @@ def ask_batch(reqs, ctx, input_fn=input, secret_fn=getpass.getpass, write_secret
     answers = {}
     for n, r in enumerate(qs, 1):
         out(f"  {n}. {r.question}")
-        if r.kind == "account" and r.value:
+        if r.kind == "account" and r.value and r.default is None:
             answers[r.key] = ""          # only the masked password is needed
             continue
         answers[r.key] = input_fn(f"     > ")
     G.apply_answers(reqs, answers, ctx, secret_prompt=secret_fn, write_secret=write_secret or write_env_secret)
+
+
+def choose_env(pack, input_fn=input, out=print) -> str | None:
+    """Ask which environment to test on. Enter = staging. Production needs an explicit yes."""
+    from .preflight.gap_resolver import normalize_env
+    known = {e for a in pack.apps.values() for e in a.get("envs", {})}
+    out("\nWhich environment should I test on?")
+    for n, (e, name) in enumerate([("staging", "staging"), ("preprod", "pre-prod"), ("prod", "production")], 1):
+        out(f"  {n}. {name}" + ("" if e in known else "  (no URLs on record yet: I'll ask for them and save them)"))
+    while True:
+        raw = input_fn("  > [Enter = staging] ").strip()
+        env = normalize_env(raw) if raw else "staging"
+        if env:
+            break
+        out("  Please answer 1, 2, 3, staging, pre-prod or production.")
+    if env == "prod" and not confirm_prod(input_fn, out):
+        return None
+    return env
+
+
+def confirm_prod(input_fn=input, out=print) -> bool:
+    out("Production: I'll only read, and I'll ask you before every action that changes data. Nothing can be"
+        " pre-approved, no real payments unless you say so, and any setting I change I put back.")
+    return input_fn("  Test on production? [y/N] ").strip().lower() in ("y", "yes")
 
 
 def console_approver(input_fn=input, out=print):
@@ -51,13 +75,26 @@ def console_approver(input_fn=input, out=print):
     return approve
 
 
-def plan_gate(plan: TestPlan, input_fn=input, out=print) -> tuple[bool, list[str]]:
-    """Returns (approved, action types pre-approved for this run)."""
+def plan_gate(plan: TestPlan, input_fn=input, out=print, policy=None, issues: list[str] | None = None) -> tuple[bool, list[str]]:
+    """Returns (approved, action types pre-approved for this run). Always-ask actions (settings, posting,
+    email, prod writes) are never offered for pre-approval; they are asked each time."""
     pre = []
-    if plan.preapprovable_actions:
-        out("\nThis run repeats these actions: " + ", ".join(plan.preapprovable_actions))
+    allowed = list(plan.preapprovable_actions)
+    ask_each = []
+    if policy is not None:
+        ask_each = [a for a in allowed if not policy.can_preapprove(a)]
+        allowed = [a for a in allowed if a not in ask_each]
+    if allowed:
+        out("\nThis run repeats these actions: " + ", ".join(allowed))
         a = input_fn("  Pre-approve them for this run? [y/N] ").strip().lower()
         if a in ("y", "yes"):
-            pre = list(plan.preapprovable_actions)
-    ok = input_fn("\nStart the run? [y/N] ").strip().lower() in ("y", "yes")
+            pre = allowed
+    if ask_each:
+        out("I'll ask you before each of these: " + ", ".join(ask_each) + ".")
+    blocking = [i for i in (issues or []) if not i.startswith("requirement ")]
+    if blocking:
+        out("\nThe plan still has problems (listed above).")
+        ok = input_fn("Start the run anyway? [y/N] ").strip().lower() in ("y", "yes")
+    else:
+        ok = input_fn("\nStart the run? [y/N] ").strip().lower() in ("y", "yes")
     return ok, pre

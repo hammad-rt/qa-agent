@@ -24,7 +24,18 @@ Rules:
 - If the task leaves a step out but it is needed (login, navigation, setup), add it with inferred=true,
   inferred_reason and inferred_source ("facts.md", "lesson", "task comment"...). Never invent expected results.
 - Put irreversible steps last for a record, or use a fresh record.
-- Admin/config cases must include a restore step (restores=true).
+- Never make up amounts for limits, thresholds or settings. First read the current value (a step that records it,
+  listed in values_to_record), then write later steps relative to it: "declared value = the recorded threshold",
+  "threshold + 1". Boundaries are tested exactly at the value and just past it.
+- Settings changes: record the original value before changing it, and add ONE restore step (restores=true,
+  action_type as for the change) after the LAST case that needs the changed value, even if several cases change it.
+- Test data that needs a record in a different state (e.g. a client made exempt): add the change as an explicit
+  step (changes_data, action_type), order cases so those needing the original state run first (depends_on), and
+  change the record back at the end (restores=true).
+- Persistence checks ("existing orders keep ..."): create the record first, make the change, then REOPEN that
+  record and read the field. Reading a settings page alone does not prove it.
+- When the user's answers below say how to get test data, follow them and add the needed steps
+  (inferred=true, inferred_source="user answer").
 - Cases that cannot be tested from the UI: type "not_ui" with a skip_reason.
 - requirements: list what the run needs, as keys:
     env.<env>.<app>         (URL of an app on an environment)

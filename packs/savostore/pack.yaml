@@ -7,6 +7,11 @@ redmine:
   wiki_project: null            # null = same project as the issue
   wiki_pages: [Staging_Cardentials]
 
+# Ask which portal/CRM user to use at the start of every run (Enter keeps the last one used).
+# The usernames below are only the first suggestion on staging. Set false to always use them.
+ask_accounts_each_run: true
+# Environments: staging, preprod, prod. Missing pre-prod URLs are asked once and saved with their source.
+
 apps:
   portal:
     label: Customer portal

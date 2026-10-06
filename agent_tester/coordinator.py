@@ -66,6 +66,28 @@ def read_snapshot(plan: TestPlan, state: RunState, testers: dict[str, Tester], l
     return got
 
 
+def restore_pass(plan: TestPlan, state: RunState, testers: dict[str, Tester], unrestored: list[dict]) -> list[dict]:
+    """After the cases: put back settings that were changed but not restored and verified (even when a case
+    failed or stopped early). Each change still goes through the approval gate. Returns what is still unrestored."""
+    from .ledger import Ledger
+    from .models import Step
+    steps = [Step(text=f"Set '{u['setting']}' back to {u['original']!r}, re-read it, then call "
+                       f"record_restored('{u['setting']}', <value read>, verified=true)",
+                  app=u["app"], changes_data=True, action_type="change_settings", restores=True)
+             for u in unrestored]
+    pseudo = PlannedCase(id="RESTORE", title="restore settings changed by this run", steps=steps)
+    for app, idx in app_turns(pseudo):
+        if app not in testers:
+            state.data["notes"].append(f"restore on {app}: no tester for this app")
+            continue
+        try:
+            testers[app](app, brief_for(plan, pseudo, idx, state), state)
+        except Exception as e:  # noqa: BLE001
+            state.data["notes"].append(f"restore on {app} failed: {type(e).__name__}: {e}")
+    state.checkpoint("restore pass done")
+    return Ledger(state).unrestored()
+
+
 def run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge: Judge,
              on_case_done: Callable[[CaseResult], None] | None = None, max_retries: int = 1) -> dict[str, CaseResult]:
     state.checkpoint("run started", status="running")

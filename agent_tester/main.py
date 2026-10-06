@@ -98,6 +98,11 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
     print(f"Fetching #{task_id} from Redmine...")
     first = rm.issue(task_id)
     pack = find_pack(settings.packs_dir, [first["project"]["id"]])
+    if env is None and pack is not None:
+        env = gate.choose_env(pack)
+        if env is None:
+            print("Stopped: production not confirmed.")
+            return 2
     bundle = rm.fetch_task(task_id, pack.config["redmine"].get("test_case_subject_prefix", "Test Cases - "))
     from . import casegen
     generate = casegen.needs_generation(bundle, pack.config["redmine"].get("test_case_subject_prefix", "Test Cases - "))
@@ -126,7 +131,8 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
     from .agents.llm import LLMOutputError
     try:
         plan = asyncio.run(plan_task(settings, pack, task_text, task_id, env, only_case=",".join(only) or None,
-                                     lessons=lessons_mem.as_prompt(lessons_mem.preload()), trace_path=state.dir / "trace.jsonl", generate=generate))
+                                     lessons=lessons_mem.as_prompt(lessons_mem.preload()), trace_path=state.dir / "trace.jsonl", generate=generate,
+                                     preapprovable=list(pack.config.get("preapprovable_actions", []))))
     except LLMOutputError as e:
         lessons_mem.store.close()
         print(f"\nPlanning stopped: {e}")
@@ -145,6 +151,7 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
     policy = from_pack(pack, env, approver=gate.console_approver())
     ctx = G.GapContext(pack=pack, env=env, memory=memory, wiki_texts=wiki, task_text=bundle.all_text(),
                        url_checker=G.http_url_checker(), allow_hosts=policy.allow_hosts)
+    G.ensure_account_requirements(plan, pack, env)
     G.resolve(plan.requirements, ctx)
     issues = check_plan(plan)
     if generate:
@@ -154,6 +161,37 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
         for n in casegen.coverage_notes(plan, bundle.all_text()):
             print(f"  note: {n}")
     gate.ask_batch(plan.requirements, ctx)
+    user_answers = {r.key: r.value for r in plan.requirements
+                    if r.kind not in ("url", "account") and r.source == "user" and r.value}
+    if user_answers:
+        print("\nUpdating the plan with your answers...")
+        try:
+            new = asyncio.run(plan_task(settings, pack, task_text, task_id, env, only_case=",".join(only) or None,
+                                        lessons=memory.as_prompt(memory.preload()), trace_path=state.dir / "trace.jsonl",
+                                        generate=generate, answers=user_answers,
+                                        preapprovable=list(pack.config.get("preapprovable_actions", []))))
+        except LLMOutputError as e:
+            print(f"Couldn't update the plan ({e}); keeping the first plan.")
+            new = None
+        if new is not None:
+            if only:
+                from .modes import filter_plan
+                new = filter_plan(new, [c for c in only if c in {x.id for x in new.cases}])
+            old = {r.key: r for r in plan.requirements}
+            for r in new.requirements:
+                if r.key in old and old[r.key].status == "resolved":
+                    new.requirements[new.requirements.index(r)] = old[r.key]
+            for k, r in old.items():                 # keep answered items the new plan forgot to list
+                if r.status == "resolved" and k not in {x.key for x in new.requirements}:
+                    new.requirements.append(r)
+            plan = new
+            G.ensure_account_requirements(plan, pack, env)
+            G.resolve(plan.requirements, ctx)
+            issues = check_plan(plan)
+            if generate:
+                issues += casegen.check_generated(plan, casegen.task_sources(bundle, pack.facts))
+            gate.show_plan(plan, issues)
+            gate.ask_batch(plan.requirements, ctx)
     if generate:
         state.data["case_answers"] = casegen.ask_case_questions(plan)
         plan = casegen.edit_cases(plan)
@@ -170,7 +208,7 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
         state.checkpoint("dry run: stopped after plan gate", status="dry_run")
         print(f"\nDry run done. Plan saved in {state.path}")
         return 0
-    ok, pre = gate.plan_gate(plan)
+    ok, pre = gate.plan_gate(plan, policy=policy, issues=check_plan(plan))
     if not ok:
         state.checkpoint("user stopped at plan gate", status="stopped")
         return 1
@@ -204,6 +242,13 @@ def _execute(settings, pack, plan, state, policy, memory) -> int:
             progress.started(f"#{plan.task_id} on {plan.env}")
             try:
                 results = run_plan(plan, state, testers, make_judge(settings, pack, memory), on_case_done=progress.case_done)
+                left = Ledger(state).unrestored()
+                if left:
+                    print("\nThese settings were changed and not put back: " +
+                          ", ".join(f"{u['app']}:{u['setting']} (was {u['original']})" for u in left))
+                    if input("Put them back now? [Y/n] ").strip().lower() in ("", "y", "yes"):
+                        from .coordinator import restore_pass
+                        restore_pass(plan, state, testers, left)
             except RunPaused as e:
                 progress.paused(str(e))
                 print(f"Resume with: python -m agent_tester resume {state.dir}")
@@ -343,11 +388,22 @@ def cmd_rerun(settings: Settings, task_id: int, cases: str) -> int:
     pack = _pack_for_run(settings, plan)
     state = RunState.new(settings.runs_dir, task_id)
     print(f"Rerunning {', '.join(c.id for c in plan.cases)} from {src.name}. Run folder: {state.dir}")
+    from .preflight import gap_resolver as G
+    if G.ask_accounts_each_run(pack):             # users are chosen every run, reruns included
+        accts = [r for r in plan.requirements if r.kind == "account"]
+        for r in accts:
+            r.status, r.source, r.value = "missing", None, None
+        ctx = G.GapContext(pack=pack, env=plan.env, memory=open_memory(settings, pack), wiki_texts={}, task_text="")
+        G.resolve(accts, ctx)
+        gate.ask_batch(accts, ctx)
+        if G.open_questions(accts):
+            print("\nStill missing: " + ", ".join(r.key for r in G.open_questions(accts)) + ". Stopping before the run.")
+            return 2
     gate.show_plan(plan, check_plan(plan))
-    ok, pre = gate.plan_gate(plan)
+    policy = from_pack(pack, plan.env, approver=gate.console_approver())
+    ok, pre = gate.plan_gate(plan, policy=policy, issues=check_plan(plan))
     if not ok:
         return 1
-    policy = from_pack(pack, plan.env, approver=gate.console_approver())
     policy.preapprove(pre)
     for r in plan.requirements:
         if r.kind == "url" and r.value:
@@ -535,7 +591,7 @@ def main(argv=None) -> int:
     t.add_argument("task_id", type=int)
     t.add_argument("--cases", "--case", dest="case", help="comma-separated case ids, e.g. TC1,TC3")
     t.add_argument("--retest-bug", type=int, help="known bug number from facts.md, or a Redmine issue posted from a draft")
-    t.add_argument("--env", default="staging", choices=["staging", "prod"])
+    t.add_argument("--env", default=None, help="staging, pre-prod or production (asked if not given)")
     t.add_argument("--dry-run", action="store_true", help="plan and questions only")
     t.add_argument("--email", action="store_true", help="email the report to REPORT_EMAIL_TO")
     t.add_argument("--email-progress", action="store_true", help="also email start, halfway, pause and finish")
@@ -589,8 +645,17 @@ def main(argv=None) -> int:
     if a.cmd == "check":
         return cmd_check(settings)
     if a.cmd == "test":
-        if a.env == "prod":
-            print("Prod runs are read-only; every write needs your approval.")
+        if a.env is not None:
+            from .preflight.gap_resolver import normalize_env
+            env = normalize_env(a.env)
+            if env is None:
+                print(f"Unknown environment {a.env!r}: use staging, pre-prod or production.")
+                return 2
+            if env == "prod":
+                from .gate import confirm_prod
+                if not confirm_prod():
+                    return 2
+            a.env = env
         return cmd_test(settings, a.task_id, a.case, a.env, a.dry_run, a.retest_bug, a.email, a.email_progress)
     if a.cmd == "rerun":
         return cmd_rerun(settings, a.task_id, a.cases)

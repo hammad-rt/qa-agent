@@ -84,6 +84,8 @@ def resolve_url(req: Requirement, app: str, ctx: GapContext) -> Requirement:
         req.value, req.source = row["value"], f"memory ({row['source']})"
         _check_url(req, row["value"], ctx)
         if req.status == "resolved":
+            if ctx.allow_hosts is not None and _host(row["value"]) not in ctx.allow_hosts:
+                ctx.allow_hosts.append(_host(row["value"]))
             return req
         if req.status == "failed_check" and hasattr(ctx.memory, "mark_stale"):
             ctx.memory.mark_stale(sc, req.key)      # comes back as a question (tech spec 7.5)
@@ -114,8 +116,46 @@ def resolve_url(req: Requirement, app: str, ctx: GapContext) -> Requirement:
     return req
 
 
+ENVS = ("staging", "preprod", "prod")
+ENV_ALIASES = {"staging": "staging", "stage": "staging", "stg": "staging",
+               "preprod": "preprod", "pre-prod": "preprod", "pre prod": "preprod", "pre-production": "preprod",
+               "uat": "preprod", "prod": "prod", "production": "prod", "live": "prod"}
+
+
+def normalize_env(text: str | None) -> str | None:
+    t = (text or "").strip().lower()
+    if t in ("1", "2", "3"):
+        return ENVS[int(t) - 1]
+    return ENV_ALIASES.get(t)
+
+
+def password_env_for(base: str, username: str, env: str = "staging") -> str:
+    """One stored password per user and environment, so switching users or environments
+    never reuses another account's password."""
+    slug = re.sub(r"[^A-Z0-9]+", "_", (username or "").upper()).strip("_")
+    parts = [base] + ([env.upper()] if env != "staging" else []) + ([slug] if slug else [])
+    return "__".join(parts)
+
+
+def ask_accounts_each_run(pack) -> bool:
+    return bool(pack.config.get("ask_accounts_each_run", True))
+
+
 def resolve_account(req: Requirement, app: str, role: str, ctx: GapContext) -> Requirement:
     sc = scope(ctx.pack)
+    if ask_accounts_each_run(ctx.pack):
+        acct = ctx.pack.accounts(app).get(role) or {}
+        row = ctx.memory.get(sc, f"{req.key}.{ctx.env}.last_used")
+        label = ctx.pack.apps.get(app, {}).get("label", app)
+        req.sources_checked += ["asked each run"]
+        req.default = (row or {}).get("value") or (acct.get("username") if ctx.env == "staging" else None)
+        req.value, req.status = None, "missing"
+        req.secret_env = acct.get("password_env") or f"{ctx.pack.slug.upper()}_{app.upper()}_{role.upper()}_PASSWORD"
+        req.must_have = req.must_have or list(acct.get("role_markers", []))
+        req.question = (f"Which {role} user should I use on {label} ({ctx.env})?"
+                        + (f" [Enter = {req.default}]" if req.default else "")
+                        + " I'll ask for the password in a masked prompt if I don't have it for that user.")
+        return req
     acct = ctx.pack.accounts(app).get(role)
     req.sources_checked.append("pack")
     if not acct:
@@ -155,8 +195,35 @@ def resolve_other(req: Requirement, ctx: GapContext) -> Requirement:
     return req
 
 
+def ensure_account_requirements(plan, pack, env: str | None = None) -> list[str]:
+    """Make sure every app the plan touches has its URL for this environment and (when accounts are
+    asked each run) its accounts listed, even if the planner forgot them. Returns the keys it added."""
+    env = env or plan.env
+    have = {r.key for r in plan.requirements}
+    text = " ".join([r.key for r in plan.requirements] + [
+        f"{c.title} " + " ".join(f"{s.app} {s.text}" for s in c.steps) for c in plan.cases]).lower()
+    added = []
+    for app, cfg in pack.apps.items():
+        names = {app.lower(), str(cfg.get("label", "")).lower().split(" (")[0]} - {""}
+        if not any(n in text for n in names):
+            continue
+        if f"env.{env}.{app}" not in have:
+            plan.requirements.append(Requirement(key=f"env.{env}.{app}", kind="url"))
+            added.append(f"env.{env}.{app}")
+        if not ask_accounts_each_run(pack):
+            continue
+        for role in cfg.get("accounts", {}):
+            key = f"account.{app}.{role}"
+            if key not in have:
+                plan.requirements.append(Requirement(key=key, kind="account"))
+                added.append(key)
+    return added
+
+
 def resolve(reqs: list[Requirement], ctx: GapContext) -> list[Requirement]:
     for r in reqs:
+        if r.status == "resolved" and (r.source or "").startswith("user"):
+            continue                     # already answered by the user in this run
         parts = r.key.split(".")
         if parts[0] == "env" and len(parts) >= 3:
             r.kind = "url"
@@ -191,15 +258,26 @@ def apply_answers(reqs: list[Requirement], answers: dict[str, str], ctx: GapCont
                 ctx.allow_hosts.append(_host(url))
             ctx.memory.put(sc, r.key, url, source=r.source)
         elif r.kind == "account":
-            if a and not r.value:
+            if a:
                 r.value = a
+            elif not r.value and r.default:
+                r.value = r.default
+            if r.value and ask_accounts_each_run(ctx.pack):
+                base = (r.secret_env or f"{ctx.pack.slug.upper()}_ACCOUNT_PASSWORD").split("__")[0]
+                pack_user = (ctx.pack.accounts(r.key.split(".")[1]).get(r.key.split(".")[2]) or {}).get("username") \
+                    if r.key.count(".") >= 2 else None
+                # the pack's own env var always held the pack user's password, so that user keeps it
+                r.secret_env = (base if r.value == pack_user and ctx.env == "staging"
+                                else password_env_for(base, r.value, ctx.env))
+                ctx.memory.put(sc, f"{r.key}.{ctx.env}.last_used", r.value, source="user")
             if r.secret_env and not os.environ.get(r.secret_env) and secret_prompt:
                 secret = secret_prompt(f"Password for {r.value} ({r.secret_env}): ")
                 if secret:
                     write_secret(r.secret_env, secret)
             if r.value and r.secret_env and os.environ.get(r.secret_env):
                 r.status, r.source = "resolved", r.source or "user"
-                ctx.memory.put(sc, r.key, r.value, source="user", secret_env=r.secret_env)
+                if not ask_accounts_each_run(ctx.pack):
+                    ctx.memory.put(sc, r.key, r.value, source="user", secret_env=r.secret_env)
         else:
             if a:
                 r.value, r.status, r.source = redact(a), "resolved", "user"

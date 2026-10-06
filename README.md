@@ -62,6 +62,23 @@ General rules: `core/core-testing-spec.md`. Project packs: `packs/<slug>/` (Savo
 - The pack is picked by the task's Redmine project id. Memory, allowlist, known bugs and helpers are per pack
   (see the fictional fixture in `tests/fixtures/packs/`).
 
+## Live-run fixes (6 Oct)
+
+- **Environment asked each run.** `test <id>` asks staging, pre-prod or production (Enter = staging), or take
+  `--env staging|pre-prod|production`. URLs missing for an environment (pre-prod today) are asked once and
+  saved with their source. Production asks for an explicit yes, never pre-approves anything, asks before every
+  data change, and the staging test card is never pre-approved off staging.
+- **Users asked each run.** Every run (reruns too) asks which portal and CRM user to use; Enter keeps the last
+  one used for that environment. Passwords are kept per user and environment in `.env`
+  (e.g. `SAVOSTORE_CRM_PASSWORD__HAMMAD_IQBAL`), asked in a masked prompt only the first time. Turn off per pack
+  with `ask_accounts_each_run: false`.
+- **Settings changes** are never pre-approved; the agent asks before each one instead of crashing.
+- **Plans** read current values before testing around them, change records (like an exempt client) as explicit
+  steps that are set back at the end, restore settings once after the last case, and reopen records for
+  persistence checks. Answers at the plan gate are fed back to the planner.
+- **Restore pass.** If any setting is still changed after the run (even after failures), the agent lists it and
+  offers to put it back.
+
 ## Phase 8: cases from the task description
 - When a task has no "Test Cases - ..." child, the planner writes cases (G1, G2...) from the description,
   comments, parent and facts.md: main flow, boundaries for every limit, invalid input, cross-app checks.

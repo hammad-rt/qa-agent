@@ -1,0 +1,77 @@
+"""Action policy enforced in code: domain allowlist, risky actions, approvals, run pre-approvals."""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from typing import Callable
+from urllib.parse import urlparse
+
+
+class PolicyViolation(PermissionError):
+    pass
+
+
+@dataclass
+class Policy:
+    allow_hosts: list[str]
+    risky_patterns: list[str]
+    preapprovable: list[str]
+    always_ask: list[str]
+    preapproved: set[str] = field(default_factory=set)
+    env: str = "staging"
+    approver: Callable[[str, str, dict], bool] | None = None   # (action, reason, details) -> approved?
+    log: list[dict] = field(default_factory=list)
+
+    def preapprove(self, action_types: list[str]) -> None:
+        bad = [a for a in action_types if a in self.always_ask or a not in self.preapprovable]
+        if bad:
+            raise PolicyViolation(f"cannot pre-approve: {bad}")
+        self.preapproved |= set(action_types)
+
+    def allow_host(self, host: str) -> None:
+        """Called only after the user confirms a URL found outside the pack."""
+        if host not in self.allow_hosts:
+            self.allow_hosts.append(host)
+
+    def check_url(self, url: str) -> None:
+        host = (urlparse(url).hostname or "").lower()
+        if not host:
+            return
+        if not any(host == h or host.endswith("." + h) for h in self.allow_hosts):
+            raise PolicyViolation(f"domain not allowed: {host}")
+
+    def is_risky(self, label: str) -> bool:
+        return any(re.search(p, label or "") for p in self.risky_patterns)
+
+    def gate(self, action: str, reason: str, *, action_type: str | None = None,
+             risky: bool = False, details: dict | None = None) -> str:
+        """Return 'not_needed' | 'pre_approved' | 'approved'; raise if denied."""
+        details = details or {}
+        if self.env == "prod" and (risky or action_type):
+            action_type = action_type or "prod_write"
+        needs = risky or bool(action_type)
+        if not needs:
+            return "not_needed"
+        if action_type and action_type in self.preapproved and action_type not in self.always_ask and self.env != "prod":
+            self.log.append({"action": action, "type": action_type, "approval": "pre_approved"})
+            return "pre_approved"
+        if self.approver is None:
+            self.log.append({"action": action, "type": action_type, "approval": "denied", "why": "no approver"})
+            raise PolicyViolation(f"approval needed and nobody to ask: {action}")
+        ok = self.approver(action, reason, details)
+        self.log.append({"action": action, "type": action_type, "approval": "approved" if ok else "denied"})
+        if not ok:
+            raise PolicyViolation(f"denied by user: {action}")
+        return "approved"
+
+
+def from_pack(pack, env: str, approver=None) -> Policy:
+    c = pack.config
+    return Policy(
+        allow_hosts=list(c.get("allowlist", {}).get(env, [])),
+        risky_patterns=list(c.get("risky_patterns", [])),
+        preapprovable=list(c.get("preapprovable_actions", [])),
+        always_ask=list(c.get("always_ask_actions", [])),
+        env=env,
+        approver=approver,
+    )

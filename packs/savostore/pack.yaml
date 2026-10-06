@@ -1,0 +1,57 @@
+# Savostore project pack. No secrets here: passwords are referenced by env var name only.
+slug: savostore
+name: Savostore
+redmine:
+  project_ids: [1567]
+  test_case_subject_prefix: "Test Cases - "
+  wiki_project: null            # null = same project as the issue
+  wiki_pages: [Staging_Cardentials]
+
+apps:
+  portal:
+    label: Customer portal
+    envs:
+      staging: https://staging5.rolustech.com:4225/
+      prod: https://app.savostore.com/
+    accounts:
+      customer:
+        username: sidney@savostore.com
+        password_env: SAVO_STAGING_PORTAL_PASSWORD
+  crm:
+    label: CRM (SuiteCRM)
+    envs:
+      staging: https://staging5.rolustech.com:4220/
+      prod: https://savo.store/
+    accounts:
+      admin:
+        username: maria.tariq
+        password_env: SAVOSTORE_CRM_PASSWORD
+        role_markers: ["Admin"]      # text that must be visible after login for the admin role
+
+allowlist:
+  staging: [staging5.rolustech.com]
+  prod: [app.savostore.com, savo.store]
+
+# Action types the user may pre-approve for a whole run at the plan gate.
+preapprovable_actions:
+  - pay_staging_test_card
+  - move_order_status
+  - create_test_order
+  - add_parcel
+
+# Never pre-approvable: always a one-off approval.
+always_ask_actions:
+  - change_settings
+  - redmine_post
+  - send_email
+  - prod_write
+
+risky_patterns:
+  - "(?i)\\bpay( now)?\\b"
+  - "(?i)\\bplace order\\b"
+  - "(?i)\\bsubmit\\b"
+  - "(?i)\\bconfirm\\b"
+  - "(?i)\\bdelete\\b"
+  - "(?i)checkout\\.stripe\\.com"
+
+memory_areas: [rewards, protection, parcels, orders, payments, ui]

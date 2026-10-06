@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+from urllib.parse import urlparse
 import os
 import time
 from pathlib import Path
@@ -24,22 +26,6 @@ READ_ONLY_BROWSER = {"browser_snapshot", "browser_take_screenshot", "browser_wai
 BLOCKED_BROWSER = {"browser_evaluate", "browser_run_code", "browser_install", "browser_file_upload"}
 
 
-def browser_origins(allowed_hosts: list[str], urls: list[str]) -> list[str]:
-    """Playwright's --allowed-origins matches scheme://host:port exactly, so a site on a port
-    (staging5...:4225) needs its own origin; a bare https://host only covers port 443."""
-    from urllib.parse import urlparse
-    hosts = [h.lower() for h in allowed_hosts if h]
-    out = [f"https://{h}" for h in hosts]
-    for u in urls:
-        p = urlparse(u or "")
-        host = (p.hostname or "").lower()
-        if p.scheme in ("http", "https") and host and any(host == h or host.endswith("." + h) for h in hosts):
-            o = f"{p.scheme}://{host}" + (f":{p.port}" if p.port else "")
-            if o not in out:
-                out.append(o)
-    return out
-
-
 def run_urls(pack, env: str, state) -> dict:
     """app -> base URL for this run: the URL resolved at the plan gate wins over pack.yaml (pre-prod etc.)."""
     urls = {a: pack.url(a, env) for a in pack.apps if pack.url(a, env)}
@@ -51,7 +37,11 @@ def run_urls(pack, env: str, state) -> dict:
     return urls
 
 
-def playwright_toolset(run_dir: Path, app: str, allowed_hosts: list[str], urls: list[str] | None = None):
+def playwright_toolset(run_dir: Path, app: str):
+    """No --allowed-origins: Playwright matches it per scheme://host:port and blocks every other request,
+    including a site's own CDN files and payment pages (it is not a security boundary either). The sites a run
+    may use are enforced in code instead: navigate is checked before it runs, and after every browser action
+    the page address is checked; a new site needs the user's OK (TesterSession.after_tool)."""
     from mcp import StdioServerParameters
     try:
         from google.adk.tools.mcp_tool.mcp_toolset import McpToolset as Toolset
@@ -62,11 +52,8 @@ def playwright_toolset(run_dir: Path, app: str, allowed_hosts: list[str], urls: 
     out = run_dir / "shots"
     profile = run_dir / "profiles" / app
     profile.mkdir(parents=True, exist_ok=True)
-    origins = ";".join(browser_origins(allowed_hosts, urls or []))
     args = ["-y", "@playwright/mcp@latest", "--headless", "--isolated", "--output-dir", str(out),
             "--viewport-size", "1366,900"]
-    if origins:
-        args += ["--allowed-origins", origins]
     return Toolset(connection_params=StdioConnectionParams(
         server_params=StdioServerParameters(command="npx", args=args), timeout=60))
 
@@ -88,6 +75,7 @@ class TesterSession:
         self.current_step: int | None = None
         self.memory, self.ledger = memory, ledger
         self.helpers, self.pack, self.env, self.toolset = helpers or {}, pack, env, toolset
+        self.off_site: str | None = None      # page address outside this run's sites, until the user allows it or we go back
 
     # ---- tools exposed to the model -------------------------------------------------
     def tools(self):
@@ -238,6 +226,10 @@ class TesterSession:
         if name in BLOCKED_BROWSER:
             return self._deny(name, args, "this browser tool is not allowed")
         if name.startswith("browser_"):
+            if self.off_site and name not in ("browser_navigate", "browser_navigate_back", "browser_snapshot",
+                                              "browser_take_screenshot"):
+                return self._deny(name, args, f"the browser is on {self.off_site}, which this run may not use; "
+                                              "go back (browser_navigate_back) or navigate to the app")
             try:
                 if name == "browser_navigate":
                     self.policy.check_url(args.get("url", ""))
@@ -257,8 +249,44 @@ class TesterSession:
         if tool.name == "browser_snapshot":
             self.last_snapshot = _text_of(tool_response)
         if tool.name.startswith("browser_"):
+            blocked = self._check_page_site(tool.name, _text_of(tool_response))
+            if blocked:
+                return {"error": blocked}
             return _redact_obj(tool_response, self.keep_emails)
         return None
+
+    def _check_page_site(self, tool_name: str, text: str) -> str | None:
+        """The app may send the browser to another site (e.g. a payment page). A site this run hasn't
+        been allowed to use needs the user's OK once; after that it is allowed for the rest of the run."""
+        m = re.search(r"Page URL:\s*(\S+)", text or "")
+        if not m:
+            return None
+        url = m.group(1)
+        host = (urlparse(url).hostname or "").lower()
+        if not host or urlparse(url).scheme not in ("http", "https"):
+            self.off_site = None
+            return None
+        try:
+            self.policy.check_url(url)
+            self.off_site = None
+            return None
+        except PolicyViolation:
+            pass
+        try:
+            self.policy.gate(f"continue on {host} (the app sent the browser to {url})",
+                             f"{self.case_id} on {self.app}: a site this run hasn't used", risky=True,
+                             details={"tool": tool_name, "new_site": host})
+            self.policy.allow_host(host)
+            self.off_site = None
+            self.state.log_action(case_id=self.case_id, app=self.app, tool="allow_site", args={"host": host},
+                                  plan_step=self.current_step, approval="approved")
+            return None
+        except PolicyViolation as e:
+            self.off_site = host
+            self.state.log_action(case_id=self.case_id, app=self.app, tool="allow_site", args={"host": host},
+                                  plan_step=self.current_step, approval="denied", outcome=str(e))
+            return (f"Blocked: the browser went to {host}, which this run may not use ({e}). "
+                    "Go back with browser_navigate_back, or call finish() and say the case needs that site.")
 
     def _deny(self, name, args, why):
         self.state.log_action(case_id=self.case_id, app=self.app, tool=name, args=_safe_args(args),
@@ -311,7 +339,7 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
         policy.read_only = bool(brief.get("read_only")) or was_ro
         try:
             urls = run_urls(pack, env, state)
-            toolset = playwright_toolset(run_dir, app, policy.allow_hosts, list(urls.values()))
+            toolset = playwright_toolset(run_dir, app)
             sess = TesterSession(app, brief, state, policy, evidence, settings.max_tool_calls_per_case,
                                  settings.max_minutes_per_case, keep_emails=keep, memory=memory, ledger=Ledger(state),
                                  helpers=helpers, pack=pack, env=env, toolset=toolset)

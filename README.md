@@ -76,6 +76,9 @@ General rules: `core/core-testing-spec.md`. Project packs: `packs/<slug>/` (Savo
 - **Plans** read current values before testing around them, change records (like an exempt client) as explicit
   steps that are set back at the end, restore settings once after the last case, and reopen records for
   persistence checks. Answers at the plan gate are fed back to the planner.
+- **Sites per run.** The browser may use only the sites of the URLs picked or confirmed for this run (any port).
+  If the app sends it somewhere else, such as a payment page, it asks you once and then allows that site for the
+  rest of the run. The pack `allowlist` is only a list of known sites that don't need confirming at the plan gate.
 - **Restore pass.** If any setting is still changed after the run (even after failures), the agent lists it and
   offers to put it back.
 

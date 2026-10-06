@@ -83,6 +83,20 @@ def cmd_check(settings: Settings) -> int:
     return 0
 
 
+def run_sites(policy, plan) -> list[str]:
+    """The browser may use only the sites of this run's URLs (picked or confirmed at the plan gate);
+    anything else the app sends it to needs the user's OK during the run."""
+    from urllib.parse import urlparse
+    hosts = []
+    for r in plan.requirements:
+        if r.kind == "url" and r.value and r.status == "resolved":
+            h = (urlparse(r.value).hostname or "").lower()
+            if h and h not in hosts:
+                hosts.append(h)
+    policy.allow_hosts[:] = hosts
+    return hosts
+
+
 def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_run: bool,
              retest_bug: int | None = None, email: bool = False, email_progress: bool = False) -> int:
     from . import gate
@@ -208,6 +222,9 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
         state.checkpoint("dry run: stopped after plan gate", status="dry_run")
         print(f"\nDry run done. Plan saved in {state.path}")
         return 0
+    sites = run_sites(policy, plan)
+    print("\nThe browser will stay on: " + (", ".join(sites) or "no sites yet")
+          + ". If the app sends it anywhere else (like a payment page), I'll ask you first.")
     ok, pre = gate.plan_gate(plan, policy=policy, issues=check_plan(plan))
     if not ok:
         state.checkpoint("user stopped at plan gate", status="stopped")
@@ -302,10 +319,7 @@ def cmd_resume(settings: Settings, run_dir: Path) -> int:
     pack = find_pack(settings.packs_dir, [proj])
     policy = from_pack(pack, plan.env, approver=gate.console_approver())
     policy.preapprove(state.data.get("preapproved", []))
-    for r in plan.requirements:
-        if r.kind == "url" and r.value:
-            from urllib.parse import urlparse
-            policy.allow_host(urlparse(r.value).hostname or "")
+    run_sites(policy, plan)
     return _execute(settings, pack, plan, state, policy, open_memory(settings, pack))
 
 
@@ -401,14 +415,14 @@ def cmd_rerun(settings: Settings, task_id: int, cases: str) -> int:
             return 2
     gate.show_plan(plan, check_plan(plan))
     policy = from_pack(pack, plan.env, approver=gate.console_approver())
+    sites = run_sites(policy, plan)
+    print("\nThe browser will stay on: " + (", ".join(sites) or "no sites yet")
+          + ". If the app sends it anywhere else (like a payment page), I'll ask you first.")
     ok, pre = gate.plan_gate(plan, policy=policy, issues=check_plan(plan))
     if not ok:
         return 1
     policy.preapprove(pre)
-    for r in plan.requirements:
-        if r.kind == "url" and r.value:
-            from urllib.parse import urlparse
-            policy.allow_host(urlparse(r.value).hostname or "")
+    run_sites(policy, plan)
     state.set_plan(plan)
     state.data.update(approved=True, preapproved=pre, model=model_fingerprint(settings),
                       mode={"rerun_of": src.name, "cases": [c.id for c in plan.cases]})

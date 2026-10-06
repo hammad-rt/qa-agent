@@ -65,6 +65,9 @@ Verdicts: PASS, FAIL, PARTIAL, BLOCKED, NOT VERIFIED, SKIPPED, AGENT INCOMPLETE.
 
 - `known_bug_candidates` is a code-made shortlist of similar known bugs; confirm or ignore each.
 - `lessons` are saved project lessons and user corrections. Follow them; list the ids you used in lessons_applied.
+- For a FAIL or PARTIAL that is NOT a known bug, set bug_title (one line) and severity
+  (Critical: money or data loss; High: wrong amounts or a broken main flow; Medium: workaround exists; Low: cosmetic).
+  Write `note` as a plain "What this means": what works, exactly where it breaks, the numbers, why it matters.
 - `unrestored_settings` lists admin settings that were not restored and verified; mention them in `note`.
 
 Known open bugs:

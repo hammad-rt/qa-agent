@@ -1,8 +1,11 @@
 """CLI: python -m agent_tester <command>
 
   check                               connectivity to the LLM, Redmine and the pack's environments
-  test <task_id> [--case TC3] [--env staging] [--dry-run]
+  test <task_id> [--cases TC1,TC3] [--retest-bug N] [--env staging] [--dry-run] [--email] [--email-progress]
+  rerun <task_id> --cases TC2,TC4     rerun chosen cases from the latest approved plan (no new planning)
   resume <run_dir>
+  report <run_dir>                    rebuild report.html / report.pdf and bug drafts
+  bugs <run_dir> [--post]             list bug drafts; --post asks before posting each one to Redmine
   correct <run_dir> <case_id> <VERDICT> "<why>" [--general]   save a lesson now and fix the result
   memory list|pending|approve <ids>|retire <ids> [--project savostore]
   leftovers <run_dir>                 test data and settings the run left behind
@@ -79,7 +82,8 @@ def cmd_check(settings: Settings) -> int:
     return 0
 
 
-def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_run: bool) -> int:
+def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_run: bool,
+             retest_bug: int | None = None, email: bool = False, email_progress: bool = False) -> int:
     from . import gate
     from .agents.planner import plan_task
     from .plan_checks import check_plan
@@ -102,10 +106,26 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
     from .reliability import free_gb
     if free_gb(settings.runs_dir.parent) < settings.min_free_gb:
         print(f"Warning: less than {settings.min_free_gb:g} GB free disk.")
+    from .modes import cases_for_bug, parse_cases
+    only = parse_cases(case)
+    task_text = bundle.all_text()
+    if retest_bug:
+        linked, src = cases_for_bug(settings.runs_dir, task_id, retest_bug)
+        if linked:
+            print(f"Retesting bug {retest_bug}: cases {', '.join(linked)} (from {src.name}).")
+            only = list(dict.fromkeys(only + linked))
+        else:
+            bug = next((b for b in pack.known_bugs if b["n"] == retest_bug), None)
+            hint = bug["text"] if bug else f"Redmine issue #{retest_bug}"
+            print(f"No earlier run links cases to bug {retest_bug}; the planner will pick cases related to it.")
+            task_text += f"\n\nRETEST MODE: plan only the cases that check this fixed bug: {hint}"
     lessons_mem = open_memory(settings, pack)
-    plan = asyncio.run(plan_task(settings, pack, bundle.all_text(), task_id, env, only_case=case,
+    plan = asyncio.run(plan_task(settings, pack, task_text, task_id, env, only_case=",".join(only) or None,
                                  lessons=lessons_mem.as_prompt(lessons_mem.preload()), trace_path=state.dir / "trace.jsonl"))
     lessons_mem.store.close()
+    if only:                                   # code enforces the case selection, whatever the planner returned
+        from .modes import filter_plan
+        plan = filter_plan(plan, [c for c in only if c in {x.id for x in plan.cases}])
     wiki_proj = pack.config["redmine"].get("wiki_project") or bundle.issue["project"]["id"]
     wiki = {t: (rm.wiki_page(wiki_proj, t) or "") for t in pack.config["redmine"].get("wiki_pages", [])}
     memory = open_memory(settings, pack)
@@ -135,6 +155,7 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
     policy.preapprove(pre)
     state.data["approved"], state.data["preapproved"] = True, pre
     state.data["model"] = model_fingerprint(settings)
+    state.data["mode"] = {"retest_bug": retest_bug, "cases": only, "email": email, "email_progress": email_progress}
     return _execute(settings, pack, plan, state, policy, memory)
 
 
@@ -147,15 +168,23 @@ def _execute(settings, pack, plan, state, policy, memory) -> int:
     from .reliability import RunLock, RunLocked, apply_retention
     from .report.builder import build_report
 
+    from .progress import Progress
+    mode = state.data.get("mode") or {}
+    notifier = None
+    if mode.get("email") or mode.get("email_progress"):
+        from .notify import make_notifier
+        notifier = make_notifier()
+    progress = Progress(state, len(plan.cases), notifier=notifier if mode.get("email_progress") else None)
     try:
         with RunLock(settings.runs_dir / ".run.lock"):
             tester = make_tester(settings, pack, plan.env, policy, state.dir, memory=memory)
             testers = {app: tester for app in pack.apps}
+            progress.started(f"#{plan.task_id} on {plan.env}")
             try:
-                results = run_plan(plan, state, testers, make_judge(settings, pack, memory),
-                                   on_case_done=lambda r: print(f"  {r.case_id}: {r.verdict}" + (f" (still present: bug {r.known_bug})" if r.known_bug else "")))
+                results = run_plan(plan, state, testers, make_judge(settings, pack, memory), on_case_done=progress.case_done)
             except RunPaused as e:
-                print(f"\nPaused: {e}\nResume with: python -m agent_tester resume {state.dir}")
+                progress.paused(str(e))
+                print(f"Resume with: python -m agent_tester resume {state.dir}")
                 return 3
             except KeyboardInterrupt:
                 state.checkpoint("stopped by user (Ctrl-C)", status="paused")
@@ -172,8 +201,18 @@ def _execute(settings, pack, plan, state, policy, memory) -> int:
         print(f"{len(led.leftovers())} test record(s) left behind; see `leftovers {state.dir}`.")
     finish_memory(memory, pack, state)
     export_memory(memory, ROOT / "memory" / "memory-export.json")
-    out = build_report(state)
-    print(f"\nReport: {out}")
+    out = build_report(state, pack)
+    report = state.data.get("report_pdf") or out
+    counts: dict = {}
+    for r in results.values():
+        if r:
+            counts[r.verdict] = counts.get(r.verdict, 0) + 1
+    progress.finished(counts, report)
+    if notifier and mode.get("email"):
+        try:
+            notifier(f"QA report #{plan.task_id}", ", ".join(f"{v} {k}" for k, v in counts.items()), Path(report))
+        except Exception as e:  # noqa: BLE001
+            print(f"Report email not sent: {e}")
     trimmed = apply_retention(settings.runs_dir, keep=settings.run_retention)
     if trimmed:
         print(f"Trimmed {len(trimmed)} old run folder(s) to state.json and report only.")
@@ -228,7 +267,7 @@ def cmd_correct(settings, run_dir: Path, case_id: str, verdict: str, why: str, g
     fixed = CaseResult.model_validate({**old.model_dump(), "verdict": verdict,
                                        "note": f"{old.note or ''} Corrected by user: {why}".strip()})
     state.set_result(fixed)
-    build_report(state)
+    build_report(state, pack)
     print(f"Saved lesson #{mid} and updated {case_id}: {old.verdict} -> {verdict}.")
     return 0
 
@@ -263,15 +302,102 @@ def cmd_leftovers(run_dir: Path) -> int:
     return 0
 
 
+def cmd_rerun(settings: Settings, task_id: int, cases: str) -> int:
+    """Rerun selected cases from the latest approved plan. Goes through the plan gate again."""
+    from . import gate
+    from .modes import filter_plan, latest_plan, parse_cases
+    from .plan_checks import check_plan
+    from .run_state import RunState
+    from .tools.policy import from_pack
+    old, src = latest_plan(settings.runs_dir, task_id)
+    if old is None:
+        print(f"No approved plan for #{task_id} yet; use `test {task_id}` first.")
+        return 1
+    try:
+        plan = filter_plan(old, parse_cases(cases))
+    except ValueError as e:
+        print(e)
+        return 1
+    pack = _pack_for_run(settings, plan)
+    state = RunState.new(settings.runs_dir, task_id)
+    print(f"Rerunning {', '.join(c.id for c in plan.cases)} from {src.name}. Run folder: {state.dir}")
+    gate.show_plan(plan, check_plan(plan))
+    ok, pre = gate.plan_gate(plan)
+    if not ok:
+        return 1
+    policy = from_pack(pack, plan.env, approver=gate.console_approver())
+    policy.preapprove(pre)
+    for r in plan.requirements:
+        if r.kind == "url" and r.value:
+            from urllib.parse import urlparse
+            policy.allow_host(urlparse(r.value).hostname or "")
+    state.set_plan(plan)
+    state.data.update(approved=True, preapproved=pre, model=model_fingerprint(settings),
+                      mode={"rerun_of": src.name, "cases": [c.id for c in plan.cases]})
+    return _execute(settings, pack, plan, state, policy, open_memory(settings, pack))
+
+
+def cmd_report(settings: Settings, run_dir: Path, pack_slug: str | None) -> int:
+    from .preflight.pack_loader import load_pack
+    from .report.builder import build_report
+    from .run_state import RunState
+    state = RunState(run_dir)
+    pack = load_pack(settings.packs_dir / pack_slug) if pack_slug else _pack_for_run(settings, state.plan)
+    out = build_report(state, pack)
+    print(f"Report: {state.data.get('report_pdf') or out}")
+    return 0
+
+
+def cmd_bugs(settings: Settings, run_dir: Path, post: bool, pack_slug: str | None) -> int:
+    from . import gate
+    from .preflight.pack_loader import load_pack
+    from .preflight.redmine import Redmine
+    from .report import bug_drafts as B
+    from .run_state import RunState
+    from .tools.policy import from_pack
+    data = B.load(run_dir)
+    if not data["drafts"] and not data["still_present"]:
+        print("No bug drafts in this run. (Run `report` first if the run predates phase 4.)")
+        return 0
+    for d in data["drafts"]:
+        print(f"{d['id']} [{d['severity']}] {d['title']}  ({d['status']}" + (f", #{d['posted_issue']}" if d.get("posted_issue") else "") + ")")
+    for b in data["still_present"]:
+        print(f"still present: bug {b['n']} [{b['severity']}] ({', '.join(b['cases'])})")
+    if not post:
+        print(f"\nFull drafts: {run_dir / 'bug_drafts.md'}")
+        return 0
+    state = RunState(run_dir)
+    pack = load_pack(settings.packs_dir / pack_slug) if pack_slug else _pack_for_run(settings, state.plan)
+    rm = Redmine(settings.redmine_url, settings.redmine_api_key)
+    project = pack.config["redmine"]["project_ids"][0]
+    policy = from_pack(pack, "staging", approver=gate.console_approver())
+    posted = B.review_and_post(run_dir, lambda d, body: rm.create_issue(project, d["title"], body, relates_to=d["task_id"]), policy)
+    print(f"Posted {len(posted)} bug(s): " + ", ".join(f"#{i}" for i in posted) if posted else "Nothing posted.")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="agent_tester")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check")
     t = sub.add_parser("test")
     t.add_argument("task_id", type=int)
-    t.add_argument("--case")
+    t.add_argument("--cases", "--case", dest="case", help="comma-separated case ids, e.g. TC1,TC3")
+    t.add_argument("--retest-bug", type=int, help="known bug number from facts.md, or a Redmine issue posted from a draft")
     t.add_argument("--env", default="staging", choices=["staging", "prod"])
-    t.add_argument("--dry-run", action="store_true")
+    t.add_argument("--dry-run", action="store_true", help="plan and questions only")
+    t.add_argument("--email", action="store_true", help="email the report to REPORT_EMAIL_TO")
+    t.add_argument("--email-progress", action="store_true", help="also email start, halfway, pause and finish")
+    rr = sub.add_parser("rerun")
+    rr.add_argument("task_id", type=int)
+    rr.add_argument("--cases", required=True)
+    rp = sub.add_parser("report")
+    rp.add_argument("run_dir", type=Path)
+    rp.add_argument("--project")
+    bg = sub.add_parser("bugs")
+    bg.add_argument("run_dir", type=Path)
+    bg.add_argument("--post", action="store_true")
+    bg.add_argument("--project")
     r = sub.add_parser("resume")
     r.add_argument("run_dir", type=Path)
     c = sub.add_parser("correct")
@@ -294,7 +420,13 @@ def main(argv=None) -> int:
     if a.cmd == "test":
         if a.env == "prod":
             print("Prod runs are read-only; every write needs your approval.")
-        return cmd_test(settings, a.task_id, a.case, a.env, a.dry_run)
+        return cmd_test(settings, a.task_id, a.case, a.env, a.dry_run, a.retest_bug, a.email, a.email_progress)
+    if a.cmd == "rerun":
+        return cmd_rerun(settings, a.task_id, a.cases)
+    if a.cmd == "report":
+        return cmd_report(settings, a.run_dir, a.project)
+    if a.cmd == "bugs":
+        return cmd_bugs(settings, a.run_dir, a.post, a.project)
     if a.cmd == "correct":
         return cmd_correct(settings, a.run_dir, a.case_id, a.verdict, a.why, a.general, a.project)
     if a.cmd == "memory":

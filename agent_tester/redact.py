@@ -10,9 +10,22 @@ _TOKEN = re.compile(r"\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{8,}\b|\b[A-Fa-f0-
 _PASSWORD_KV = re.compile(r"(?i)(password|passwd|pwd|secret|api[_ -]?key)\s*[:=]\s*\S+")
 
 
+_STAMP = re.compile(r"20\d{6}-\d{6}")           # run folder ids like 7-20261006-100000 are not cards
+
+
+def _luhn(digits: str) -> bool:
+    total = 0
+    for i, ch in enumerate(reversed(digits)):
+        d = int(ch)
+        if i % 2:
+            d = d * 2 - 9 if d > 4 else d * 2
+        total += d
+    return total % 10 == 0
+
+
 def _mask_card(m: re.Match) -> str:
     digits = re.sub(r"\D", "", m.group())
-    if not 13 <= len(digits) <= 19:
+    if not 13 <= len(digits) <= 19 or _STAMP.search(m.group()) or not _luhn(digits):
         return m.group()
     return f"[card ****{digits[-4:]}]"
 
@@ -25,7 +38,7 @@ def redact(text: str, keep_emails: tuple[str, ...] = ()) -> str:
     t = _CARD.sub(_mask_card, t)
     keep = {e.lower() for e in keep_emails}
     t = _EMAIL.sub(lambda m: m.group() if m.group().lower() in keep else "[email]", t)
-    t = _PHONE.sub("[phone]", t)
+    t = _PHONE.sub(lambda m: m.group() if _STAMP.search(m.group()) else "[phone]", t)
     return t
 
 

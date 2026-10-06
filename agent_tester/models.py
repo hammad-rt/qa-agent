@@ -111,3 +111,5 @@ class CaseResult(BaseModel):
     note: str | None = None
     lessons_applied: list[int] = Field(default_factory=list)
     bug_draft_ids: list[str] = Field(default_factory=list)
+    severity: Literal["Critical", "High", "Medium", "Low"] | None = None   # for a new bug draft
+    bug_title: str | None = None                                           # short bug title for the draft

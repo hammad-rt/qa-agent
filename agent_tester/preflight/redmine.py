@@ -54,6 +54,43 @@ class Redmine:
             raise RedmineError(f"Redmine {r.status_code} on {path}")
         return r.json()
 
+    def _post(self, path: str, body: dict) -> dict:
+        if not self.key:
+            raise RedmineError("REDMINE_API_KEY is not set")
+        r = self.s.post(f"{self.base}{path}", json=body, headers={"X-Redmine-API-Key": self.key}, timeout=self.timeout)
+        if r.status_code >= 400:
+            raise RedmineError(f"Redmine {r.status_code} on POST {path}")
+        return r.json() if r.content else {}
+
+    def create_issue(self, project_id: int, subject: str, description: str, parent_id: int | None = None,
+                     relates_to: int | None = None) -> int:
+        """Only called after an approved gate (bug drafts). Returns the new issue id."""
+        body = {"project_id": project_id, "subject": subject, "description": description}
+        if parent_id:
+            body["parent_issue_id"] = parent_id
+        new_id = self._post("/issues.json", {"issue": body})["issue"]["id"]
+        if relates_to:
+            try:
+                self._post(f"/issues/{new_id}/relations.json", {"relation": {"issue_to_id": relates_to, "relation_type": "relates"}})
+            except RedmineError:
+                pass
+        return new_id
+
+    def project(self, project: str | int) -> dict:
+        return self._get(f"/projects/{project}.json")["project"]
+
+    def issues(self, project: str | int, limit: int = 50, subject_contains: str | None = None) -> list[dict]:
+        params = {"project_id": project, "limit": limit, "status_id": "*", "sort": "updated_on:desc"}
+        if subject_contains:
+            params["subject"] = f"~{subject_contains}"
+        return self._get("/issues.json", **params).get("issues", [])
+
+    def wiki_index(self, project: str | int) -> list[str]:
+        try:
+            return [p["title"] for p in self._get(f"/projects/{project}/wiki/index.json").get("wiki_pages", [])]
+        except RedmineError:
+            return []
+
     def issue(self, issue_id: int) -> dict:
         return self._get(f"/issues/{issue_id}.json", include="children,journals,attachments,relations")["issue"]
 

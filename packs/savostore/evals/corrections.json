@@ -1,0 +1,5 @@
+[
+  {"id": "A2", "verdict": "PASS", "why": "User confirmed: the limit after adding a parcel uses only the new unpaid shipping; intended."},
+  {"id": "A9", "verdict": "PASS", "why": "User confirmed: the limit after adding a parcel uses only the new unpaid shipping; intended."},
+  {"id": "B3", "verdict": "FAIL", "known_bugs": [2], "why": "User confirmed bug 2 is real."}
+]

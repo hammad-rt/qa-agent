@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from .config import ROOT, Settings
@@ -348,6 +349,33 @@ def cmd_report(settings: Settings, run_dir: Path, pack_slug: str | None) -> int:
     return 0
 
 
+def cmd_eval(settings: Settings, project: str, live: bool, rebuild: bool, cases: str | None) -> int:
+    """Replay self-test: judge past cases from their recorded results and score against the known answers."""
+    from .evals.extract import build_known_answers
+    from .evals.replay import load_known_answers, oracle_judge, replay
+    from .modes import parse_cases
+    from .preflight.pack_loader import load_pack
+    pack = load_pack(settings.packs_dir / project)
+    data = build_known_answers(pack) if rebuild or not (pack.root / "evals" / "known_answers.json").exists() \
+        else load_known_answers(pack)
+    print(f"Known answers: {len(data['cases'])} case(s) from {', '.join(data['sources'])}.")
+    if live:
+        from .agents.judge import make_judge
+        mem = open_memory(settings, pack)
+        judge = make_judge(settings, pack, mem)
+    else:
+        print("Offline check with the known answers as judge (plumbing only). Add --live to score the real judge.")
+        judge = oracle_judge(data["cases"])
+    out_dir = settings.runs_dir / f"eval-{pack.slug}-{datetime.now():%Y%m%d-%H%M%S}"
+    score = replay(data["cases"], judge, out_dir, parse_cases(cases) or None)
+    print(score.summary())
+    for row in score.rows:
+        if not row["agree"]:
+            print(f"  {row['key']}: expected {row['expected']}, got {row['got']}")
+    print(f"Details: {out_dir / 'replay_score.json'}")
+    return 0 if score.passed else 1
+
+
 def cmd_bugs(settings: Settings, run_dir: Path, post: bool, pack_slug: str | None) -> int:
     from . import gate
     from .preflight.pack_loader import load_pack
@@ -411,6 +439,11 @@ def main(argv=None) -> int:
     m.add_argument("action", choices=["list", "pending", "approve", "retire"])
     m.add_argument("ids", nargs="*", type=int)
     m.add_argument("--project", default="savostore")
+    ev = sub.add_parser("eval", help="replay self-test against past reports")
+    ev.add_argument("--project", default="savostore")
+    ev.add_argument("--live", action="store_true", help="use the real judge (needs the LLM)")
+    ev.add_argument("--rebuild", action="store_true", help="re-extract known answers from evals/source/*.pdf")
+    ev.add_argument("--cases", help="only these case ids")
     lo = sub.add_parser("leftovers")
     lo.add_argument("run_dir", type=Path)
     a = ap.parse_args(argv)
@@ -433,6 +466,8 @@ def main(argv=None) -> int:
         return cmd_memory(settings, a.action, a.ids, a.project)
     if a.cmd == "leftovers":
         return cmd_leftovers(a.run_dir)
+    if a.cmd == "eval":
+        return cmd_eval(settings, a.project, a.live, a.rebuild, a.cases)
     return cmd_resume(settings, a.run_dir)
 
 

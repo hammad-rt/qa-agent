@@ -1,0 +1,792 @@
+{
+  "pack": "savostore",
+  "sources": [
+    "savo-rewards-qa-report-2026-09-28.pdf"
+  ],
+  "cases": [
+    {
+      "key": "165177:B1",
+      "id": "B1",
+      "task": 165177,
+      "title": "Session ephemeral",
+      "steps": "On A1158 applied $60 (pending Applied row in CRM), then did a full reload of the invoice; then a second load. Also tried Ctrl+Shift+R.",
+      "expected": "Applied cleared; payable restored; no used row; wallet unchanged.",
+      "actual": "First full reload showed the widget reset but totals still -$60 / $940 (CRM row already removed); second load cleared to $1,000. Wallet unchanged. Ctrl+Shift+R did not reload the SPA.",
+      "verdict": "FAIL",
+      "verdict_text": "FAIL",
+      "known_bugs": [
+        6
+      ],
+      "figures": [
+        "b-07-b1-crm-pending-60-applied.png",
+        "b-08-b1-after-reload.png",
+        "b-09-b1-second-reload-1000.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165177:B2",
+      "id": "B2",
+      "task": 165177,
+      "title": "X clears and restores Applicable",
+      "steps": "Applied 30 on A1158, clicked X, re-applied.",
+      "expected": "Payable original; \"up to\" back to M; re-apply works; no used.",
+      "actual": "X restores payable $1,000 and \"up to $100\"; re-apply works; no used row. But the \"You have $X\" line shows $617.02 (30 subtracted) until the next apply. Same seen on A1158 ($537.02) and B1461 (KES 57,633).",
+      "verdict": "PARTIAL",
+      "verdict_text": "PARTIAL",
+      "known_bugs": [
+        8
+      ],
+      "figures": [
+        "b-01-invoice-baseline.png",
+        "b-02-b2-apply-30.png",
+        "b-03-b2-x-cleared.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165177:B3",
+      "id": "B3",
+      "task": 165177,
+      "title": "Below-max succeeds; remaining copy drops",
+      "steps": "Max 100; applied 60.",
+      "expected": "Accepted; \"up to\" = 100 - 60 = 40.",
+      "actual": "Apply 60 accepted (no limit error) but \"up to\" shows $34 (10% of 940 - 60) instead of 40.",
+      "verdict": "FAIL",
+      "verdict_text": "FAIL",
+      "known_bugs": [
+        2
+      ],
+      "figures": [
+        "b-06-b3-apply-60.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf",
+      "correction": "User confirmed bug 2 is real."
+    },
+    {
+      "key": "165177:B4",
+      "id": "B4",
+      "task": 165177,
+      "title": "Portal payable = Stripe",
+      "steps": "Applied rewards and opened Stripe on several orders.",
+      "expected": "Stripe equals portal payable; CRM matches after pay.",
+      "actual": "Stripe sandbox amounts matched portal payable: $950, $905, $360, KES 869,080.",
+      "verdict": "PASS",
+      "verdict_text": "PASS",
+      "known_bugs": [],
+      "figures": [
+        "b-12-b4-portal-pay-950.png",
+        "b-13-b4-stripe-sandbox-950.png",
+        "a-08-stripe-sandbox-905.png",
+        "a-25-stripe-sandbox-360.png",
+        "d-05-portal-pay-page-869080.png",
+        "d-06-stripe-sandbox-kes-869080.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165177:B5",
+      "id": "B5",
+      "task": 165177,
+      "title": "Commit only on success; no double deduct",
+      "steps": "Successful Stripe pay with 45 applied on A1158; reloads afterwards.",
+      "expected": "Wallet -once; one used row; Rewards Used row; totals sticky; no second deduction.",
+      "actual": "Successful pay deducted once, one used row per redemption, totals sticky, no double deduction on reloads. But the commit happens when checkout opens, not on success (bug 1).",
+      "verdict": "PARTIAL",
+      "verdict_text": "PARTIAL",
+      "known_bugs": [
+        1
+      ],
+      "figures": [
+        "a-05-portal-apply-45.png",
+        "a-06-crm-45-status-applied.png",
+        "a-09-crm-45-status-used-before-pay.png",
+        "a-10-portal-payment-success.png",
+        "a-11-crm-after-pay-totals.png",
+        "a-13-contact-current-552-used-589.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165177:B6",
+      "id": "B6",
+      "task": 165177,
+      "title": "Failed / abandoned payment",
+      "steps": "On A1158 applied $50, opened Stripe, pressed Back without paying; checked CRM row, contact and portal history; reloaded.",
+      "expected": "Wallet unchanged; no used row; pending cleared on hard return/refresh.",
+      "actual": "CRM row \"Redeemed rewards against A1158\" went Applied -> Used. Current 647.02 -> 597.02, Used 494.13 -> 544.13. Portal history shows the redemption; reload does not release it.",
+      "verdict": "FAIL",
+      "verdict_text": "FAIL (CRITICAL)",
+      "known_bugs": [
+        1
+      ],
+      "figures": [
+        "b-14-b7-back-keeps-50-950.png",
+        "b-16-b6-crm-50-status-used.png",
+        "b-17-b6-contact-current-597-used-544.png",
+        "b-21-portal-rewards-history-a1158-50.png",
+        "b-22-portal-wallet-final-597.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165177:B7",
+      "id": "B7",
+      "task": 165177,
+      "title": "Soft Back re-apply",
+      "steps": "After soft Back from Stripe (50 applied), tried to replace with 80.",
+      "expected": "Replacement validation = headroom + pending (up to 100); single pending row.",
+      "actual": "Soft Back keeps the $50, but it is already Used. Replacing with 80 blocked: \"Rewards amount cannot exceed $45.00.\" Should allow replacement up to 100, and remaining should be 50, not 45.",
+      "verdict": "FAIL",
+      "verdict_text": "FAIL",
+      "known_bugs": [
+        1,
+        2
+      ],
+      "figures": [
+        "b-15-b16-apply80-blocked.png",
+        "b-20-b4-apply100-blocked.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165177:B8",
+      "id": "B8",
+      "task": 165177,
+      "title": "CRM Admin Rewards Redeemed (SO + BAS)",
+      "steps": "On A1159 (KES) created Rewards Redeemed from the order subpanel; tried > Applicable; saved 14,000; checked order, contact, portal; customer then opened Stripe and paid.",
+      "expected": "Prefill Current + Applicable; Applicable = order max; save <= Applicable updates order + wallet; > Applicable blocked; subpanel in order currency; persists.",
+      "actual": "PASS: prefill (name \"Redeemed rewards by Maria.tariq against A1159\", Current, Applicable, Total Shipping Cost read-only); Applicable = order max in order currency (KES 71,683, not USD 512.02); > Applicable/wallet blocked \"Redeemed rewards cannot exceed the contact's current rewards.\"; subpanel Ksh14,000; order Savo Rewards -14,000 and portal shows it. FAIL: row status stays Applied; contact wallet NOT deducted on save; Current dropped $100 only when the customer opened Stripe; Used never increased; status still Applied after full payment.",
+      "verdict": "FAIL",
+      "verdict_text": "FAIL (mixed - several sub-checks pass)",
+      "known_bugs": [
+        3
+      ],
+      "figures": [
+        "c-05-crm-create-applicable-71683.png",
+        "c-08-crm-over-applicable-71693.png",
+        "c-09-crm-redeemed-14000-row.png",
+        "c-10-crm-redeemed-detail-status.png",
+        "c-11-contact-after-14000.png",
+        "c-12-portal-after-admin-14000.png",
+        "c-13-portal-rewards-history.png",
+        "d-01-crm-a1159-redeemed-row.png",
+        "d-02-crm-admin-row-applied-before.png",
+        "d-03-contact-before-512-used-629.png",
+        "d-04-portal-a1159-before-pay.png",
+        "d-07-contact-after-stripe-open-412-used-629.png",
+        "d-08-admin-row-still-applied-after-stripe-open.png",
+        "d-09-portal-payment-success-a1159.png",
+        "d-10-admin-row-still-applied-after-pay.png",
+        "d-11-contact-after-pay-412-used-629.png",
+        "d-12-crm-a1159-paid-869080-balance-0.png",
+        "d-12b-crm-savo-rewards-14000.png",
+        "d-13-crm-payment-not-confirmed.png",
+        "d-14-portal-invoice-paid-balance-0.png",
+        "d-15-portal-rewards-412.png",
+        "d-16-portal-history-a1159-ksh14000.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165177:B9",
+      "id": "B9",
+      "task": 165177,
+      "title": "Total Shipping Cost on create",
+      "steps": "Opened Rewards Redeemed Create on A1158 (before/after bump), A1159, B1461.",
+      "expected": "Read-only, from order shipping; not Grand Total.",
+      "actual": "Read-only and equal to order shipping (1,000 / 1,400 / 840,000 / 7,644), not Grand Total.",
+      "verdict": "PASS",
+      "verdict_text": "PASS",
+      "known_bugs": [],
+      "figures": [
+        "a-01-crm-create-prefill.png",
+        "a-19-crm-create-applicable-40.png",
+        "d-21-crm-applicable-764-40.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165177:B10",
+      "id": "B10",
+      "task": 165177,
+      "title": "Wallet integrity",
+      "steps": "Compared contact Current vs Total - Used at start and end.",
+      "expected": "Current = Lifetime - Used; no random jumps.",
+      "actual": "No random jumps, but Current != Lifetime - Used: pre-existing 20.50 gap, grew to 120.50 after the admin redemption flow. Final: Current 412.02, Total 1,161.65, Used 629.13.",
+      "verdict": "FAIL",
+      "verdict_text": "FAIL",
+      "known_bugs": [
+        3,
+        4
+      ],
+      "figures": [
+        "e0-01-crm-rewards-baseline.png",
+        "d-26-contact-final-412-used-629.png",
+        "d-27-contact-history-today.png",
+        "d-28-portal-final-412-lifetime-1161.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165177:B11",
+      "id": "B11",
+      "task": 165177,
+      "title": "Portal success visible in CRM",
+      "steps": "After portal Stripe pay with rewards, compared CRM and portal.",
+      "expected": "CRM field/subpanel/totals match; Rewards Used row.",
+      "actual": "CRM totals and subpanel match portal; history shows the redemption.",
+      "verdict": "PASS",
+      "verdict_text": "PASS",
+      "known_bugs": [],
+      "figures": [
+        "a-14-portal-invoice-after-pay.png",
+        "a-15-portal-rewards-history.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165177:B12",
+      "id": "B12",
+      "task": 165177,
+      "title": "Apply -> Remove -> Apply does not inflate",
+      "steps": "apply / X / apply / X / apply 30 on A1158.",
+      "expected": "Single pending row, not stacked.",
+      "actual": "Single Applied row $30 in CRM.",
+      "verdict": "PASS",
+      "verdict_text": "PASS",
+      "known_bugs": [],
+      "figures": [
+        "b-04-b12-apply30-before-crm.png",
+        "b-05-b12-crm-one-pending-30-applied.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165177:B13",
+      "id": "B13",
+      "task": 165177,
+      "title": "Recording timing",
+      "steps": "Watched CRM row status before Stripe, at Stripe open, after pay.",
+      "expected": "Before pay: at most Applied; after pay: Used.",
+      "actual": "Row flips Applied -> Used and wallet drops at Stripe open, before payment.",
+      "verdict": "FAIL",
+      "verdict_text": "FAIL",
+      "known_bugs": [
+        1
+      ],
+      "figures": [],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165177:B14",
+      "id": "B14",
+      "task": 165177,
+      "title": "Wallet in order currency",
+      "steps": "Checked wallet display on KES order A1159.",
+      "expected": "KES-converted wallet; Applicable consistent.",
+      "actual": "Wallet shown as KES 71,683 (512.02 x 140) consistently on portal and CRM.",
+      "verdict": "PASS",
+      "verdict_text": "PASS",
+      "known_bugs": [],
+      "figures": [
+        "c-04-portal-y-upto-71683.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165177:B15",
+      "id": "B15",
+      "task": 165177,
+      "title": "Discount-parity smoke",
+      "steps": "Left page with portal rewards applied; checked admin reward; typed an invalid discount code.",
+      "expected": "Leaving clears session rewards; admin reward persists.",
+      "actual": "Leaving the page clears portal rewards; admin reward persists. Discount code field: invalid code gives no feedback and temporarily changes \"up to\" ($45 -> $95).",
+      "verdict": "PARTIAL",
+      "verdict_text": "PARTIAL",
+      "known_bugs": [
+        9
+      ],
+      "figures": [
+        "b-19-b15-discount-code-typed.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165177:B16",
+      "id": "B16",
+      "task": 165177,
+      "title": "Soft Back keeps; hard reload / leave clears",
+      "steps": "1) Soft Back from Stripe to same invoice. 2) Hard reload. 3) Orders list -> /rewards -> back to invoice.",
+      "expected": "1) pending kept (not committed); 2) reload clears; 3) navigation clears.",
+      "actual": "Step 1 FAIL: amount kept but already committed (Used). Step 2 FAIL: reload does not clear the committed amount (still $950). Step 3 PASS: navigating away and back clears pending and deletes the CRM row.",
+      "verdict": "FAIL",
+      "verdict_text": "FAIL (steps 1-2) / PASS (step 3)",
+      "known_bugs": [
+        1
+      ],
+      "figures": [
+        "b-10-b1b-rewards-page-647.png",
+        "b-11-b1b-back-to-invoice-cleared.png",
+        "b-18-b16-2-reload-still-950.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165177:B17",
+      "id": "B17",
+      "task": 165177,
+      "title": "Pay with session 0 after leftover pending",
+      "steps": "-",
+      "expected": "No wallet burn; no bulk applied -> used.",
+      "actual": "An orphan pending row could not be created via the UI.",
+      "verdict": "NOT VERIFIED",
+      "verdict_text": "NOT VERIFIED",
+      "known_bugs": [],
+      "figures": [],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165177:B18",
+      "id": "B18",
+      "task": 165177,
+      "title": "M-Pesa finalize without AccountReference",
+      "steps": "-",
+      "expected": "-",
+      "actual": "M-Pesa out of scope per instruction.",
+      "verdict": "SKIPPED",
+      "verdict_text": "SKIPPED",
+      "known_bugs": [],
+      "figures": [],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165177:B19",
+      "id": "B19",
+      "task": 165177,
+      "title": "Admin \"by\" survives portal replace-0; portal \"against\" cleared",
+      "steps": "On A1159 with admin \"by\" row (14,000), applied 5,768 on portal (twice), reloaded, navigated away.",
+      "expected": "Portal pending row created then cleared; admin row survives.",
+      "actual": "Portal apply 5,768 showed success but created no \"against\" row and no X; reload reverted. Admin \"by\" row survived leave/reload (that part PASS).",
+      "verdict": "FAIL",
+      "verdict_text": "FAIL",
+      "known_bugs": [
+        5
+      ],
+      "figures": [
+        "c-14-portal-apply-5768.png",
+        "c-15-crm-two-rows-pending.png",
+        "c-16-portal-apply-5768-again.png",
+        "c-17-portal-reload-only-admin-14000.png",
+        "c-18-rewards-after-nav-away.png",
+        "c-19-portal-second-reload-14000.png",
+        "c-20-contact-second-reload.png",
+        "c-21-crm-final-by-row-only.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165348:E0",
+      "id": "E0",
+      "task": 165348,
+      "title": "Baseline wallet snapshot",
+      "steps": "Opened contact Sidney Test in CRM and recorded Current / Total (lifetime) / Used; opened portal Savo Rewards page and dashboard.",
+      "expected": "Portal rewards match CRM (currency-aware); W0, L0, U0 recorded.",
+      "actual": "Current $597.02, Total (lifetime) $1,111.65, Used $494.13. Portal $597.02 = CRM Current. Note: Total - Used = 617.52, i.e. Current is 20.50 lower than the formula already at baseline.",
+      "verdict": "PASS",
+      "verdict_text": "PASS",
+      "known_bugs": [],
+      "figures": [
+        "e0-01b-crm-total-rewards.png",
+        "e0-02-crm-loyalty-history.png",
+        "e0-03-portal-rewards.png",
+        "e0-04-portal-dashboard-rewards.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165348:E1",
+      "id": "E1",
+      "task": 165348,
+      "title": "Complete an order to earn rewards",
+      "steps": "Created new Shipping Only order A1157 on portal: 50 chargeable kg x $20 = $1,000 shipping. Paid $1,000 via Stripe sandbox (card 4242) without rewards. Moved order to Order Delivered in CRM. Checked Loyalty/Rewards on contact and portal.",
+      "expected": "New earned row; L1 > L0; W1 = L1 - U0; portal matches CRM.",
+      "actual": "Loyalty row $50 (5% of $1,000). Current 597.02 -> 647.02 (+50), Total 1,111.65 -> 1,161.65 (+50); portal matched. However W1 = L1 - U0 is false: 647.02 vs 667.52 because of the pre-existing 20.50 gap (see bug 4).",
+      "verdict": "PASS",
+      "verdict_text": "PASS (earn) - with note",
+      "known_bugs": [],
+      "figures": [
+        "e1-01-portal-order-submitted.png",
+        "e1-02-portal-order-a1157.png",
+        "e1-03-crm-a1157-totals.png",
+        "e1-04-portal-invoice-before-pay.png",
+        "e1-05-stripe-test-1000-before-pay.png",
+        "e1-06-portal-payment-success.png",
+        "e1-07-crm-a1157-after-payment.png",
+        "e1-08-crm-rewards-after-earn.png",
+        "e1-09-crm-loyalty-a1157.png",
+        "e1-10-portal-rewards-after-earn.png",
+        "e1-11-portal-dashboard-after-earn.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165348:E2",
+      "id": "E2",
+      "task": 165348,
+      "title": "Seed wallet for multi-redeem",
+      "steps": "Checked wallet after E1.",
+      "expected": "Current Rewards >= $100.",
+      "actual": "Current $647.02 (>= $100).",
+      "verdict": "PASS",
+      "verdict_text": "PASS",
+      "known_bugs": [],
+      "figures": [],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165348:A1",
+      "id": "A1",
+      "task": 165348,
+      "title": "Initial redeem (SO Ship Individually)",
+      "steps": "On A1158 ($1,000 shipping, 1 package; an earlier $50 had already been committed - see #165177 B6): checked portal cap and CRM Rewards Redeemed Create Applicable; applied 45 on portal; opened Stripe ($905) and paid in sandbox; checked CRM order totals, contact, Rewards Redeemed row and portal history.",
+      "expected": "Portal Applicable = 10% of shipping; CRM Applicable = portal; wallet reduced by redeemed; balance >= 0; one used row in order currency; portal Rewards Used row only after success.",
+      "actual": "Portal cap = 10% of shipping; CRM Create Applicable 45.00 = portal \"up to $45\" (after the earlier $50). Applied 45, Stripe $905, paid. CRM: Savo Rewards -95, Paid 905, Balance 0; Used rows in order currency; portal history rows present. Contact after pay: Current 552.02, Used 589.13. Note: the Rewards Used row / Used status appears when checkout opens, not only after success (bug 1).",
+      "verdict": "PASS",
+      "verdict_text": "PASS (run in USD on A1158 instead of KES 10,000)",
+      "known_bugs": [],
+      "figures": [
+        "a-02-crm-order-totals-baseline.png",
+        "a-03-crm-redeemed-row-used-50.png",
+        "a-04-portal-invoice-before-apply.png",
+        "a-07-portal-pay-page-905.png",
+        "a-12-contact-total-1161.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165348:A2",
+      "id": "A2",
+      "task": 165348,
+      "title": "Shipping increase unlocks additional rewards (anti-overpay)",
+      "steps": "Added 2nd package $400 to A1158 in CRM (shipping 1,000 -> 1,400; already paid-through 1,000). Checked portal \"up to\".",
+      "expected": "Applicable = 10% of new unpaid shipping only; no customer credit.",
+      "actual": "Portal Applicable $40 = 10% of unpaid $400 - not 45 (140 - 95) and not 140.",
+      "verdict": "PASS",
+      "verdict_text": "PASS (USD analogue)",
+      "known_bugs": [],
+      "figures": [
+        "a-16-crm-edit-second-parcel-before-save.png",
+        "a-17-crm-after-second-package-1400-balance-400.png",
+        "a-18-portal-up-to-40.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf",
+      "correction": "User confirmed: the limit after adding a parcel uses only the new unpaid shipping; intended."
+    },
+    {
+      "key": "165348:A3",
+      "id": "A3",
+      "task": 165348,
+      "title": "Second payment redeems additional",
+      "steps": "Applied 40 on A1158, paid Stripe sandbox $360.",
+      "expected": "Additional used activity in CRM; Rewards Used lists multiple redemptions.",
+      "actual": "Paid. Three separate Used rows $50 / $45 / $40 in CRM and in portal history. CRM final: balance 0; contact Current 512.02, Used 629.13.",
+      "verdict": "PASS",
+      "verdict_text": "PASS",
+      "known_bugs": [],
+      "figures": [
+        "a-23-portal-apply-40-max.png",
+        "a-24-portal-payable-360.png",
+        "a-26-stripe-processing-360.png",
+        "a-27-portal-payment-success-360.png",
+        "a-28-crm-final-totals-1265-balance-0.png",
+        "a-29-contact-final-512-used-629.png",
+        "a-30-portal-invoice-final.png",
+        "a-31-portal-rewards-final-512.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165348:A4",
+      "id": "A4",
+      "task": 165348,
+      "title": "Block over-cap (seeded)",
+      "steps": "With remaining cap 40, applied 41.",
+      "expected": "Rejected with limit message; no pending; wallet unchanged; copy still C.",
+      "actual": "\"Rewards amount cannot exceed $40.00.\"; no pending row; wallet unchanged; copy still 40.",
+      "verdict": "PASS",
+      "verdict_text": "PASS",
+      "known_bugs": [],
+      "figures": [
+        "a-22-portal-apply-41-limit.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165348:A5",
+      "id": "A5",
+      "task": 165348,
+      "title": "Cap ignores non-shipping (incl. Misc)",
+      "steps": "On A1159 (KES): shipping 840,000 + protection 280 + next-day door delivery 42,000 + misc 800. Checked portal and CRM Applicable.",
+      "expected": "Applicable = 10% of shipping only; CRM = portal.",
+      "actual": "Cap based on shipping only (10% = 84,000), limited by wallet to KES 71,683 on both portal and CRM.",
+      "verdict": "PASS",
+      "verdict_text": "PASS",
+      "known_bugs": [],
+      "figures": [
+        "c-01-crm-y-full.png",
+        "c-02-crm-y-shipping-line.png",
+        "c-03-crm-y-grand.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165348:A6",
+      "id": "A6",
+      "task": 165348,
+      "title": "Insufficient wallet (seeded)",
+      "steps": "On A1159 applied 84,000 (the shipping cap) and 71,684 (wallet + 1).",
+      "expected": "Rejected; wallet unchanged; no pending.",
+      "actual": "Both blocked with \"Rewards amount cannot exceed KES 71,683.00.\"; no pending; wallet unchanged. Minor: wording does not mention insufficient wallet.",
+      "verdict": "PASS",
+      "verdict_text": "PASS",
+      "known_bugs": [],
+      "figures": [
+        "c-06-portal-apply-84000-blocked.png",
+        "c-07-portal-apply-71684-blocked.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165348:A7",
+      "id": "A7",
+      "task": 165348,
+      "title": "CRM vs Portal parity",
+      "steps": "After shipping bump on A1158, opened CRM Rewards Redeemed Create.",
+      "expected": "CRM Applicable == portal == min(wallet, 10% x unpaid).",
+      "actual": "CRM Create Applicable 40.00 = portal $40; Total Shipping Cost read-only 1,400.",
+      "verdict": "PASS",
+      "verdict_text": "PASS",
+      "known_bugs": [],
+      "figures": [],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165348:A8",
+      "id": "A8",
+      "task": 165348,
+      "title": "Buy & Ship parity",
+      "steps": "Created B&S order B1461 (KES) on portal: shipping KES 7,644, grand total 23,179. Checked portal \"up to\", CRM Applicable, applied 50 then X, tried exact max, looked for card payment.",
+      "expected": "Same unpaid-shipping rule as SO; apply/pay/commit works on BAS.",
+      "actual": "Portal \"up to\" KES 764.40 = 10% of shipping only - PASS. CRM Applicable 764.40 - PASS. Apply 50 then X restores - PASS. Exact 764.40 (and 764.39) would not apply, only 764 - FAIL (minor). B&S invoice offers only \"Pay By M- Pesa\", no card; Stripe route redirects to list -> payment and commit not tested - BLOCKED (M-Pesa out of scope). Order-total label did not update after apply. B1461 left with a portal-only pending 764 not in CRM.",
+      "verdict": "PARTIAL",
+      "verdict_text": "PARTIAL / BLOCKED",
+      "known_bugs": [
+        7
+      ],
+      "figures": [
+        "d-17-portal-bas-created.png",
+        "d-18-crm-b1461-shipping-7644.png",
+        "d-19-crm-b1461-awaiting-payment.png",
+        "d-20-portal-b1461-upto-764.png",
+        "d-22-portal-apply-50-upto-714.png",
+        "d-23-portal-after-x-restored-764.png",
+        "d-24-portal-b1461-balance-22415.png",
+        "d-24b-portal-b1461-mpesa-only-no-card.png",
+        "d-25-crm-b1461-savo-rewards-0.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165348:A9",
+      "id": "A9",
+      "task": 165348,
+      "title": "Partial first redeem then shipping increase",
+      "steps": "Same run as A2 (USD numbers).",
+      "expected": "Additional Applicable from new unpaid shipping only.",
+      "actual": "$40 = 10% of the new unpaid $400.",
+      "verdict": "PASS",
+      "verdict_text": "PASS",
+      "known_bugs": [],
+      "figures": [],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf",
+      "correction": "User confirmed: the limit after adding a parcel uses only the new unpaid shipping; intended."
+    },
+    {
+      "key": "165348:A10",
+      "id": "A10",
+      "task": 165348,
+      "title": "Balance never negative",
+      "steps": "Checked balances after every redeem+pay (A1158, A1159).",
+      "expected": "total_balance >= 0; paid + rewards = total.",
+      "actual": "Balances 0, never negative; paid + rewards = total.",
+      "verdict": "PASS",
+      "verdict_text": "PASS",
+      "known_bugs": [],
+      "figures": [],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165348:A11",
+      "id": "A11",
+      "task": 165348,
+      "title": "No double wallet deduction",
+      "steps": "Tracked wallet across payments and reloads.",
+      "expected": "Wallet decreased once per successful redemption.",
+      "actual": "Each successful redemption deducted once; reloads caused no extra deduction.",
+      "verdict": "PASS",
+      "verdict_text": "PASS",
+      "known_bugs": [],
+      "figures": [],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165348:A12",
+      "id": "A12",
+      "task": 165348,
+      "title": "Full Ship Individually story",
+      "steps": "Package 1 $1,000 then package 2 $400 on A1158; redeemed and paid for each.",
+      "expected": "End-to-end CRM + portal + Rewards Used correct; W = L - U.",
+      "actual": "Flow works end-to-end; final W = L - U equality fails (gap 20.50 at that point).",
+      "verdict": "PARTIAL",
+      "verdict_text": "PASS (flow) / FAIL (final W = L - U)",
+      "known_bugs": [],
+      "figures": [],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165348:A13",
+      "id": "A13",
+      "task": 165348,
+      "title": "Wallet never negative; no duplicate used on retry",
+      "steps": "Webhook retry is not possible from the UI; repeated reloads of success/invoice pages.",
+      "expected": "No negative wallet; no duplicate used rows; W = L - U.",
+      "actual": "Repeated reloads produced no duplicate used rows; wallet never negative. Webhook retry itself not exercised.",
+      "verdict": "NOT VERIFIED",
+      "verdict_text": "NOT VERIFIED",
+      "known_bugs": [],
+      "figures": [],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    },
+    {
+      "key": "165348:A14",
+      "id": "A14",
+      "task": 165348,
+      "title": "Copy drops after partial apply on shipping increment; X restores",
+      "steps": "After shipping bump (cap 40), applied 15, read \"up to\"; then clicked X.",
+      "expected": "After apply copy = 40 - 15 = 25; after X copy = 40, pending gone, prior used unchanged.",
+      "actual": "After apply: \"up to $23.50\" (expected 25; appears computed as 10% of 385 - 15). X restores 40, pending removed, prior used unchanged. Wallet banner briefly showed $537.02 after X (bug 7).",
+      "verdict": "FAIL",
+      "verdict_text": "FAIL",
+      "known_bugs": [
+        2,
+        8
+      ],
+      "figures": [
+        "a-20-portal-apply-15-up-to-23-50.png",
+        "a-21-portal-after-x-upto-40-wallet-537.png"
+      ],
+      "source": "savo-rewards-qa-report-2026-09-28.pdf"
+    }
+  ],
+  "report_bugs": [
+    {
+      "report_n": 1,
+      "title": "Portal rewards are committed when Stripe checkout opens, not",
+      "severity": null,
+      "cases": [
+        "B5",
+        "B6",
+        "B7",
+        "B13",
+        "B16",
+        "C6",
+        "C8",
+        "C9"
+      ],
+      "n": 1
+    },
+    {
+      "report_n": 2,
+      "title": "Remaining \"you can use up to\" / replacement limit computed on",
+      "severity": null,
+      "cases": [
+        "B3",
+        "B7",
+        "A14",
+        "C10"
+      ],
+      "n": 2
+    },
+    {
+      "report_n": 3,
+      "title": "CRM admin Rewards Redeemed saves as Applied; wallet not",
+      "severity": null,
+      "cases": [
+        "B8",
+        "B10",
+        "C7"
+      ],
+      "n": 3
+    },
+    {
+      "report_n": 4,
+      "title": "Pre-existing wallet drift: Current Rewards 20.50 below Total -",
+      "severity": null,
+      "cases": [
+        "B10",
+        "C7",
+        "E1"
+      ],
+      "n": 4
+    },
+    {
+      "report_n": 5,
+      "title": "Portal apply does not persist when an admin \"by\" redemption",
+      "severity": null,
+      "cases": [
+        "B19"
+      ],
+      "n": 5
+    },
+    {
+      "report_n": 6,
+      "title": "First reload after applying shows stale rewards / payable",
+      "severity": "Medium",
+      "cases": [
+        "B1"
+      ],
+      "n": 6
+    },
+    {
+      "report_n": 7,
+      "title": "Wallet sentence after X shows wallet minus removed amount",
+      "severity": null,
+      "cases": [
+        "B2",
+        "A14"
+      ],
+      "n": 8
+    },
+    {
+      "report_n": 8,
+      "title": "Buy & Ship: only M-Pesa offered (no card), exact decimal max",
+      "severity": null,
+      "cases": [
+        "A8",
+        "C3"
+      ],
+      "n": 7
+    },
+    {
+      "report_n": 9,
+      "title": "Invalid discount code: no feedback; \"up to\" changes while code",
+      "severity": null,
+      "cases": [
+        "B15"
+      ],
+      "n": 9
+    }
+  ],
+  "note": "Rebuilt from report PDFs: no page text, so replay judges from recorded actual text and figure names."
+}

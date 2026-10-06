@@ -20,7 +20,7 @@ def model(settings: Settings, json_mode: bool = False):
     """json_mode asks the server for a syntactically valid JSON object (vLLM supports it). LLM_JSON_MODE=0 turns it off."""
     import os
     from google.adk.models.lite_llm import LiteLlm
-    extra = {}
+    extra = {"max_tokens": int(os.environ.get("LLM_MAX_TOKENS", "8192"))}   # the server's default is only 512
     if json_mode and os.environ.get("LLM_JSON_MODE", "1") != "0":
         extra["response_format"] = {"type": "json_object"}
     return LiteLlm(model=f"openai/{settings.llm_model}", api_base=settings.llm_base_url, api_key=settings.llm_api_key, **extra)
@@ -74,6 +74,11 @@ def extract_json(text: str) -> dict:
             raise first
 
 
+def _cut_off(raw: str) -> bool:
+    t = (raw or "").rstrip().rstrip("`").rstrip()
+    return bool(t) and t.count("{") > t.count("}")
+
+
 _END = r'(?:"|\d|true|false|null|\]|\})'
 
 
@@ -97,9 +102,13 @@ async def run_json(agent, prompt: str, settings: Settings, *, validate=None, lab
         raw = await run_agent(agent, ask, settings, trace_path=trace_path, retry=True)
         try:
             data = extract_json(raw)
+            if data == {} and validate:
+                raise ValueError("the reply was an empty object {}; fill in every field of the schema")
             return validate(data) if validate else data
         except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as e:
             last_err = str(e).splitlines()[0][:300] if isinstance(e, json.JSONDecodeError) else str(e)[:1500]
+            if isinstance(e, json.JSONDecodeError) and _cut_off(raw):
+                last_err += " - the reply looks cut off; keep it shorter (short step texts, no extra fields)"
             if raw_dir:
                 from pathlib import Path
                 Path(raw_dir).mkdir(parents=True, exist_ok=True)

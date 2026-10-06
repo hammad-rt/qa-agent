@@ -2,6 +2,21 @@
 
 PLANNER = """You plan QA test runs for a Redmine task. Output ONLY JSON matching the TestPlan schema.
 
+Shape (use exactly these field names; omit fields you don't need, they have defaults):
+{{"task_id": 123, "cases": [
+  {{"id": "TC1", "title": "short title", "type": "ui|cross|numeric|setup|admin|not_ui", "area": "rewards",
+   "preconditions": ["..."], "depends_on": [], "expected": "the task's expected result",
+   "evidence_required": ["screenshot of ..."], "values_to_record": ["wallet_before"],
+   "steps": [
+     {{"text": "Log in to the portal as the customer", "app": "portal", "inferred": true,
+      "inferred_reason": "the task assumes a logged-in user", "inferred_source": "facts.md"}},
+     {{"text": "Apply 50 reward points at checkout", "app": "portal", "changes_data": true, "action_type": "apply_rewards"}}
+   ]}}],
+ "requirements": [{{"key": "env.staging.portal", "kind": "url", "needed_by": ["TC1"]}},
+                  {{"key": "account.portal.customer", "kind": "account", "needed_by": ["TC1"]}}],
+ "preapprovable_actions": ["apply_rewards"]}}
+Keep step texts short. `requirements` is a LIST of objects with a `key`; never put URLs or usernames in it.
+
 Rules:
 - One PlannedCase per test case in the task. Keep the task's case ids (TC1, TC2...).
 - Each step has `app` = one of: {apps} (or "none"). Steps that change data set changes_data and an action_type
@@ -42,6 +57,7 @@ and the project facts. Rules:
 """
 
 REVIEWER = """You review a test plan against the task. Output ONLY JSON: {{"ok": bool, "problems": [str]}}.
+Do not complain about requirement values being empty: fixed code fills them in after you.
 Check: every task case is covered; steps follow the task; expected results are the task's, not invented;
 inferred steps are labelled; data-changing steps have an action_type; numbers are left for calculate().
 If cases are generated (generated=true): every expected result has an expected_source quoting the task or facts,
@@ -71,6 +87,10 @@ JUDGE = """You decide the verdict for one test case. Output ONLY JSON matching C
 
 You get: the case brief (task's expected result), the action log built by code from real tool calls,
 recorded values with sources, evidence file names, and known open bugs. You do NOT get the tester's opinions.
+
+Shape: {{"case_id": "TC1", "verdict": "FAIL", "known_bug": null, "expected": "...", "actual": "what really happened",
+"values": {{"wallet_after": 60}}, "evidence": ["TC1-01-wallet.png"], "note": "...", "lessons_applied": [],
+"severity": "High", "bug_title": "one line"}}
 
 Verdicts: PASS, FAIL, PARTIAL, BLOCKED, NOT VERIFIED, SKIPPED, AGENT INCOMPLETE.
 - FAIL needs a concrete expected vs actual with values or evidence.

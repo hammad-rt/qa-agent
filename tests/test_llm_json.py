@@ -63,6 +63,20 @@ class SelfCorrect(unittest.TestCase):
         self.assertEqual(out.task_id, 2)
         self.assertIn("task_id", seen[1])
 
+    def test_empty_object_and_cut_off_are_explained(self):
+        out, seen, _ = self.run_with(["{}", '{"task_id": 1, "cases": [{"id": "TC1", "title": "a", "steps": [{"text": "Create an order of 200',
+                                      '{"task_id": 1}'], validate=TestPlan.model_validate)
+        self.assertIn("empty object", seen[1])
+        self.assertIn("cut off", seen[2])
+        self.assertEqual(out.task_id, 1)
+
+    def test_planner_example_matches_schema(self):
+        from agent_tester.agents import prompts
+        text = prompts.PLANNER.format(apps="portal", action_types="apply_rewards", env="staging", facts="", core="")
+        start = text.index("{", text.index("Shape"))
+        example = text[start:text.index("Keep step texts short")].replace("ui|cross|numeric|setup|admin|not_ui", "ui")
+        TestPlan.model_validate(json.loads(example))
+
     def test_gives_up_with_clear_error(self):
         with self.assertRaises(llm.LLMOutputError) as cm:
             self.run_with(["nope", "nope", "nope"])

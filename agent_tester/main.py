@@ -398,6 +398,55 @@ def cmd_helpers(settings: Settings, action: str, project: str) -> int:
     return 0
 
 
+def cmd_onboard(settings: Settings, ref: str, slug: str | None, input_fn=input, out=print) -> int:
+    """Draft a pack from Redmine, ask one batch of questions, show it, save only after a yes."""
+    import yaml
+    from urllib.parse import urlparse
+    from .preflight import onboard as O
+    from .preflight.packs import validate
+    from .preflight.redmine import Redmine
+    rm = Redmine(settings.redmine_url, settings.redmine_api_key)
+    d = O.draft_pack(rm, ref, urlparse(settings.redmine_url).hostname or "")
+    if slug:
+        d.slug = d.config["slug"] = slug
+    out(f"Drafting pack '{d.slug}' for {d.name} (Redmine project {d.project_id}) from {'; '.join(d.sources)}.")
+    out("Questions (one batch; press Enter to skip any):")
+    answers = {}
+    for n, q in enumerate(d.questions, 1):
+        answers[q.key] = input_fn(f"  {n}. {q.text}\n     > ").strip()
+    O.apply_answers(d, answers)
+    accounts, prods = {}, {}
+    for nm, a in d.config["apps"].items():
+        if "prod" not in a["envs"]:
+            prods[f"prod:{nm}"] = input_fn(f"  {nm}: production address? (blank if none or unknown)\n     > ").strip()
+        accounts[nm] = input_fn(f"  {nm}: test login username[,text visible after login for the role]? (no passwords here)\n     > ").strip()
+    O.apply_answers(d, {**answers, **prods}, accounts)
+    out("\n--- pack.yaml ---\n" + yaml.safe_dump(d.config, sort_keys=False) + "--- facts.md ---\n" + d.facts)
+    if input_fn(f"Save this as packs/{d.slug}? [y/N] ").strip().lower() not in ("y", "yes"):
+        out("Not saved.")
+        return 1
+    dest = O.save_draft(settings.packs_dir, d)
+    from .preflight.pack_loader import load_pack
+    probs = validate(load_pack(dest), settings.packs_dir)
+    out(f"Saved {dest}." + ("" if not probs else "\nStill to fix:\n  - " + "\n  - ".join(probs)))
+    envs = [acc["password_env"] for a in d.config["apps"].values() for acc in a["accounts"].values()]
+    if envs:
+        out(f"Passwords are asked through the masked prompt at the first plan gate ({', '.join(envs)}).")
+    return 0
+
+
+def cmd_pack(settings: Settings, action: str, slug: str, name: str | None, project_ids: list[int]) -> int:
+    from .preflight.pack_loader import load_pack
+    from .preflight.packs import new_pack, validate
+    if action == "new":
+        dest = new_pack(settings.packs_dir, slug, name, project_ids)
+        print(f"Created {dest}. Fill pack.yaml and facts.md, then run `pack validate {slug}`.")
+        return 0
+    probs = validate(load_pack(settings.packs_dir / slug), settings.packs_dir)
+    print("Valid." if not probs else "Problems:\n  - " + "\n  - ".join(probs))
+    return 0 if not probs else 1
+
+
 def cmd_bugs(settings: Settings, run_dir: Path, post: bool, pack_slug: str | None) -> int:
     from . import gate
     from .preflight.pack_loader import load_pack
@@ -469,6 +518,14 @@ def main(argv=None) -> int:
     hp = sub.add_parser("helpers", help="list helpers, or recipes worth turning into helpers")
     hp.add_argument("action", choices=["list", "candidates"])
     hp.add_argument("--project", default="savostore")
+    ob = sub.add_parser("onboard", help="draft a pack for a new project from Redmine")
+    ob.add_argument("ref", help="Redmine issue id, project id or project identifier")
+    ob.add_argument("--slug")
+    pk = sub.add_parser("pack", help="create a pack from the template, or validate one")
+    pk.add_argument("action", choices=["new", "validate"])
+    pk.add_argument("slug")
+    pk.add_argument("--name")
+    pk.add_argument("--project-id", type=int, action="append", default=[])
     lo = sub.add_parser("leftovers")
     lo.add_argument("run_dir", type=Path)
     a = ap.parse_args(argv)
@@ -491,6 +548,10 @@ def main(argv=None) -> int:
         return cmd_memory(settings, a.action, a.ids, a.project)
     if a.cmd == "leftovers":
         return cmd_leftovers(a.run_dir)
+    if a.cmd == "onboard":
+        return cmd_onboard(settings, a.ref, a.slug)
+    if a.cmd == "pack":
+        return cmd_pack(settings, a.action, a.slug, a.name, a.project_id)
     if a.cmd == "helpers":
         return cmd_helpers(settings, a.action, a.project)
     if a.cmd == "eval":

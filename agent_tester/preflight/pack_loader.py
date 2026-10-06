@@ -55,7 +55,7 @@ def load_pack(root: Path) -> Pack:
 
 def find_pack(packs_dir: Path, project_ids: list[int]) -> Pack:
     for p in sorted(packs_dir.iterdir()):
-        if not (p / "pack.yaml").exists():
+        if p.name.startswith("_") or not (p / "pack.yaml").exists():
             continue
         pack = load_pack(p)
         ids = set(pack.config.get("redmine", {}).get("project_ids", []))

@@ -1,4 +1,4 @@
-# qa-agent (phases 1-3)
+# qa-agent (phases 1-7)
 
 Multi-project Redmine test agent. Design: `docs/test-agent-rdp.md`, `docs/test-agent-technical-spec.md`.
 General rules: `core/core-testing-spec.md`. Project packs: `packs/<slug>/` (Savostore is the first).
@@ -33,6 +33,35 @@ General rules: `core/core-testing-spec.md`. Project packs: `packs/<slug>/` (Savo
 - Retries with backoff for planner, reviewer and judge calls; one run at a time (lock file); keeps the last
   5 runs in full and trims screenshots and traces after 14 days; warns when disk is low; `trace.jsonl` per run.
 
+## Phase 4: report and modes
+- Full HTML + PDF report (headless Chrome): summary, top new bugs, known bugs still present, per-case steps,
+  expected vs actual, values, "What this means", screenshots, baseline vs final, test data, questions asked.
+- Bug drafts in the core format (`bug_drafts.md`). Posting to Redmine is one approval per draft (`bugs --post`).
+- Modes: `--cases`, `--retest-bug N`, `rerun`, `report`. Progress in `progress.log`.
+- Email (`--email`, `--email-progress`) only to REPORT_EMAIL_TO; any other address is confirmed at the console.
+
+## Phase 5: replay self-test
+- `packs/<slug>/evals/known_answers.json` is rebuilt from past report PDFs in `evals/source/` (counting rules,
+  bug numbers mapped to facts.md by text, secrets masked, user corrections from `evals/corrections.json`).
+- `eval --live` judges each recorded result and scores it: pass bar is 90% agreement, no known FAIL judged PASS,
+  and repeat bugs labelled "still present: bug N". Without `--live` it checks the plumbing only.
+
+## Phase 6: helpers
+- Core helpers in `agent_tester/helpers/core/` (login_form, read_table); project helpers in `packs/<slug>/helpers/`.
+- The tester calls them with `run_helper`. Same allowlist, read-only and approval checks as its own clicks;
+  data-changing helpers always go through the approval gate. login_form types the password from the env var
+  itself, so the model never sees it.
+- Project helpers stay off until their page path and labels are set under `helpers:` in pack.yaml.
+  `helpers list` shows status; `helpers candidates` lists recipes that worked 3+ times.
+
+## Phase 7: more projects
+- `onboard <issue|project>` drafts pack.yaml and facts.md from Redmine (addresses only, never credentials),
+  asks one batch of questions, and saves only after a yes. `pack new <slug>` copies `packs/_template/`.
+- `pack validate <slug>` checks keys, allowlist covers every app host, no literal secrets, project ids not
+  shared with another pack, risky patterns compile, and the core always-ask actions are present.
+- The pack is picked by the task's Redmine project id. Memory, allowlist, known bugs and helpers are per pack
+  (see the fictional fixture in `tests/fixtures/packs/`).
+
 ## Setup
     python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
     cp .env.example .env && chmod 600 .env     # add REDMINE_API_KEY
@@ -47,11 +76,21 @@ General rules: `core/core-testing-spec.md`. Project packs: `packs/<slug>/` (Savo
     .venv/bin/python -m agent_tester memory list|pending --project savostore
     .venv/bin/python -m agent_tester memory approve|retire <id...> --project savostore
     .venv/bin/python -m agent_tester leftovers runs/<run folder>
+    .venv/bin/python -m agent_tester test 165348 --cases A2,A9 --email
+    .venv/bin/python -m agent_tester test 165348 --retest-bug 1
+    .venv/bin/python -m agent_tester rerun 165348 --cases A14
+    .venv/bin/python -m agent_tester report runs/<run folder>
+    .venv/bin/python -m agent_tester bugs runs/<run folder> [--post]
+    .venv/bin/python -m agent_tester eval --project savostore [--live] [--rebuild]
+    .venv/bin/python -m agent_tester helpers list|candidates --project savostore
+    .venv/bin/python -m agent_tester onboard <issue id or project>
+    .venv/bin/python -m agent_tester pack new|validate <slug>
 
 ## Tests (offline)
     .venv/bin/python -m unittest discover -s tests -t .
 
 ## Status
-Phases 1-3 are built and covered by offline tests. No live run yet: the LLM endpoint and staging must be
-reachable from the machine running the agent, and the Redmine API key and account passwords must be set.
-Next: full report and modes (4), replay self-test (5), helpers (6), second project (7).
+Phases 1-7 are built and covered by 107 offline tests. No live run yet: the LLM endpoint (internal only) and
+staging must be reachable from the machine running the agent, and the Redmine API key and account passwords
+must be set. Nothing in code is task-specific, but that only gets proven by live runs on several different
+tasks (for example #180966, #165348 and a fresh one) and a passing `eval --live`.

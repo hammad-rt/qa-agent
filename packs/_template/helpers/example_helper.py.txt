@@ -1,0 +1,14 @@
+"""Rename to <name>.py. A helper is a tested routine the tester can call instead of clicking by hand."""
+from agent_tester.helpers import HelperError, read_labelled_values
+
+HELPER = {"name": "example_read", "app": "web", "changes_data": False, "action_type": None,
+          "description": "Read the balance on the account page.", "params": {},
+          "needs_config": ["path", "labels"]}           # set under helpers.example_read in pack.yaml
+
+
+async def run(browser, ctx):
+    await browser.navigate(ctx.url(ctx.config["path"]))
+    values = read_labelled_values(await browser.snapshot(), ctx.config["labels"])
+    if not values:
+        raise HelperError("labels not found")
+    return {"values": values, "screenshots": [await browser.screenshot(f"{ctx.case_id}-balance.png")]}

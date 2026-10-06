@@ -1,0 +1,39 @@
+# Project pack template. Copy with `python -m agent_tester pack new <slug>` or `onboard <project>`.
+# No secrets here: passwords are referenced by env var name only (added later through the masked prompt).
+slug: __SLUG__
+name: __NAME__
+redmine:
+  project_ids: []               # Redmine numeric project ids this pack covers
+  test_case_subject_prefix: "Test Cases - "
+  wiki_project: null
+  wiki_pages: []                # wiki pages that list environments (never copy secrets from them)
+
+apps: {}
+# apps:
+#   web:
+#     label: Web app
+#     envs:
+#       staging: https://staging.example.com/
+#       prod: https://app.example.com/
+#     accounts:
+#       tester:
+#         username: tester@example.com
+#         password_env: EXAMPLE_WEB_PASSWORD
+#         role_markers: []
+
+allowlist:
+  staging: []
+  prod: []
+
+preapprovable_actions: []
+always_ask_actions: [change_settings, redmine_post, send_email, prod_write]
+
+risky_patterns:
+  - "(?i)\\bpay( now)?\\b"
+  - "(?i)\\bplace order\\b"
+  - "(?i)\\bsubmit\\b"
+  - "(?i)\\bconfirm\\b"
+  - "(?i)\\bdelete\\b"
+
+memory_areas: [ui]
+helpers: {}

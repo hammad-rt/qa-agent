@@ -1,0 +1,28 @@
+# EXAMPLE DATA ONLY: a fictional project used by the isolation tests. Not a real system.
+slug: example-shop
+name: Example Shop (fictional)
+redmine:
+  project_ids: [990001]
+  test_case_subject_prefix: "Test Cases - "
+  wiki_project: null
+  wiki_pages: []
+apps:
+  shop:
+    label: Example shop
+    envs:
+      staging: https://staging.example.com/
+      prod: https://shop.example.com/
+    accounts:
+      buyer:
+        username: buyer@example.com
+        password_env: EXAMPLE_SHOP_PASSWORD
+allowlist:
+  staging: [staging.example.com]
+  prod: [shop.example.com]
+preapprovable_actions: [create_test_order]
+always_ask_actions: [change_settings, redmine_post, send_email, prod_write]
+risky_patterns:
+  - "(?i)\\bbuy now\\b"
+memory_areas: [points]
+helpers:
+  read_points: {path: account, labels: [Points]}

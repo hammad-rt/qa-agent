@@ -55,3 +55,16 @@ risky_patterns:
   - "(?i)checkout\\.stripe\\.com"
 
 memory_areas: [rewards, protection, parcels, orders, payments, ui]
+
+# Helpers (phase 6). Core helpers login_form and read_table need no setup. Project helpers stay disabled
+# until their path and labels are confirmed on the real UI (fill these from a live run, never guessed).
+helpers:
+  login_form: {}                  # optional: path, user_label, password_label, submit_label
+  read_wallet:
+    path: null                    # portal page that shows the rewards wallet
+    labels: []                    # e.g. the exact labels next to the Current / Total / Used amounts
+  portal_apply_rewards: {path: null, fields: {}, submit_label: null, success_text: null, read_labels: []}
+  portal_create_order:  {path: null, fields: {}, submit_label: null, success_text: null, read_labels: []}
+  crm_move_order_status: {path: null, selects: {}, submit_label: null, success_text: null, read_labels: []}
+  crm_add_parcel:       {path: null, fields: {}, submit_label: null, success_text: null, read_labels: []}
+  crm_ship_parcel:      {path: null, fields: {}, submit_label: null, success_text: null, read_labels: []}

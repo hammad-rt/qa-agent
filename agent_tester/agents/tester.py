@@ -48,7 +48,8 @@ class TesterSession:
     """Holds the per-turn bookkeeping that the callbacks and tool functions share."""
 
     def __init__(self, app: str, brief: dict, state: RunState, policy: Policy, evidence: Evidence,
-                 max_calls: int, max_minutes: int, keep_emails: tuple[str, ...] = (), memory=None, ledger=None):
+                 max_calls: int, max_minutes: int, keep_emails: tuple[str, ...] = (), memory=None, ledger=None,
+                 helpers: dict | None = None, pack=None, env: str = "staging", toolset=None):
         self.app, self.brief, self.state, self.policy, self.ev = app, brief, state, policy, evidence
         self.case_id = brief["case_id"]
         self.max_calls, self.deadline = max_calls, time.time() + max_minutes * 60
@@ -59,6 +60,7 @@ class TesterSession:
         self.last_snapshot = ""
         self.current_step: int | None = None
         self.memory, self.ledger = memory, ledger
+        self.helpers, self.pack, self.env, self.toolset = helpers or {}, pack, env, toolset
 
     # ---- tools exposed to the model -------------------------------------------------
     def tools(self):
@@ -169,7 +171,32 @@ class TesterSession:
                 return {"error": str(e)}
             return {"restored_ok": r["verified"], "original": r["original"]}
 
+        async def run_helper(name: str, params_json: str, tool_context) -> dict:
+            """Run a tested helper instead of clicking through a routine step yourself, e.g.
+            run_helper("login_form", '{"account": "admin"}'). Returns the values it read and its screenshots."""
+            from ..helpers import HelperContext, McpBrowser, adk_caller
+            from ..helpers import run_helper as _run
+            info = s.helpers.get(name)
+            if info is None:
+                return {"error": f"no helper {name}; available: {', '.join(sorted(s.helpers)) or 'none'}"}
+            try:
+                params = json.loads(params_json or "{}")
+            except json.JSONDecodeError as e:
+                return {"error": f"params_json is not JSON: {e}"}
+            if s.brief.get("read_only") and info.meta.get("changes_data"):
+                return {"error": "this turn is read-only; data-changing helpers are not allowed"}
+            browser = McpBrowser(adk_caller(s.toolset, tool_context))
+            ctx = HelperContext(pack=s.pack, env=s.env, app=s.app, case_id=s.case_id, state=s.state,
+                                policy=s.policy, shot_prefix="")
+            out = await _run(info, browser, ctx, params)
+            for k, v in (out.get("values") or {}).items():
+                s.result.values[f"{name}.{k}"] = v
+            s.result.screenshots += [x for x in out.get("screenshots", []) if x not in s.result.screenshots]
+            return out
+
         tools = [record_value, calculate, request_approval, mark_step, evidence_name, get_secret, finish, recall_lessons]
+        if s.helpers and s.toolset is not None:
+            tools.append(run_helper)
         if not s.brief.get("read_only"):
             tools += [propose_memory, ledger_record, record_original, record_restored]
         return tools
@@ -245,17 +272,26 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
     keep = tuple(a.get("username", "") for app in pack.apps.values() for a in app.get("accounts", {}).values()
                  if "@" in a.get("username", ""))
 
+    from ..helpers import load_helpers
+    all_helpers = load_helpers(pack)
+
     def tester(app: str, brief: dict, state: RunState) -> StepResult:
         from google.adk.agents import LlmAgent
 
         from ..ledger import Ledger
-        sess = TesterSession(app, brief, state, policy, evidence, settings.max_tool_calls_per_case,
-                             settings.max_minutes_per_case, keep_emails=keep, memory=memory, ledger=Ledger(state))
+        helpers = {n: h for n, h in all_helpers.items() if h.enabled and h.meta.get("app", "any") in ("any", app)}
         was_ro = policy.read_only
         policy.read_only = bool(brief.get("read_only")) or was_ro
         try:
             toolset = playwright_toolset(run_dir, app, policy.allow_hosts)
+            sess = TesterSession(app, brief, state, policy, evidence, settings.max_tool_calls_per_case,
+                                 settings.max_minutes_per_case, keep_emails=keep, memory=memory, ledger=Ledger(state),
+                                 helpers=helpers, pack=pack, env=env, toolset=toolset)
             instr = prompts.TESTER.format(app_label=pack.apps[app].get("label", app), base_url=pack.url(app, env), env=env)
+            if helpers:
+                instr += "\nTested helpers (prefer them for these routine steps; call run_helper):\n" + "\n".join(
+                    f"- {n}: {h.meta['description']} params {json.dumps(h.meta.get('params', {}))}"
+                    + (" [changes data: needs approval]" if h.meta.get("changes_data") else "") for n, h in helpers.items())
             if brief.get("read_only"):
                 instr += "\nThis turn is READ-ONLY: log in and read values only. Never change anything."
             agent = LlmAgent(name=f"tester_{app}", model=model(settings), instruction=lambda _c: instr,

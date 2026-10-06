@@ -376,6 +376,28 @@ def cmd_eval(settings: Settings, project: str, live: bool, rebuild: bool, cases:
     return 0 if score.passed else 1
 
 
+def cmd_helpers(settings: Settings, action: str, project: str) -> int:
+    from .helpers import candidates, load_helpers
+    from .preflight.pack_loader import load_pack
+    pack = load_pack(settings.packs_dir / project)
+    if action == "list":
+        for name, h in sorted(load_helpers(pack).items()):
+            state = "ready" if h.enabled else f"off ({h.why_disabled})"
+            kind = "changes data, asks first" if h.meta.get("changes_data") else "read-only"
+            print(f"{name:24} {h.source:4} {h.meta.get('app', 'any'):7} {kind:24} {state}")
+        return 0
+    mem = open_memory(settings, pack)
+    rows = candidates(mem.store, pack.slug)
+    mem.store.close()
+    if not rows:
+        print("No recipe has worked 3+ times yet.")
+    for r in rows:
+        print(f"#{r['id']} worked {r['success_count']}x [{r['area'] or '-'}]: {r['text']}")
+    if rows:
+        print(f"Turn one into packs/{pack.slug}/helpers/<name>.py (format: agent_tester/helpers/__init__.py).")
+    return 0
+
+
 def cmd_bugs(settings: Settings, run_dir: Path, post: bool, pack_slug: str | None) -> int:
     from . import gate
     from .preflight.pack_loader import load_pack
@@ -444,6 +466,9 @@ def main(argv=None) -> int:
     ev.add_argument("--live", action="store_true", help="use the real judge (needs the LLM)")
     ev.add_argument("--rebuild", action="store_true", help="re-extract known answers from evals/source/*.pdf")
     ev.add_argument("--cases", help="only these case ids")
+    hp = sub.add_parser("helpers", help="list helpers, or recipes worth turning into helpers")
+    hp.add_argument("action", choices=["list", "candidates"])
+    hp.add_argument("--project", default="savostore")
     lo = sub.add_parser("leftovers")
     lo.add_argument("run_dir", type=Path)
     a = ap.parse_args(argv)
@@ -466,6 +491,8 @@ def main(argv=None) -> int:
         return cmd_memory(settings, a.action, a.ids, a.project)
     if a.cmd == "leftovers":
         return cmd_leftovers(a.run_dir)
+    if a.cmd == "helpers":
+        return cmd_helpers(settings, a.action, a.project)
     if a.cmd == "eval":
         return cmd_eval(settings, a.project, a.live, a.rebuild, a.cases)
     return cmd_resume(settings, a.run_dir)

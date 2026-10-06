@@ -37,6 +37,7 @@ def brief_for(plan: TestPlan, case: PlannedCase, steps: list[int], state: RunSta
     return {
         "task_id": plan.task_id, "env": plan.env, "case_id": case.id, "title": case.title,
         "type": case.type.value, "area": case.area, "expected": case.expected, "preconditions": case.preconditions,
+        "generated": case.generated, "expected_source": case.expected_source,
         "evidence_required": case.evidence_required, "values_to_record": case.values_to_record,
         "steps": [{"n": i + 1, **case.steps[i].model_dump(mode="json")} for i in steps],
         "values_so_far": {k: v["value"] if isinstance(v, dict) else v for k, v in state.values.items()},

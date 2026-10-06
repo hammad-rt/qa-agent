@@ -41,6 +41,10 @@ def check_plan(plan: TestPlan) -> list[str]:
                 issues.append(f"{c.id} step {i+1}: inferred step without reason and source")
         if c.type == CaseType.ADMIN_CONFIG and not any(s.restores for s in c.steps):
             issues.append(f"{c.id}: admin case has no restore step")
+        if c.generated and not c.skip_reason and not c.expected.strip() and not c.open_question:
+            issues.append(f"{c.id}: generated case has no expected result and no question for the user")
+        if c.generated and c.expected.strip() and not c.expected_source:
+            issues.append(f"{c.id}: generated case does not say where its expected result comes from")
         if c.type == CaseType.NOT_UI and not c.skip_reason:
             issues.append(f"{c.id}: non-UI case needs a skip_reason")
 

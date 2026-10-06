@@ -24,6 +24,7 @@ th{background:#f5f5f5;text-align:left}h2{border-bottom:2px solid #eee;padding-bo
 <p class="muted">Run {{ run_id }}{% if pack_name %} · {{ pack_name }}{% endif %}{% if model %} · model {{ model.requested }}{% if model.served %} (served: {{ model.served | join(', ') }}){% endif %}{% endif %}</p>
 
 <h2>Summary</h2>
+{% if plan.cases_source == 'generated' %}<p class="mean">The task had no test cases, so the agent wrote these from the task description and you reviewed them at the plan gate. A FAIL on a generated case means the app or the task's wording needs a look; it is not a confirmed bug until checked.</p>{% endif %}
 <table><tr>{% for v in order %}<th class="{{ v.split()[0] }}">{{ v }}</th>{% endfor %}<th>Total</th></tr>
 <tr>{% for v in order %}<td>{{ counts.get(v, 0) }}</td>{% endfor %}<td>{{ results | length }} of {{ plan.cases | length }}</td></tr></table>
 {% if drafts.drafts %}<h3>Top new bugs (drafts, not posted)</h3><ol>{% for d in drafts.drafts[:5] %}
@@ -36,11 +37,11 @@ th{background:#f5f5f5;text-align:left}h2{border-bottom:2px solid #eee;padding-bo
 
 <h2>Cases</h2>
 {% for c in plan.cases %}{% set r = results.get(c.id) %}<div class="case">
-<h3>{{ c.id }}: {{ c.title }} · <span class="{{ (r.verdict if r else 'NOT').split()[0] }}">{{ r.verdict if r else 'not run' }}</span>
+<h3>{{ c.id }}: {{ c.title }}{% if c.generated %} <small style="background:#e8f0fe;padding:1px 6px;border-radius:4px">generated</small>{% endif %} · <span class="{{ (r.verdict if r else 'NOT').split()[0] }}">{{ r.verdict if r else 'not run' }}</span>
 {% if r and r.known_bug %} <small>(still present: bug {{ r.known_bug }})</small>{% endif %}</h3>
 <ol>{% for s in c.steps %}<li>[{{ s.app }}] {{ s.text }}{% if s.inferred %} <i>(inferred: {{ s.inferred_reason }}; {{ s.inferred_source }})</i>{% endif %}
 {% if r and (loop.index|string) in done.get(c.id, []) %} ✓{% endif %}</li>{% endfor %}</ol>
-<table><tr><th style="width:50%">Expected</th><th>Actual</th></tr><tr><td>{{ c.expected or (r.expected if r else '') }}</td><td>{{ r.actual if r else '' }}</td></tr></table>
+<table><tr><th style="width:50%">Expected</th><th>Actual</th></tr><tr><td>{{ c.expected or (r.expected if r else '') }}{% if c.expected_source %}<br><span class="muted">source: {{ c.expected_source }}</span>{% endif %}</td><td>{{ r.actual if r else '' }}</td></tr></table>
 {% if r and r.values %}<p>{% for k, v in r.values.items() %}<code>{{ k }} = {{ v }}</code> {% endfor %}</p>{% endif %}
 {% if r and r.note %}<div class="{{ 'mean' if r.verdict != 'PASS' else '' }}"><b>{{ 'What this means' if r.verdict != 'PASS' else 'Note' }}:</b> {{ r.note }}</div>{% endif %}
 {% if r and r.lessons_applied %}<p class="muted">Lessons applied: {{ r.lessons_applied | join(', ') }}</p>{% endif %}

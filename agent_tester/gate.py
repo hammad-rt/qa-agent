@@ -9,15 +9,19 @@ from .preflight import gap_resolver as G
 
 def show_plan(plan: TestPlan, issues: list[str], out=print) -> None:
     out(f"\nPlan for #{plan.task_id} on {plan.env}: {len(plan.cases)} case(s)")
+    if plan.cases_source == "generated":
+        out("  The task has no test cases, so I wrote these from its description. Check them before approving.")
     for c in plan.cases:
-        out(f"  {c.id} [{c.type.value}] {c.title}" + (f"  (skip: {c.skip_reason})" if c.skip_reason else ""))
+        out(f"  {c.id} [{c.type.value}]{' [generated]' if c.generated else ''} {c.title}" + (f"  (skip: {c.skip_reason})" if c.skip_reason else ""))
         for i, s in enumerate(c.steps, 1):
             tags = [t for t, on in (("inferred", s.inferred), ("changes data", s.changes_data),
                                     ("pays", s.costs_money), ("irreversible", s.irreversible)) if on]
             out(f"     {i}. [{s.app}] {s.text}" + (f"  <{', '.join(tags)}>" if tags else ""))
             if s.inferred:
                 out(f"        why: {s.inferred_reason} (source: {s.inferred_source})")
-        out(f"     expected: {c.expected}")
+        out(f"     expected: {c.expected or '(not stated in the task)'}" + (f"  [source: {c.expected_source}]" if c.expected_source else ""))
+        if c.open_question:
+            out(f"     question: {c.open_question}")
     if issues:
         out("\nPlan check problems:")
         for i in issues:

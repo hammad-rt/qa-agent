@@ -99,8 +99,10 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
     first = rm.issue(task_id)
     pack = find_pack(settings.packs_dir, [first["project"]["id"]])
     bundle = rm.fetch_task(task_id, pack.config["redmine"].get("test_case_subject_prefix", "Test Cases - "))
-    if bundle.test_case_task is None and not bundle.issue["subject"].startswith("Test Cases"):
-        print("No 'Test Cases - ...' child task found; planning from the task itself.")
+    from . import casegen
+    generate = casegen.needs_generation(bundle, pack.config["redmine"].get("test_case_subject_prefix", "Test Cases - "))
+    if generate:
+        print("No 'Test Cases - ...' task found; I'll write the cases from the task description for you to review.")
     state = RunState.new(settings.runs_dir, task_id)
     print(f"Pack: {pack.slug}. Run folder: {state.dir}")
 
@@ -122,7 +124,7 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
             task_text += f"\n\nRETEST MODE: plan only the cases that check this fixed bug: {hint}"
     lessons_mem = open_memory(settings, pack)
     plan = asyncio.run(plan_task(settings, pack, task_text, task_id, env, only_case=",".join(only) or None,
-                                 lessons=lessons_mem.as_prompt(lessons_mem.preload()), trace_path=state.dir / "trace.jsonl"))
+                                 lessons=lessons_mem.as_prompt(lessons_mem.preload()), trace_path=state.dir / "trace.jsonl", generate=generate))
     lessons_mem.store.close()
     if only:                                   # code enforces the case selection, whatever the planner returned
         from .modes import filter_plan
@@ -137,8 +139,20 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
     ctx = G.GapContext(pack=pack, env=env, memory=memory, wiki_texts=wiki, task_text=bundle.all_text(),
                        url_checker=G.http_url_checker(), allow_hosts=policy.allow_hosts)
     G.resolve(plan.requirements, ctx)
-    gate.show_plan(plan, check_plan(plan))
+    issues = check_plan(plan)
+    if generate:
+        issues += casegen.check_generated(plan, casegen.task_sources(bundle, pack.facts))
+    gate.show_plan(plan, issues)
+    if generate:
+        for n in casegen.coverage_notes(plan, bundle.all_text()):
+            print(f"  note: {n}")
     gate.ask_batch(plan.requirements, ctx)
+    if generate:
+        state.data["case_answers"] = casegen.ask_case_questions(plan)
+        plan = casegen.edit_cases(plan)
+        (state.dir / "generated_cases.textile").write_text(casegen.to_textile(plan, bundle.issue.get("subject", "")))
+        print(f"Generated cases saved in {state.dir / 'generated_cases.textile'}. "
+              f"After the run you can post them to Redmine with: cases {state.dir} --post")
     still = G.open_questions(plan.requirements)
     state.set_plan(plan)
     if still:
@@ -475,6 +489,37 @@ def cmd_bugs(settings: Settings, run_dir: Path, post: bool, pack_slug: str | Non
     return 0
 
 
+def cmd_cases(settings: Settings, run_dir: Path, post: bool, pack_slug: str | None) -> int:
+    """Show the generated cases of a run, or post them to Redmine as a "Test Cases" child (asks first)."""
+    from . import casegen, gate
+    from .preflight.pack_loader import load_pack
+    from .preflight.redmine import Redmine
+    from .run_state import RunState
+    from .tools.policy import PolicyViolation, from_pack
+    state = RunState(run_dir)
+    plan = state.plan
+    if plan is None or plan.cases_source != "generated":
+        print("This run used the task's own test cases; nothing to post.")
+        return 0
+    print(casegen.to_textile(plan))
+    if not post:
+        return 0
+    if state.data.get("cases_posted"):
+        print(f"Already posted as #{state.data['cases_posted']}.")
+        return 0
+    pack = load_pack(settings.packs_dir / pack_slug) if pack_slug else _pack_for_run(settings, plan)
+    rm = Redmine(settings.redmine_url, settings.redmine_api_key)
+    task = rm.issue(plan.task_id)
+    policy = from_pack(pack, "staging", approver=gate.console_approver())
+    try:
+        new_id = casegen.post_cases(state, rm, policy, task["project"]["id"], task.get("subject", ""))
+    except PolicyViolation:
+        print("Not posted.")
+        return 1
+    print(f"Posted as #{new_id}.")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="agent_tester")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -526,6 +571,10 @@ def main(argv=None) -> int:
     pk.add_argument("slug")
     pk.add_argument("--name")
     pk.add_argument("--project-id", type=int, action="append", default=[])
+    cs = sub.add_parser("cases", help="show generated test cases of a run, or post them to Redmine")
+    cs.add_argument("run_dir", type=Path)
+    cs.add_argument("--post", action="store_true")
+    cs.add_argument("--project")
     lo = sub.add_parser("leftovers")
     lo.add_argument("run_dir", type=Path)
     a = ap.parse_args(argv)
@@ -554,6 +603,8 @@ def main(argv=None) -> int:
         return cmd_pack(settings, a.action, a.slug, a.name, a.project_id)
     if a.cmd == "helpers":
         return cmd_helpers(settings, a.action, a.project)
+    if a.cmd == "cases":
+        return cmd_cases(settings, a.run_dir, a.post, a.project)
     if a.cmd == "eval":
         return cmd_eval(settings, a.project, a.live, a.rebuild, a.cases)
     return cmd_resume(settings, a.run_dir)

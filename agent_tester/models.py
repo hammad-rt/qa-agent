@@ -60,11 +60,15 @@ class PlannedCase(BaseModel):
     values_to_record: list[str] = Field(default_factory=list)
     conflicts: list[str] = Field(default_factory=list)
     skip_reason: str | None = None
+    generated: bool = False           # written by the planner from the task text, not taken from a Test Cases task
+    expected_source: str | None = None  # where the expected result comes from: 'description: "..."', 'comment 2: "..."', 'facts.md: "..."', 'user'
+    open_question: str | None = None  # asked at the plan gate when the task does not say what should happen
 
 
 class TestPlan(BaseModel):
     task_id: int
     env: Literal["staging", "prod"] = "staging"
+    cases_source: Literal["task", "generated"] = "task"
     cases: list[PlannedCase] = Field(default_factory=list)
     requirements: list[Requirement] = Field(default_factory=list)
     global_conflicts: list[str] = Field(default_factory=list)

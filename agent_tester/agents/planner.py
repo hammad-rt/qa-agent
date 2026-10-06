@@ -28,11 +28,11 @@ def _static(s: str):
 
 
 async def plan_task(settings: Settings, pack, task_text: str, task_id: int, env: str, only_case: str | None = None,
-                    max_rounds: int = 3, lessons: str = "", trace_path=None) -> TestPlan:
+                    max_rounds: int = 3, lessons: str = "", trace_path=None, generate: bool = False) -> TestPlan:
     task_text = redact(task_text)
     planner = build_planner(settings, pack, env)
     reviewer = build_reviewer(settings, task_text)
-    ask = f"Task #{task_id}:\n{task_text}\n\n" + (f"Saved lessons for this project (apply them, cite ids in inferred_source):\n{lessons}\n\n" if lessons else "") + (f"Plan ONLY these cases: {only_case}.\n" if only_case else "")
+    ask = f"Task #{task_id}:\n{task_text}\n\n" + (f"Saved lessons for this project (apply them, cite ids in inferred_source):\n{lessons}\n\n" if lessons else "") + (f"Plan ONLY these cases: {only_case}.\n" if only_case else "") + (prompts.GENERATE if generate else "")
     feedback = ""
     for _ in range(max_rounds):
         raw = await run_agent(planner, ask + feedback, settings, trace_path=trace_path, retry=True)
@@ -40,6 +40,9 @@ async def plan_task(settings: Settings, pack, task_text: str, task_id: int, env:
         data.setdefault("task_id", task_id)
         data["env"] = env
         plan = TestPlan.model_validate(data)
+        if generate:                           # code marks generated cases, whatever the model said
+            from ..casegen import mark_generated
+            plan = mark_generated(plan)
         review = extract_json(await run_agent(reviewer, plan.model_dump_json(indent=1), settings, trace_path=trace_path, retry=True))
         if review.get("ok"):
             return plan

@@ -27,9 +27,25 @@ General testing rules:
 {core}
 """
 
+GENERATE = """
+THIS TASK HAS NO TEST CASES. Write them yourself from the task text above (description, comments, linked issues)
+and the project facts. Rules:
+- Cover: the main flow; boundaries for every number or limit (e.g. 150 and 151 for "over 150"); invalid or
+  missing input; permissions/roles if the task mentions them; checks that span more than one app.
+- Ids G1, G2, ... Set generated=true on every case. Keep cases small: one behaviour each.
+- expected_source is REQUIRED: say where the expected result comes from and quote it, e.g.
+  description: "points are credited after the order is delivered"   or   comment 2: "..."   or   facts.md: "...".
+  The quote must be copied word for word from that source.
+- If the task does not say what should happen, do NOT guess: leave expected empty and put the question for
+  the user in open_question (e.g. "What should happen when the balance is exactly 150?").
+- Do not write cases for things the task does not touch.
+"""
+
 REVIEWER = """You review a test plan against the task. Output ONLY JSON: {{"ok": bool, "problems": [str]}}.
 Check: every task case is covered; steps follow the task; expected results are the task's, not invented;
 inferred steps are labelled; data-changing steps have an action_type; numbers are left for calculate().
+If cases are generated (generated=true): every expected result has an expected_source quoting the task or facts,
+or is empty with an open_question; boundaries and invalid input are covered; nothing outside the task is tested.
 Task:
 {task}
 """
@@ -62,6 +78,8 @@ Verdicts: PASS, FAIL, PARTIAL, BLOCKED, NOT VERIFIED, SKIPPED, AGENT INCOMPLETE.
 - If behaviour differs from the task but the project facts say it is intended, it is PASS with a note.
 - If required evidence is missing, use NOT VERIFIED.
 - Deviations and inferred steps in the log must be mentioned in `note`.
+- If brief.generated is true, the case was written by the agent from the task text. A mismatch is still FAIL or
+  PARTIAL, but start `note` with "Generated case:" and say whether the app or the task's wording looks wrong.
 
 - `known_bug_candidates` is a code-made shortlist of similar known bugs; confirm or ignore each.
 - `lessons` are saved project lessons and user corrections. Follow them; list the ids you used in lessons_applied.

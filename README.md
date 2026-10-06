@@ -1,4 +1,4 @@
-# qa-agent (phases 1-7)
+# qa-agent (phases 1-8)
 
 Multi-project Redmine test agent. Design: `docs/test-agent-rdp.md`, `docs/test-agent-technical-spec.md`.
 General rules: `core/core-testing-spec.md`. Project packs: `packs/<slug>/` (Savostore is the first).
@@ -62,6 +62,16 @@ General rules: `core/core-testing-spec.md`. Project packs: `packs/<slug>/` (Savo
 - The pack is picked by the task's Redmine project id. Memory, allowlist, known bugs and helpers are per pack
   (see the fictional fixture in `tests/fixtures/packs/`).
 
+## Phase 8: cases from the task description
+- When a task has no "Test Cases - ..." child, the planner writes cases (G1, G2...) from the description,
+  comments, parent and facts.md: main flow, boundaries for every limit, invalid input, cross-app checks.
+- Code marks them generated and checks that every expected result quotes text really found in the task or
+  facts. When the task doesn't say what should happen, you're asked at the plan gate (blank skips the case).
+  You can drop cases (dependants go too) or add one-line cases before approving.
+- The report and bug drafts label generated cases: a FAIL there means "app or task wording needs a look".
+- `cases <run folder>` shows them; `cases <run folder> --post` creates a "Test Cases" child in Redmine,
+  only after you approve.
+
 ## Setup
     python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
     cp .env.example .env && chmod 600 .env     # add REDMINE_API_KEY
@@ -85,12 +95,13 @@ General rules: `core/core-testing-spec.md`. Project packs: `packs/<slug>/` (Savo
     .venv/bin/python -m agent_tester helpers list|candidates --project savostore
     .venv/bin/python -m agent_tester onboard <issue id or project>
     .venv/bin/python -m agent_tester pack new|validate <slug>
+    .venv/bin/python -m agent_tester cases runs/<run folder> [--post]
 
 ## Tests (offline)
     .venv/bin/python -m unittest discover -s tests -t .
 
 ## Status
-Phases 1-7 are built and covered by 107 offline tests. No live run yet: the LLM endpoint (internal only) and
+Phases 1-8 are built and covered by 121 offline tests. No live run yet: the LLM endpoint (internal only) and
 staging must be reachable from the machine running the agent, and the Redmine API key and account passwords
 must be set. Nothing in code is task-specific, but that only gets proven by live runs on several different
 tasks (for example #180966, #165348 and a fresh one) and a passing `eval --live`.

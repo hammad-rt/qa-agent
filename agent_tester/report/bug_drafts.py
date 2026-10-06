@@ -35,6 +35,7 @@ def build_drafts(state, pack) -> dict:
             "steps": steps, "expected": r.expected or (case.expected if case else ""), "actual": r.actual,
             "values": r.values, "evidence": r.evidence, "linked_cases": [cid], "task_id": plan.task_id,
             "what_this_means": r.note or "", "status": "draft", "posted_issue": None,
+            "generated_case": bool(case and case.generated),
         })
         if did not in r.bug_draft_ids:
             r.bug_draft_ids.append(did)
@@ -72,6 +73,8 @@ def draft_text(d: dict) -> str:
         lines += ["", "*Evidence:* " + ", ".join(d["evidence"])]
     lines += ["", f"*Linked cases:* {', '.join(d['linked_cases'])} (task #{d['task_id']})", "",
               f"*What this means:* {d['what_this_means']}"]
+    if d.get("generated_case"):
+        lines += ["", "_Found by a test case the agent wrote from the task description. Confirm the expected result before filing._"]
     return redact("\n".join(lines))
 
 

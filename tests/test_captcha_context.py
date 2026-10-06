@@ -158,3 +158,29 @@ class ManualLogin(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VisibleBrowser(unittest.TestCase):
+    def test_display_passed_to_browser(self):
+        with mock.patch.dict("os.environ", {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0"}), \
+                tempfile.TemporaryDirectory() as d:
+            ts = T.playwright_toolset(Path(d), "portal")
+            env = ts._connection_params.server_params.env
+            self.assertEqual(env.get("DISPLAY"), ":0")
+            self.assertIn("--headless", ts._connection_params.server_params.args)
+
+    def test_headed_flag(self):
+        with mock.patch.dict("os.environ", {"QA_HEADED": "1"}), tempfile.TemporaryDirectory() as d:
+            self.assertNotIn("--headless", T.playwright_toolset(Path(d), "portal")._connection_params.server_params.args)
+
+    def test_no_display_says_so(self):
+        msgs = []
+        with mock.patch.dict("os.environ", {}, clear=True), tempfile.TemporaryDirectory() as d:
+            self.assertFalse(T.manual_login(Path(d), "portal", "https://x/login", "u", out=msgs.append))
+        self.assertIn("DISPLAY", msgs[0])
+
+    def test_still_on_login(self):
+        start = "https://staging5.rolustech.com:4225/login"
+        self.assertTrue(T.still_on_login("https://staging5.rolustech.com:4225/login?next=/", start))
+        self.assertFalse(T.still_on_login("https://staging5.rolustech.com:4225/home", start))
+        self.assertFalse(T.still_on_login("https://staging5.rolustech.com:4225/", "https://staging5.rolustech.com:4225/"))

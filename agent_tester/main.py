@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -688,12 +689,14 @@ def _main(argv=None) -> int:
     t.add_argument("--cases", "--case", dest="case", help="comma-separated case ids, e.g. TC1,TC3")
     t.add_argument("--retest-bug", type=int, help="known bug number from facts.md, or a Redmine issue posted from a draft")
     t.add_argument("--env", default=None, help="staging, pre-prod or production (asked if not given)")
+    t.add_argument("--headed", action="store_true", help="show the testers' browser windows (debugging)")
     t.add_argument("--dry-run", action="store_true", help="plan and questions only")
     t.add_argument("--email", action="store_true", help="email the report to REPORT_EMAIL_TO")
     t.add_argument("--email-progress", action="store_true", help="also email start, halfway, pause and finish")
     rr = sub.add_parser("rerun")
     rr.add_argument("task_id", type=int)
     rr.add_argument("--cases", required=True)
+    rr.add_argument("--headed", action="store_true", help="show the testers' browser windows")
     rp = sub.add_parser("report")
     rp.add_argument("run_dir", type=Path)
     rp.add_argument("--project")
@@ -703,6 +706,7 @@ def _main(argv=None) -> int:
     bg.add_argument("--project")
     r = sub.add_parser("resume")
     r.add_argument("run_dir", type=Path)
+    r.add_argument("--headed", action="store_true", help="show the testers' browser windows")
     c = sub.add_parser("correct")
     c.add_argument("run_dir", type=Path)
     c.add_argument("case_id")
@@ -738,6 +742,8 @@ def _main(argv=None) -> int:
     lo.add_argument("run_dir", type=Path)
     a = ap.parse_args(argv)
     settings = Settings.load()
+    if getattr(a, "headed", False):
+        os.environ["QA_HEADED"] = "1"
     if a.cmd in ("test", "rerun", "resume", "onboard") and not getattr(a, "dry_run", False):
         msg = model_host_ok(settings)
         if msg:

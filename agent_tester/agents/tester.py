@@ -37,6 +37,16 @@ def run_urls(pack, env: str, state) -> dict:
     return urls
 
 
+def browser_env() -> dict:
+    """The MCP client passes only a few env vars (PATH, HOME...) to the browser server by default. Without DISPLAY /
+    WAYLAND_DISPLAY Playwright silently runs headless, so a "visible" login window never appears."""
+    return dict(os.environ)
+
+
+def headed() -> bool:
+    return os.environ.get("QA_HEADED", "") in ("1", "true", "yes")
+
+
 def playwright_toolset(run_dir: Path, app: str):
     """No --allowed-origins: Playwright matches it per scheme://host:port and blocks every other request,
     including a site's own CDN files and payment pages (it is not a security boundary either). The sites a run
@@ -53,10 +63,10 @@ def playwright_toolset(run_dir: Path, app: str):
     profile = run_dir / "profiles" / app
     profile.mkdir(parents=True, exist_ok=True)
     # one browser profile per app per run: logging in once (or a person solving a CAPTCHA once) lasts the run
-    args = ["-y", "@playwright/mcp@latest", "--headless", "--user-data-dir", str(profile), "--output-dir", str(out),
-            "--viewport-size", "1366,900"]
+    args = ["-y", "@playwright/mcp@latest", *([] if headed() else ["--headless"]), "--user-data-dir", str(profile),
+            "--output-dir", str(out), "--viewport-size", "1366,900"]
     return Toolset(connection_params=StdioConnectionParams(
-        server_params=StdioServerParameters(command="npx", args=args), timeout=60))
+        server_params=StdioServerParameters(command="npx", args=args, env=browser_env()), timeout=60))
 
 
 class TesterSession:
@@ -356,24 +366,52 @@ def manual_login(run_dir: Path, app: str, url: str, username: str | None, input_
     args = ["-y", "@playwright/mcp@latest", "--user-data-dir", str(profile), "--output-dir", str(run_dir / "shots"),
             "--viewport-size", "1366,900"]
 
+    env = browser_env()
+    if not (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")):
+        out("There's no screen to show a browser on (DISPLAY is not set), so a manual login isn't possible here.")
+        return False
+
     async def go() -> bool:
-        async with stdio_client(StdioServerParameters(command="npx", args=args)) as (r, w):
+        async with stdio_client(StdioServerParameters(command="npx", args=args, env=env)) as (r, w):
             async with ClientSession(r, w) as sess:
                 await sess.initialize()
-                await sess.call_tool("browser_navigate", {"url": url})
-                out(f"\nA browser window is open on {url}." + (f" Log in as {username}" if username else " Log in")
-                    + " (solve the CAPTCHA if there is one), wait for the home page, then press Enter here.")
-                ans = input_fn("  Press Enter when logged in, or type s to skip: ").strip().lower()
+                res = await sess.call_tool("browser_navigate", {"url": url})
+                if getattr(res, "isError", False):
+                    out(f"The browser couldn't open {url}: {_text_of(res)[:300]}")
+                    return False
+                out(f"\nA browser window should now be open on {url}." +
+                    (f" Log in as {username}" if username else " Log in") +
+                    " (solve the CAPTCHA if there is one), wait for the home page, then press Enter here.")
+                ok = False
+                for attempt in range(3):
+                    ans = input_fn("  Press Enter when logged in, or type s to skip: ").strip().lower()
+                    if ans in ("s", "skip", "n", "no"):
+                        break
+                    snap = await sess.call_tool("browser_snapshot", {})
+                    m = re.search(r"Page URL:\s*(\S+)", _text_of(snap))
+                    page = m.group(1) if m else ""
+                    if page and still_on_login(page, url):
+                        out(f"  The browser is still on the login page ({page}).")
+                        continue
+                    ok = True
+                    break
                 try:
                     await sess.call_tool("browser_close", {})
                 except Exception:  # noqa: BLE001
                     pass
-                return ans not in ("s", "skip", "n", "no")
+                return ok
     try:
         return asyncio.run(go())
     except Exception as e:  # noqa: BLE001  no display, npx missing...
         out(f"Couldn't open a browser window for the manual login ({type(e).__name__}: {e}).")
         return False
+
+
+def still_on_login(page: str, start: str) -> bool:
+    """After a manual login the page should have moved off the login form."""
+    p = urlparse(page).path.lower().rstrip("/")
+    return any(w in p for w in ("login", "signin", "sign-in", "sign_in")) or \
+        (page.rstrip("/") == start.rstrip("/") and "login" in start.lower())
 
 
 def _safe_args(args: dict) -> dict:

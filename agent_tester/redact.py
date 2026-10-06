@@ -27,3 +27,18 @@ def redact(text: str, keep_emails: tuple[str, ...] = ()) -> str:
     t = _EMAIL.sub(lambda m: m.group() if m.group().lower() in keep else "[email]", t)
     t = _PHONE.sub("[phone]", t)
     return t
+
+
+SECRET_ENV_HINTS = ("PASSWORD", "TOKEN", "API_KEY", "SECRET")
+
+
+def scrub_secrets(text: str, env: dict | None = None) -> str:
+    """Replace the literal value of any secret env var with its name, wherever it appears."""
+    import os
+    env = env if env is not None else os.environ
+    if not text:
+        return text
+    for k, v in env.items():
+        if v and len(v) >= 4 and any(h in k.upper() for h in SECRET_ENV_HINTS) and v in text:
+            text = text.replace(v, f"[{k}]")
+    return text

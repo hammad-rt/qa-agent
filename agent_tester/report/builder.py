@@ -22,6 +22,14 @@ td,th{border:1px solid #ddd;padding:6px;vertical-align:top;font-size:14px}th{bac
 <td>{% if r %}{% for e in r.evidence %}<a href="shots/{{ e }}">{{ e }}</a><br>{% endfor %}{% endif %}</td>
 <td>{{ r.note if r and r.note else '' }}</td></tr>{% endfor %}</table>
 <h2>Inferred steps</h2><ul>{% for c in plan.cases %}{% for s in c.steps if s.inferred %}<li>{{ c.id }}: {{ s.text }} ({{ s.inferred_reason }}; {{ s.inferred_source }})</li>{% endfor %}{% endfor %}</ul>
+{% if baseline or final %}<h2>Baseline vs final</h2><table><tr><th>Value</th><th>Baseline</th><th>Final</th></tr>
+{% for k in snap_keys %}<tr><td>{{ k }}</td><td>{{ baseline.get(k, '') }}</td><td>{{ final.get(k, '') }}</td></tr>{% endfor %}</table>{% endif %}
+{% if unrestored %}<h2 class="FAIL">Settings not restored</h2><ul>{% for u in unrestored %}<li>{{ u.app }}: {{ u.setting }} was {{ u.original }}, now {{ u.restored or 'not restored' }}</li>{% endfor %}</ul>{% endif %}
+{% if ledger %}<h2>Test data</h2><table><tr><th>App</th><th>Record</th><th>Action</th><th>Final state</th><th>Case</th><th>Tag</th></tr>
+{% for e in ledger %}<tr><td>{{ e.app }}</td><td>{{ e.record }}</td><td>{{ e.action }}</td><td>{{ e.final_state }}</td><td>{{ e.case_id }}</td><td>{{ e.tag }}{% if e.cleaned %} (cleaned){% endif %}</td></tr>{% endfor %}</table>{% endif %}
+{% if learned %}<h2>Learned this run</h2><p>Approved: {{ learned.approved | length }}, rejected: {{ learned.rejected | length }},
+promoted to core: {{ learned.promoted | length }}, new open bugs saved: {{ learned.open_bugs_saved | length }}</p>{% endif %}
+{% if model %}<p style="color:#666;font-size:12px">Model: {{ model.requested }} served as {{ model.served or model.error }}</p>{% endif %}
 <h2>Requirements</h2><ul>{% for q in plan.requirements %}<li>{{ q.key }}: {{ q.status }}{% if q.source %} from {{ q.source }}{% endif %}</li>{% endfor %}</ul>
 </body></html>"""
 
@@ -32,10 +40,17 @@ def build_report(state) -> Path:
     counts: dict[str, int] = {}
     for r in results.values():
         counts[r.verdict] = counts.get(r.verdict, 0) + 1
-    html = Environment(autoescape=select_autoescape()).from_string(TEMPLATE).render(plan=plan, results=results, counts=counts)
+    html = Environment(autoescape=select_autoescape()).from_string(TEMPLATE).render(
+        plan=plan, results=results, counts=counts, baseline=state.data.get("baseline") or {}, final=state.data.get("final") or {},
+        snap_keys=list(dict.fromkeys([*(state.data.get("baseline") or {}), *(state.data.get("final") or {})])),
+        ledger=state.data.get("ledger", []), unrestored=[u for u in state.data.get("settings", {}).values() if not u["verified"]],
+        learned=state.data.get("learned"), model=state.data.get("model"))
     out = state.dir / "report.html"
     out.write_text(redact(html))
     (state.dir / "report.json").write_text(json.dumps(
         {"task_id": plan.task_id, "env": plan.env, "counts": counts,
-         "results": {k: v.model_dump(mode="json") for k, v in results.items()}}, indent=2))
+         "results": {k: v.model_dump(mode="json") for k, v in results.items()},
+         "ledger": state.data.get("ledger", []), "settings": state.data.get("settings", {}),
+         "baseline": state.data.get("baseline"), "final": state.data.get("final"), "learned": state.data.get("learned"),
+         "model": state.data.get("model")}, indent=2))
     return out

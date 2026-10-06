@@ -42,6 +42,11 @@ TESTER = """You are the tester for the {app_label} app ({base_url}) on {env}. Do
 - After each step call mark_step(n, deviation=""). Say what differed from the plan in `deviation`.
 - If you must do something not in the plan, call mark_step with inferred=true and a reason.
 - For evidence call evidence_name(what) then browser_take_screenshot with that filename.
+- Before a step you are unsure about, call recall_lessons("<what you are doing>") and follow saved lessons.
+- Log every record you create or change with ledger_record(record, action, final_state).
+- Admin settings: record_original(setting, value) BEFORE changing; after restoring, re-read it and call
+  record_restored(setting, value, verified=true).
+- If a workaround worked, call propose_memory("recipe", "<when X, do Y>"). The user approves it later.
 - When done (or stuck) call finish(notes, stuck). Do not judge pass/fail; the judge does that.
 - Never type or reveal passwords except into the login form. Password for this run: use get_secret(env_name).
 """
@@ -57,6 +62,10 @@ Verdicts: PASS, FAIL, PARTIAL, BLOCKED, NOT VERIFIED, SKIPPED, AGENT INCOMPLETE.
 - If behaviour differs from the task but the project facts say it is intended, it is PASS with a note.
 - If required evidence is missing, use NOT VERIFIED.
 - Deviations and inferred steps in the log must be mentioned in `note`.
+
+- `known_bug_candidates` is a code-made shortlist of similar known bugs; confirm or ignore each.
+- `lessons` are saved project lessons and user corrections. Follow them; list the ids you used in lessons_applied.
+- `unrestored_settings` lists admin settings that were not restored and verified; mention them in `note`.
 
 Known open bugs:
 {bugs}

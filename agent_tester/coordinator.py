@@ -36,7 +36,7 @@ def brief_for(plan: TestPlan, case: PlannedCase, steps: list[int], state: RunSta
     """What a tester or the judge sees: the case, its steps, values so far. Never another agent's reasoning."""
     return {
         "task_id": plan.task_id, "env": plan.env, "case_id": case.id, "title": case.title,
-        "type": case.type.value, "expected": case.expected, "preconditions": case.preconditions,
+        "type": case.type.value, "area": case.area, "expected": case.expected, "preconditions": case.preconditions,
         "evidence_required": case.evidence_required, "values_to_record": case.values_to_record,
         "steps": [{"n": i + 1, **case.steps[i].model_dump(mode="json")} for i in steps],
         "values_so_far": {k: v["value"] if isinstance(v, dict) else v for k, v in state.values.items()},
@@ -44,9 +44,31 @@ def brief_for(plan: TestPlan, case: PlannedCase, steps: list[int], state: RunSta
     }
 
 
+def read_snapshot(plan: TestPlan, state: RunState, testers: dict[str, Tester], label: str) -> dict:
+    """Baseline (before the first case) or final (after the last) read-only values (tech spec section 8)."""
+    if not plan.baseline_steps or state.data.get(label):
+        return state.data.get(label, {})
+    pseudo = PlannedCase(id=label.upper(), title=f"{label} values", steps=plan.baseline_steps)
+    got: dict = {}
+    for app, steps in app_turns(pseudo):
+        if app in ("none", "redmine") or app not in testers:
+            continue
+        brief = brief_for(plan, pseudo, steps, state)
+        brief["read_only"] = True
+        try:
+            sr = testers[app](app, brief, state)
+            got.update(sr.values)
+        except Exception as e:  # noqa: BLE001
+            state.data["notes"].append(f"{label} read on {app} failed: {e}")
+    state.data[label] = got
+    state.checkpoint(f"{label} values recorded ({len(got)})")
+    return got
+
+
 def run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge: Judge,
              on_case_done: Callable[[CaseResult], None] | None = None, max_retries: int = 1) -> dict[str, CaseResult]:
     state.checkpoint("run started", status="running")
+    read_snapshot(plan, state, testers, "baseline")
     by_id = {c.id: c for c in plan.cases}
     for cid in execution_order(plan):
         if state.result(cid):
@@ -56,6 +78,7 @@ def run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge:
         state.set_result(result)
         if on_case_done:
             on_case_done(result)
+    read_snapshot(plan, state, testers, "final")
     state.checkpoint("run finished", status="finished")
     return {cid: state.result(cid) for cid in execution_order(plan)}
 
@@ -78,6 +101,7 @@ def _run_case(plan, case, state, testers, judge, max_retries) -> CaseResult:
         brief = brief_for(plan, case, steps, state)
         attempt = 0
         while True:
+            log_mark = len(state.data["action_log"])
             try:
                 sr = tester(app, brief, state)
                 break
@@ -85,6 +109,10 @@ def _run_case(plan, case, state, testers, judge, max_retries) -> CaseResult:
                 raise
             except Exception as e:                    # noqa: BLE001  model/browser hiccup
                 attempt += 1
+                changed = [a for a in state.data["action_log"][log_mark:] if a.get("approval") in ("approved", "pre_approved")]
+                if changed:                           # never replay a turn that already changed data
+                    state.checkpoint(f"paused in {case.id} ({app}) after a data-changing step: {type(e).__name__}: {e}", status="paused")
+                    raise RunPaused(f"{case.id}: failed after a data-changing step; check the record before resuming") from e
                 if attempt > max_retries:
                     state.checkpoint(f"paused in {case.id} ({app}): {type(e).__name__}: {e}", status="paused")
                     raise RunPaused(f"{case.id}: {e}") from e

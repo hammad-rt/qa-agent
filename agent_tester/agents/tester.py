@@ -48,7 +48,7 @@ class TesterSession:
     """Holds the per-turn bookkeeping that the callbacks and tool functions share."""
 
     def __init__(self, app: str, brief: dict, state: RunState, policy: Policy, evidence: Evidence,
-                 max_calls: int, max_minutes: int, keep_emails: tuple[str, ...] = ()):
+                 max_calls: int, max_minutes: int, keep_emails: tuple[str, ...] = (), memory=None, ledger=None):
         self.app, self.brief, self.state, self.policy, self.ev = app, brief, state, policy, evidence
         self.case_id = brief["case_id"]
         self.max_calls, self.deadline = max_calls, time.time() + max_minutes * 60
@@ -58,6 +58,7 @@ class TesterSession:
         self.keep_emails = keep_emails
         self.last_snapshot = ""
         self.current_step: int | None = None
+        self.memory, self.ledger = memory, ledger
 
     # ---- tools exposed to the model -------------------------------------------------
     def tools(self):
@@ -128,7 +129,50 @@ class TesterSession:
             s.result.notes, s.result.stuck, s.finished = redact(notes), stuck, True
             return {"ok": True}
 
-        return [record_value, calculate, request_approval, mark_step, evidence_name, get_secret, finish]
+        def recall_lessons(query: str) -> dict:
+            """Search saved lessons, recipes and known bugs for this project, e.g. "rewards apply button"."""
+            if s.memory is None:
+                return {"lessons": []}
+            return {"lessons": [{"id": r["id"], "kind": r["kind"], "text": r["text"]} for r in s.memory.recall(query)]}
+
+        def propose_memory(kind: str, text: str, area: str = "") -> dict:
+            """Suggest a lesson, recipe or fact worth keeping (e.g. a workaround that worked). The user approves it at the end."""
+            if s.memory is None:
+                return {"error": "memory not available"}
+            try:
+                mid = s.memory.propose(kind, text, area=area or s.brief.get("area"), evidence=f"{s.state.dir.name}/{s.case_id}")
+                return {"proposed": mid}
+            except ValueError as e:
+                return {"error": str(e)}
+
+        def ledger_record(record: str, action: str, final_state: str = "", note: str = "") -> dict:
+            """Log test data you created or changed. action: created | changed | used. record e.g. "order A1158"."""
+            if s.ledger is None:
+                return {"error": "ledger not available"}
+            s.ledger.add(s.case_id, s.app, record, action, final_state, note)
+            return {"ok": True, "tag": s.ledger.run_tag}
+
+        def record_original(setting: str, value: str) -> dict:
+            """Before changing an admin setting, record its current value exactly as shown."""
+            if s.ledger is None:
+                return {"error": "ledger not available"}
+            s.ledger.record_original(s.case_id, s.app, setting, value)
+            return {"ok": True}
+
+        def record_restored(setting: str, value: str, verified: bool) -> dict:
+            """After restoring an admin setting, record the value now shown and whether you re-read it to verify."""
+            if s.ledger is None:
+                return {"error": "ledger not available"}
+            try:
+                r = s.ledger.record_restored(s.app, setting, value, verified)
+            except KeyError as e:
+                return {"error": str(e)}
+            return {"restored_ok": r["verified"], "original": r["original"]}
+
+        tools = [record_value, calculate, request_approval, mark_step, evidence_name, get_secret, finish, recall_lessons]
+        if not s.brief.get("read_only"):
+            tools += [propose_memory, ledger_record, record_original, record_restored]
+        return tools
 
     # ---- callbacks: the code side of every tool call --------------------------------
     def before_tool(self, tool, args, tool_context):
@@ -195,7 +239,7 @@ def _redact_obj(o, keep):
     return o
 
 
-def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Path):
+def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Path, memory=None):
     """Returns tester(app, brief, state) -> StepResult for the coordinator."""
     evidence = Evidence(run_dir)
     keep = tuple(a.get("username", "") for app in pack.apps.values() for a in app.get("accounts", {}).values()
@@ -203,23 +247,33 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
 
     def tester(app: str, brief: dict, state: RunState) -> StepResult:
         from google.adk.agents import LlmAgent
+
+        from ..ledger import Ledger
         sess = TesterSession(app, brief, state, policy, evidence, settings.max_tool_calls_per_case,
-                             settings.max_minutes_per_case, keep_emails=keep)
-        toolset = playwright_toolset(run_dir, app, policy.allow_hosts)
-        instr = prompts.TESTER.format(app_label=pack.apps[app].get("label", app), base_url=pack.url(app, env), env=env)
-        agent = LlmAgent(name=f"tester_{app}", model=model(settings), instruction=lambda _c: instr,
-                         tools=[toolset, *sess.tools()],
-                         before_tool_callback=sess.before_tool, after_tool_callback=sess.after_tool)
-        prompt = "Your steps:\n" + json.dumps(brief, indent=1, default=str)
-        async def go():
-            try:
-                await run_agent(agent, prompt, settings)
-            finally:
+                             settings.max_minutes_per_case, keep_emails=keep, memory=memory, ledger=Ledger(state))
+        was_ro = policy.read_only
+        policy.read_only = bool(brief.get("read_only")) or was_ro
+        try:
+            toolset = playwright_toolset(run_dir, app, policy.allow_hosts)
+            instr = prompts.TESTER.format(app_label=pack.apps[app].get("label", app), base_url=pack.url(app, env), env=env)
+            if brief.get("read_only"):
+                instr += "\nThis turn is READ-ONLY: log in and read values only. Never change anything."
+            agent = LlmAgent(name=f"tester_{app}", model=model(settings), instruction=lambda _c: instr,
+                             tools=[toolset, *sess.tools()],
+                             before_tool_callback=sess.before_tool, after_tool_callback=sess.after_tool)
+            prompt = "Your steps:\n" + json.dumps(brief, indent=1, default=str)
+
+            async def go():
                 try:
-                    await toolset.close()
-                except Exception:  # noqa: BLE001
-                    pass
-        asyncio.run(go())
+                    await run_agent(agent, prompt, settings, trace_path=run_dir / "trace.jsonl")
+                finally:
+                    try:
+                        await toolset.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+            asyncio.run(go())
+        finally:
+            policy.read_only = was_ro
         if not sess.finished and not sess.result.limit_hit:
             sess.result.stuck = True
             sess.result.notes = sess.result.notes or "tester stopped without calling finish()"

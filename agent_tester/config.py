@@ -43,6 +43,9 @@ class Settings:
     max_minutes_per_case: int
     runs_dir: Path
     packs_dir: Path
+    memory_db: Path
+    run_retention: int
+    min_free_gb: float
 
     @classmethod
     def load(cls) -> "Settings":
@@ -59,4 +62,7 @@ class Settings:
             max_minutes_per_case=int(e("MAX_MINUTES_PER_CASE", "15")),
             runs_dir=Path(e("RUNS_DIR", str(ROOT / "runs"))),
             packs_dir=Path(e("PACKS_DIR", str(ROOT / "packs"))),
+            memory_db=Path(e("MEMORY_DB", str(ROOT / "memory" / "memory.db"))),
+            run_retention=int(e("RUN_RETENTION", "5")),
+            min_free_gb=float(e("MIN_FREE_GB", "5")),
         )

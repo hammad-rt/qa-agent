@@ -3,6 +3,9 @@
   check                               connectivity to the LLM, Redmine and the pack's environments
   test <task_id> [--case TC3] [--env staging] [--dry-run]
   resume <run_dir>
+  correct <run_dir> <case_id> <VERDICT> "<why>" [--general]   save a lesson now and fix the result
+  memory list|pending|approve <ids>|retire <ids> [--project savostore]
+  leftovers <run_dir>                 test data and settings the run left behind
 """
 from __future__ import annotations
 
@@ -12,6 +15,41 @@ import sys
 from pathlib import Path
 
 from .config import ROOT, Settings
+
+
+def open_memory(settings: Settings, pack):
+    from .memory.embed import Embedder
+    from .memory.service import Memory
+    from .memory.store import MemoryStore
+    mem = Memory(MemoryStore(settings.memory_db, Embedder()), pack.slug)
+    n = mem.import_resources_json(ROOT / "memory" / "resources.json")
+    if n:
+        print(f"Moved {n} saved answer(s) from resources.json into memory.db.")
+    return mem
+
+
+def model_fingerprint(settings: Settings) -> dict:
+    import requests
+    try:
+        r = requests.get(settings.llm_base_url.rstrip("/") + "/models", timeout=10)
+        ids = [m.get("id") for m in r.json().get("data", [])]
+        return {"requested": settings.llm_model, "served": ids, "base_url": settings.llm_base_url}
+    except Exception as e:  # noqa: BLE001
+        return {"requested": settings.llm_model, "error": f"{type(e).__name__}"}
+
+
+def _closed_checker(rm):
+    cache: dict[int, bool] = {}
+
+    def closed(issue_id: int) -> bool:
+        if issue_id not in cache:
+            try:
+                st = rm.issue(issue_id).get("status", {})
+                cache[issue_id] = bool(st.get("is_closed")) or st.get("name", "").lower() in ("closed", "resolved", "rejected")
+            except Exception:  # noqa: BLE001
+                cache[issue_id] = False
+        return cache[issue_id]
+    return closed
 
 
 def cmd_check(settings: Settings) -> int:
@@ -44,7 +82,6 @@ def cmd_check(settings: Settings) -> int:
 def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_run: bool) -> int:
     from . import gate
     from .agents.planner import plan_task
-    from .memory.resources import ResourceMemory
     from .plan_checks import check_plan
     from .preflight import gap_resolver as G
     from .preflight.pack_loader import find_pack
@@ -62,10 +99,19 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
     state = RunState.new(settings.runs_dir, task_id)
     print(f"Pack: {pack.slug}. Run folder: {state.dir}")
 
-    plan = asyncio.run(plan_task(settings, pack, bundle.all_text(), task_id, env, only_case=case))
+    from .reliability import free_gb
+    if free_gb(settings.runs_dir.parent) < settings.min_free_gb:
+        print(f"Warning: less than {settings.min_free_gb:g} GB free disk.")
+    lessons_mem = open_memory(settings, pack)
+    plan = asyncio.run(plan_task(settings, pack, bundle.all_text(), task_id, env, only_case=case,
+                                 lessons=lessons_mem.as_prompt(lessons_mem.preload()), trace_path=state.dir / "trace.jsonl"))
+    lessons_mem.store.close()
     wiki_proj = pack.config["redmine"].get("wiki_project") or bundle.issue["project"]["id"]
     wiki = {t: (rm.wiki_page(wiki_proj, t) or "") for t in pack.config["redmine"].get("wiki_pages", [])}
-    memory = ResourceMemory(ROOT / "memory" / "resources.json")
+    memory = open_memory(settings, pack)
+    flagged = memory.recheck_linked(_closed_checker(rm))
+    if flagged:
+        print(f"{len(flagged)} saved lesson(s)/bug(s) are linked to closed issues and will be re-verified.")
     policy = from_pack(pack, env, approver=gate.console_approver())
     ctx = G.GapContext(pack=pack, env=env, memory=memory, wiki_texts=wiki, task_text=bundle.all_text(),
                        url_checker=G.http_url_checker(), allow_hosts=policy.allow_hosts)
@@ -88,25 +134,49 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
         return 1
     policy.preapprove(pre)
     state.data["approved"], state.data["preapproved"] = True, pre
-    return _execute(settings, pack, plan, state, policy)
+    state.data["model"] = model_fingerprint(settings)
+    return _execute(settings, pack, plan, state, policy, memory)
 
 
-def _execute(settings, pack, plan, state, policy) -> int:
+def _execute(settings, pack, plan, state, policy, memory) -> int:
     from .agents.judge import make_judge
     from .agents.tester import make_tester
     from .coordinator import RunPaused, run_plan
+    from .end_of_run import export_memory, finish_memory
+    from .ledger import Ledger
+    from .reliability import RunLock, RunLocked, apply_retention
     from .report.builder import build_report
 
-    tester = make_tester(settings, pack, plan.env, policy, state.dir)
-    testers = {app: tester for app in pack.apps}
     try:
-        results = run_plan(plan, state, testers, make_judge(settings, pack),
-                           on_case_done=lambda r: print(f"  {r.case_id}: {r.verdict}" + (f" (still present: bug {r.known_bug})" if r.known_bug else "")))
-    except RunPaused as e:
-        print(f"\nPaused: {e}\nResume with: python -m agent_tester resume {state.dir}")
-        return 3
+        with RunLock(settings.runs_dir / ".run.lock"):
+            tester = make_tester(settings, pack, plan.env, policy, state.dir, memory=memory)
+            testers = {app: tester for app in pack.apps}
+            try:
+                results = run_plan(plan, state, testers, make_judge(settings, pack, memory),
+                                   on_case_done=lambda r: print(f"  {r.case_id}: {r.verdict}" + (f" (still present: bug {r.known_bug})" if r.known_bug else "")))
+            except RunPaused as e:
+                print(f"\nPaused: {e}\nResume with: python -m agent_tester resume {state.dir}")
+                return 3
+            except KeyboardInterrupt:
+                state.checkpoint("stopped by user (Ctrl-C)", status="paused")
+                print(f"\nStopped. Resume with: python -m agent_tester resume {state.dir}")
+                return 130
+    except RunLocked as e:
+        print(f"Can't start: {e}")
+        return 5
+    led = Ledger(state)
+    if led.unrestored():
+        print("\nWARNING: these settings were not restored and verified: " +
+              ", ".join(f"{u['app']}:{u['setting']} (was {u['original']})" for u in led.unrestored()))
+    if led.leftovers():
+        print(f"{len(led.leftovers())} test record(s) left behind; see `leftovers {state.dir}`.")
+    finish_memory(memory, pack, state)
+    export_memory(memory, ROOT / "memory" / "memory-export.json")
     out = build_report(state)
     print(f"\nReport: {out}")
+    trimmed = apply_retention(settings.runs_dir, keep=settings.run_retention)
+    if trimmed:
+        print(f"Trimmed {len(trimmed)} old run folder(s) to state.json and report only.")
     return 0 if all(r and r.verdict != "AGENT INCOMPLETE" for r in results.values()) else 4
 
 
@@ -130,7 +200,67 @@ def cmd_resume(settings: Settings, run_dir: Path) -> int:
         if r.kind == "url" and r.value:
             from urllib.parse import urlparse
             policy.allow_host(urlparse(r.value).hostname or "")
-    return _execute(settings, pack, plan, state, policy)
+    return _execute(settings, pack, plan, state, policy, open_memory(settings, pack))
+
+
+def _pack_for_run(settings, plan):
+    from .preflight.pack_loader import find_pack
+    from .preflight.redmine import Redmine
+    proj = Redmine(settings.redmine_url, settings.redmine_api_key).issue(plan.task_id)["project"]["id"]
+    return find_pack(settings.packs_dir, [proj])
+
+
+def cmd_correct(settings, run_dir: Path, case_id: str, verdict: str, why: str, general: bool, pack_slug: str | None) -> int:
+    from .models import CaseResult
+    from .preflight.pack_loader import load_pack
+    from .report.builder import build_report
+    from .run_state import RunState
+    state = RunState(run_dir)
+    old = state.result(case_id)
+    if old is None:
+        print(f"No result for {case_id} in {run_dir}")
+        return 1
+    pack = load_pack(settings.packs_dir / pack_slug) if pack_slug else _pack_for_run(settings, state.plan)
+    mem = open_memory(settings, pack)
+    area = next((c.area for c in state.plan.cases if c.id == case_id), None)
+    mid = mem.correction(case_id, old.verdict, verdict, why, area=area, run_id=state.dir.name,
+                         linked_issue=state.plan.task_id, general=general)
+    fixed = CaseResult.model_validate({**old.model_dump(), "verdict": verdict,
+                                       "note": f"{old.note or ''} Corrected by user: {why}".strip()})
+    state.set_result(fixed)
+    build_report(state)
+    print(f"Saved lesson #{mid} and updated {case_id}: {old.verdict} -> {verdict}.")
+    return 0
+
+
+def cmd_memory(settings, action: str, ids: list[int], pack_slug: str) -> int:
+    from .preflight.pack_loader import load_pack
+    mem = open_memory(settings, load_pack(settings.packs_dir / pack_slug))
+    if action == "list":
+        rows = mem.store.query(mem.scopes, statuses=("active", "needs_recheck"))
+        for r in rows:
+            print(f"[{r['id']}] {r['scope']:<20} {r['kind']:<15} {r['status']:<13} {r['text'][:100]}")
+    elif action == "pending":
+        for r in mem.pending():
+            print(f"[{r['id']}] {r['kind']:<8} {r['text']}")
+    elif action == "approve":
+        mem.approve(ids)
+    elif action == "retire":
+        mem.reject(ids)
+    return 0
+
+
+def cmd_leftovers(run_dir: Path) -> int:
+    from .ledger import Ledger
+    from .run_state import RunState
+    led = Ledger(RunState(run_dir))
+    for e in led.leftovers():
+        print(f"{e['app']:<8} {e['record']:<24} {e['action']:<8} {e['final_state']:<16} tag={e['tag']} ({e['case_id']})")
+    for u in led.unrestored():
+        print(f"SETTING  {u['app']}:{u['setting']} original={u['original']} now={u['restored']} verified={u['verified']}")
+    if not led.leftovers() and not led.unrestored():
+        print("Nothing left behind.")
+    return 0
 
 
 def main(argv=None) -> int:
@@ -144,6 +274,19 @@ def main(argv=None) -> int:
     t.add_argument("--dry-run", action="store_true")
     r = sub.add_parser("resume")
     r.add_argument("run_dir", type=Path)
+    c = sub.add_parser("correct")
+    c.add_argument("run_dir", type=Path)
+    c.add_argument("case_id")
+    c.add_argument("verdict", choices=["PASS", "FAIL", "PARTIAL", "BLOCKED", "NOT VERIFIED", "SKIPPED", "AGENT INCOMPLETE"])
+    c.add_argument("why")
+    c.add_argument("--general", action="store_true")
+    c.add_argument("--project")
+    m = sub.add_parser("memory")
+    m.add_argument("action", choices=["list", "pending", "approve", "retire"])
+    m.add_argument("ids", nargs="*", type=int)
+    m.add_argument("--project", default="savostore")
+    lo = sub.add_parser("leftovers")
+    lo.add_argument("run_dir", type=Path)
     a = ap.parse_args(argv)
     settings = Settings.load()
     if a.cmd == "check":
@@ -152,6 +295,12 @@ def main(argv=None) -> int:
         if a.env == "prod":
             print("Prod runs are read-only; every write needs your approval.")
         return cmd_test(settings, a.task_id, a.case, a.env, a.dry_run)
+    if a.cmd == "correct":
+        return cmd_correct(settings, a.run_dir, a.case_id, a.verdict, a.why, a.general, a.project)
+    if a.cmd == "memory":
+        return cmd_memory(settings, a.action, a.ids, a.project)
+    if a.cmd == "leftovers":
+        return cmd_leftovers(a.run_dir)
     return cmd_resume(settings, a.run_dir)
 
 

@@ -85,6 +85,8 @@ def resolve_url(req: Requirement, app: str, ctx: GapContext) -> Requirement:
         _check_url(req, row["value"], ctx)
         if req.status == "resolved":
             return req
+        if req.status == "failed_check" and hasattr(ctx.memory, "mark_stale"):
+            ctx.memory.mark_stale(sc, req.key)      # comes back as a question (tech spec 7.5)
 
     words = [ctx.env, app, label] + label.split()
     for title, text in ctx.wiki_texts.items():

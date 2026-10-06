@@ -17,8 +17,13 @@ def model(settings: Settings):
     return LiteLlm(model=f"openai/{settings.llm_model}", api_base=settings.llm_base_url, api_key=settings.llm_api_key)
 
 
-async def run_agent(agent, prompt: str, settings: Settings, state: dict | None = None, app_name: str = "qa-agent") -> str:
-    """Run one agent to completion and return its final text."""
+async def run_agent(agent, prompt: str, settings: Settings, state: dict | None = None, app_name: str = "qa-agent",
+                    trace_path=None, retry: bool = False) -> str:
+    """Run one agent to completion and return its final text. retry=True only for agents without side
+    effects (planner, reviewer, judge); testers are never replayed automatically."""
+    if retry:
+        from ..reliability import with_retries
+        return await with_retries(lambda: run_agent(agent, prompt, settings, state, app_name, trace_path, False))
     global _sem
     from google.adk.runners import Runner
     from google.adk.sessions import InMemorySessionService
@@ -34,6 +39,8 @@ async def run_agent(agent, prompt: str, settings: Settings, state: dict | None =
     async with _sem:
         async for ev in runner.run_async(user_id="qa", session_id=sid,
                                          new_message=types.Content(role="user", parts=[types.Part(text=prompt)])):
+            if trace_path:
+                _trace(trace_path, ev)
             if ev.content and ev.content.parts:
                 text = "".join(p.text or "" for p in ev.content.parts if getattr(p, "text", None))
                 if text and ev.is_final_response():
@@ -46,3 +53,24 @@ def extract_json(text: str) -> dict:
     m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
     raw = m.group(1) if m else text[text.find("{"): text.rfind("}") + 1]
     return json.loads(raw)
+
+
+def _trace(path, ev) -> None:
+    """Append a masked one-line summary of an ADK event to trace.jsonl."""
+    from datetime import datetime
+
+    from ..redact import redact, scrub_secrets
+    rec = {"at": datetime.now().isoformat(timespec="seconds"), "author": getattr(ev, "author", None)}
+    parts = (ev.content.parts if ev.content and ev.content.parts else [])
+    calls = [{"name": p.function_call.name, "args": dict(p.function_call.args or {})} for p in parts if getattr(p, "function_call", None)]
+    resps = [p.function_response.name for p in parts if getattr(p, "function_response", None)]
+    text = "".join(p.text or "" for p in parts if getattr(p, "text", None))
+    if calls:
+        rec["calls"] = calls
+    if resps:
+        rec["responses"] = resps
+    if text:
+        rec["text"] = text[:500]
+    line = scrub_secrets(redact(json.dumps(rec, default=str)))
+    with open(path, "a") as f:
+        f.write(line + "\n")

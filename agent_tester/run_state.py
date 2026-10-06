@@ -63,5 +63,6 @@ class RunState:
 
     def save(self) -> None:
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.data, indent=2, default=str))
+        from .redact import scrub_secrets
+        tmp.write_text(scrub_secrets(json.dumps(self.data, indent=2, default=str)))
         tmp.replace(self.path)

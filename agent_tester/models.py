@@ -51,6 +51,7 @@ class PlannedCase(BaseModel):
     id: str
     title: str
     type: CaseType = CaseType.UI
+    area: str | None = None           # memory area (rewards, parcels...) for loading lessons
     preconditions: list[str] = Field(default_factory=list)
     depends_on: list[str] = Field(default_factory=list)
     steps: list[Step] = Field(default_factory=list)
@@ -69,6 +70,7 @@ class TestPlan(BaseModel):
     global_conflicts: list[str] = Field(default_factory=list)
     data_to_create: list[str] = Field(default_factory=list)
     preapprovable_actions: list[str] = Field(default_factory=list)
+    baseline_steps: list[Step] = Field(default_factory=list)   # read-only reads before the first case and after the last
 
 
 class ActionLogEntry(BaseModel):

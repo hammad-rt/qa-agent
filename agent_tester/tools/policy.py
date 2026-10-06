@@ -21,6 +21,7 @@ class Policy:
     env: str = "staging"
     approver: Callable[[str, str, dict], bool] | None = None   # (action, reason, details) -> approved?
     log: list[dict] = field(default_factory=list)
+    read_only: bool = False          # baseline/final reads and preflight: anything needing approval is refused
 
     def preapprove(self, action_types: list[str]) -> None:
         bad = [a for a in action_types if a in self.always_ask or a not in self.preapprovable]
@@ -52,6 +53,9 @@ class Policy:
         needs = risky or bool(action_type)
         if not needs:
             return "not_needed"
+        if self.read_only:
+            self.log.append({"action": action, "type": action_type, "approval": "denied", "why": "read-only"})
+            raise PolicyViolation(f"read-only step, not allowed: {action}")
         if action_type and action_type in self.preapproved and action_type not in self.always_ask and self.env != "prod":
             self.log.append({"action": action, "type": action_type, "approval": "pre_approved"})
             return "pre_approved"

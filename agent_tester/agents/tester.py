@@ -8,7 +8,6 @@ import json
 import re
 from urllib.parse import urlparse
 import os
-import signal
 import time
 from pathlib import Path
 
@@ -48,10 +47,9 @@ def headed() -> bool:
     return os.environ.get("QA_HEADED", "") in ("1", "true", "yes")
 
 
-def force_headed() -> None:
-    """After a manual CAPTCHA login the tester must reopen headed on the same profile.
-    Headless Chrome often fails to reuse the headed session cookies."""
-    os.environ["QA_HEADED"] = "1"
+def storage_state_path(run_dir: Path, app: str) -> Path:
+    """Cookies + local storage saved after a manual login; testers reload this instead of hoping the profile survived."""
+    return run_dir / "storage" / f"{app}.json"
 
 
 def _chrome_lock_pid(profile: Path) -> int | None:
@@ -109,21 +107,9 @@ def wait_profile_free(profile: Path, timeout: float = 20.0) -> bool:
 
 
 def release_profile(profile: Path, timeout: float = 20.0) -> bool:
-    """Make the profile reusable: wait for Chrome to exit, SIGTERM/SIGKILL the lock holder if needed."""
+    """Wait for Chrome to exit and clear stale Singleton locks. Never SIGTERM/SIGKILL — that drops in-memory cookies."""
     profile.mkdir(parents=True, exist_ok=True)
-    if wait_profile_free(profile, timeout=timeout):
-        return True
-    pid = _chrome_lock_pid(profile)
-    if pid is not None:
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.kill(pid, sig)
-            except OSError:
-                break
-            if wait_profile_free(profile, timeout=8.0 if sig == signal.SIGTERM else 3.0):
-                return True
-    clear_stale_profile_locks(profile)
-    return not profile_in_use(profile)
+    return wait_profile_free(profile, timeout=timeout)
 
 
 def playwright_toolset(run_dir: Path, app: str):
@@ -139,15 +125,23 @@ def playwright_toolset(run_dir: Path, app: str):
     from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams
 
     out = run_dir / "shots"
+    out.mkdir(parents=True, exist_ok=True)
+    storage = storage_state_path(run_dir, app)
     profile = run_dir / "profiles" / app
-    profile.mkdir(parents=True, exist_ok=True)
     # Never start a second Chrome on a busy profile — that is the "browser crashed" handoff after CAPTCHA login.
-    if not release_profile(profile, timeout=25.0):
-        raise RuntimeError(
-            f"Chrome is still using profile {profile}; close that window (or kill the leftover process) and retry.")
-    # one browser profile per app per run: logging in once (or a person solving a CAPTCHA once) lasts the run
-    args = ["-y", "@playwright/mcp@latest", *([] if headed() else ["--headless"]), "--user-data-dir", str(profile),
-            "--output-dir", str(out), "--viewport-size", "1366,900"]
+    if storage.is_file():
+        # Isolated context loaded from the post-login storage file (covers session-only cookies too).
+        args = ["-y", "@playwright/mcp@latest", *([] if headed() else ["--headless"]),
+                "--isolated", "--storage-state", str(storage.resolve()),
+                "--output-dir", str(out), "--viewport-size", "1366,900"]
+    else:
+        profile.mkdir(parents=True, exist_ok=True)
+        if not release_profile(profile, timeout=25.0):
+            raise RuntimeError(
+                f"Chrome is still using profile {profile}; close that window and retry.")
+        args = ["-y", "@playwright/mcp@latest", *([] if headed() else ["--headless"]),
+                "--user-data-dir", str(profile),
+                "--output-dir", str(out), "--viewport-size", "1366,900"]
     return Toolset(connection_params=StdioConnectionParams(
         server_params=StdioServerParameters(command="npx", args=args, env=browser_env()), timeout=60))
 
@@ -228,11 +222,9 @@ class TesterSession:
             return {"filename": str(png.resolve())}
 
         def get_secret(env_name: str) -> dict:
-            """Return the password stored in env var env_name, only for typing into a login form."""
-            allowed = {r.get("secret_env") for r in s.brief["requirements"].values() if r.get("secret_env")}
-            if env_name not in allowed or not os.environ.get(env_name):
-                return {"error": f"{env_name} is not available for this run"}
-            return {"value": os.environ[env_name]}
+            """Passwords are never returned to the model. Use run_helper("login_form", ...) so code types them."""
+            return {"error": f"passwords are not returned to the model (asked for {env_name}); "
+                             f'use run_helper("login_form", \'{{"account": "<pack account>"}}\')'}
 
         def needs_manual_login(reason: str) -> dict:
             """Call when login is blocked by a CAPTCHA or robot check. Do not try to solve it."""
@@ -451,15 +443,20 @@ def _is_context_error(e: BaseException) -> bool:
 
 
 def manual_login(run_dir: Path, app: str, url: str, username: str | None, input_fn=input, out=print) -> bool:
-    """Open a visible browser on the same profile the tester uses, so a person can log in (and solve a CAPTCHA)
-    once. The login then lasts for the rest of the run. Returns True when the person says they're done."""
+    """Open a visible browser so a person can log in (and solve a CAPTCHA) once. Saves storage state to
+    runs/<run>/storage/<app>.json, closes Chrome cleanly, then testers reload that file. Returns True when done."""
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
     profile = run_dir / "profiles" / app
     profile.mkdir(parents=True, exist_ok=True)
+    shots = run_dir / "shots"
+    shots.mkdir(parents=True, exist_ok=True)
+    storage = storage_state_path(run_dir, app)
+    storage.parent.mkdir(parents=True, exist_ok=True)
     clear_stale_profile_locks(profile)
-    args = ["-y", "@playwright/mcp@latest", "--user-data-dir", str(profile), "--output-dir", str(run_dir / "shots"),
-            "--viewport-size", "1366,900"]
+    # --caps=storage only here: needed for browser_storage_state. Testers load via --storage-state, no storage caps.
+    args = ["-y", "@playwright/mcp@latest", "--user-data-dir", str(profile), "--output-dir", str(shots),
+            "--viewport-size", "1366,900", "--caps=storage"]
 
     env = browser_env()
     if not (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")):
@@ -477,8 +474,7 @@ def manual_login(run_dir: Path, app: str, url: str, username: str | None, input_
                 out(f"\nA browser window should now be open on {url}." +
                     (f" Log in as {username}" if username else " Log in") +
                     " (solve the CAPTCHA if there is one), wait for the home page, then press Enter here.")
-                out("  After Enter, this window closes and a new browser reopens with your saved login "
-                    "(headed, same profile).")
+                out("  After Enter, the session is saved and this window closes cleanly; the tester reopens with it.")
                 ok = False
                 for attempt in range(3):
                     ans = input_fn("  Press Enter when logged in, or type s to skip: ").strip().lower()
@@ -492,24 +488,37 @@ def manual_login(run_dir: Path, app: str, url: str, username: str | None, input_
                         continue
                     ok = True
                     break
-                # Do not call browser_close: it tears down the page before Chrome flushes cookies to the
-                # profile. Exiting the MCP stdio session stops Chrome cleanly; we then wait for the lock.
-                return ok
+                if not ok:
+                    await sess.call_tool("browser_close", {})
+                    return False
+                # Persist cookies + local storage before close (covers session-only cookies the profile would drop).
+                saved = await sess.call_tool("browser_storage_state", {"filename": str(storage.resolve())})
+                if getattr(saved, "isError", False):
+                    out(f"Could not save the login session: {_text_of(saved)[:300]}")
+                    await sess.call_tool("browser_close", {})
+                    return False
+                await sess.call_tool("browser_close", {})
+                return True
     try:
         ok = asyncio.run(go())
     except Exception as e:  # noqa: BLE001  no display, npx missing...
         out(f"Couldn't open a browser window for the manual login ({type(e).__name__}: {e}).")
         return False
     if not ok:
-        release_profile(profile)
+        release_profile(profile, timeout=10.0)
+        if storage.exists():
+            try:
+                storage.unlink()
+            except OSError:
+                pass
         return False
     if not release_profile(profile, timeout=25.0):
         out("Couldn't free the browser profile after login; close any leftover Chrome for this run and press Enter again.")
         return False
-    # Brief pause so Chrome can flush cookies to the profile before the tester reopens it.
-    time.sleep(0.5)
-    force_headed()
-    out("Login saved. Reopening a headed browser with that session for the test cases.")
+    if not storage.is_file():
+        out("Login looked done but the session file was not written; try the manual login again.")
+        return False
+    out(f"Login saved to {storage.name}. The tester will reopen with that session.")
     return True
 
 

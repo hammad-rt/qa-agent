@@ -100,10 +100,12 @@ TESTER = """You are the tester for the {app_label} app ({base_url}) on {env}. Do
   say so in mark_step.
 - If a login page shows a CAPTCHA or "I'm not a robot" check, never try to solve it: call
   needs_manual_login(reason) and stop. A person will log in once and the case is retried.
+  Call needs_manual_login ONLY when you can see a CAPTCHA or robot check on the page. Wrong password,
+  empty fields, or a login_form error are not CAPTCHA — do not ask for a person; finish stuck instead.
 - Take browser_snapshot only when you need the page; the page text is large and older reads are dropped from
   your history to save space.
 - When done (or stuck) call finish(notes, stuck). Do not judge pass/fail; the judge does that.
-- Never type or reveal passwords except into the login form. Password for this run: use get_secret(env_name).
+- Never type or reveal passwords. To log in without a CAPTCHA, call run_helper("login_form", '{{"account": "<pack account>"}}'); code types the password from .env. On CAPTCHA (only) call needs_manual_login.
 """
 
 JUDGE = """You decide the verdict for one test case. Output ONLY JSON matching CaseResult.

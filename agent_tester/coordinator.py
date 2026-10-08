@@ -90,7 +90,8 @@ def restore_pass(plan: TestPlan, state: RunState, testers: dict[str, Tester], un
 
 def run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge: Judge,
              on_case_done: Callable[[CaseResult], None] | None = None, max_retries: int = 1,
-             manual_login: Callable[[str, str], bool] | None = None) -> dict[str, CaseResult]:
+             manual_login: Callable[[str, str], bool] | None = None,
+             manual_login_apps: list[str] | None = None) -> dict[str, CaseResult]:
     state.checkpoint("run started", status="running")
     read_snapshot(plan, state, testers, "baseline")
     by_id = {c.id: c for c in plan.cases}
@@ -98,7 +99,8 @@ def run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge:
         if state.result(cid):
             continue                                  # resume: already done
         case = by_id[cid]
-        result = _run_case(plan, case, state, testers, judge, max_retries, manual_login)
+        result = _run_case(plan, case, state, testers, judge, max_retries, manual_login,
+                           manual_login_apps)
         state.set_result(result)
         if on_case_done:
             on_case_done(result)
@@ -107,7 +109,8 @@ def run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge:
     return {cid: state.result(cid) for cid in execution_order(plan)}
 
 
-def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None) -> CaseResult:
+def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
+              manual_login_apps=None) -> CaseResult:
     if case.skip_reason:
         return CaseResult(case_id=case.id, verdict="SKIPPED", expected=case.expected, note=case.skip_reason)
     for dep in case.depends_on:
@@ -142,15 +145,23 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None)
                     raise RunPaused(f"{case.id}: {e}") from e
         if sr.needs_login:
             done = state.data.setdefault("manual_logins", {})
-            if manual_login is not None:
-                # login_first may have marked the app done, but the handoff can still lose the
-                # session (profile lock / headless reopen). Re-offer instead of immediate BLOCKED.
-                if done.get(app):
+            retries = state.data.setdefault("manual_login_retries", {})
+            # Mid-run offer only for pack-listed CAPTCHA apps (e.g. portal), not CRM password failures.
+            allowed = set(manual_login_apps or [])
+            if manual_login is not None and app in allowed:
+                # One mid-run re-offer per app if an earlier login did not stick; then BLOCKED.
+                offer = False
+                if not done.get(app):
+                    offer = True
+                elif retries.get(app, 0) < 1:
                     print(f"\nThe {app} session did not stick after the earlier login "
-                          f"(CAPTCHA or login page again). Please log in once more.")
+                          f"(CAPTCHA or login page again). Please log in once more "
+                          f"(only one retry allowed per app this run).")
+                    retries[app] = retries.get(app, 0) + 1
                     done[app] = False
                     state.save()
-                if not done.get(app) and manual_login(app, sr.needs_login):
+                    offer = True
+                if offer and manual_login(app, sr.needs_login):
                     done[app] = True
                     state.save()
                     state.checkpoint(f"manual login on {app} done; retrying {case.id}")

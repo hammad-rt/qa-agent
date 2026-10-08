@@ -112,9 +112,6 @@ def login_first(pack, plan, state, login, input_fn=input) -> list[str]:
         if a.strip().lower() in ("", "y", "yes") and login(app, "CAPTCHA at login (known for this app)"):
             done[app] = True
             did.append(app)
-            # Keep the tester headed on the same profile (manual_login also sets this).
-            from .agents.tester import force_headed
-            force_headed()
     state.save()
     return did
 
@@ -297,7 +294,8 @@ def _execute(settings, pack, plan, state, policy, memory) -> int:
             progress.started(f"#{plan.task_id} on {plan.env}")
             try:
                 results = run_plan(plan, state, testers, make_judge(settings, pack, memory), on_case_done=progress.case_done,
-                                   manual_login=login)
+                                   manual_login=login,
+                                   manual_login_apps=list(pack.config.get("manual_login_apps") or []))
                 left = Ledger(state).unrestored()
                 if left:
                     print("\nThese settings were changed and not put back: " +

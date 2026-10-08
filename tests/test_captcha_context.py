@@ -70,8 +70,14 @@ class History(unittest.TestCase):
     def test_prompts(self):
         self.assertIn("needs_manual_login", prompts.TESTER)
         self.assertIn("never try to solve it", prompts.TESTER)
+        self.assertIn("ONLY when you can see a CAPTCHA", prompts.TESTER)
         self.assertIn("not a setting", prompts.PLANNER)
         self.assertIn("belong to the user chosen for this run", prompts.PLANNER)
+
+    def test_tester_prompt_formats(self):
+        # Literal JSON in the prompt must be double-braced so .format does not KeyError.
+        text = prompts.TESTER.format(app_label="Customer portal", base_url="https://example/", env="staging")
+        self.assertIn('run_helper("login_form", \'{"account": "<pack account>"}\')', text)
 
 
 class LoginTool(unittest.TestCase):
@@ -121,14 +127,15 @@ class ManualLogin(unittest.TestCase):
             asked.append(app)
             logged["in"] = True
             return True
-        res = run_plan(_plan(), self.state, {"portal": tester}, self.judge, manual_login=login)
+        res = run_plan(_plan(), self.state, {"portal": tester}, self.judge, manual_login=login,
+                       manual_login_apps=["portal"])
         self.assertEqual(asked, ["portal"])
         self.assertEqual([res["TC1"].verdict, res["TC2"].verdict], ["PASS", "PASS"])
 
     def test_declined_is_blocked_not_incomplete(self):
         tester, _ = self.captcha_until_login()
         res = run_plan(_plan(), self.state, {"portal": tester}, lambda *a: self.fail("no judge"),
-                       manual_login=lambda app, reason: False)
+                       manual_login=lambda app, reason: False, manual_login_apps=["portal"])
         self.assertEqual(res["TC1"].verdict, "BLOCKED")
         self.assertIn("needs a person", res["TC1"].note)
 
@@ -143,29 +150,21 @@ class ManualLogin(unittest.TestCase):
         seen = []
         opener = lambda run_dir, app, url, user, input_fn=input: seen.append((app, url, user)) or True
         login = make_manual_login(pack, _plan(), self.state, opener=opener)
-        prev = os.environ.get("QA_HEADED")
-        try:
-            did = login_first(pack, _plan(), self.state, login, input_fn=lambda q: "")
-            self.assertEqual(did, ["portal"])
-            self.assertEqual(seen[0][0], "portal")
-            self.assertEqual(seen[0][2], "hammad.iqbal@rolustech.com")
-            self.assertTrue(seen[0][1].startswith("http"))
-            self.assertTrue(T.headed())  # successful manual login keeps tester headed
-            # already done: not asked again (resume)
-            self.assertEqual(login_first(pack, _plan(), self.state, login, input_fn=lambda q: self.fail("asked")), [])
-        finally:
-            if prev is None:
-                os.environ.pop("QA_HEADED", None)
-            else:
-                os.environ["QA_HEADED"] = prev
+        did = login_first(pack, _plan(), self.state, login, input_fn=lambda q: "")
+        self.assertEqual(did, ["portal"])
+        self.assertEqual(seen[0][0], "portal")
+        self.assertEqual(seen[0][2], "hammad.iqbal@rolustech.com")
+        self.assertTrue(seen[0][1].startswith("http"))
+        # already done: not asked again (resume)
+        self.assertEqual(login_first(pack, _plan(), self.state, login, input_fn=lambda q: self.fail("asked")), [])
 
     def test_login_first_skipped_by_user(self):
         pack = load_pack(PACK)
         login = make_manual_login(pack, _plan(), self.state, opener=lambda *a, **k: self.fail("opened"))
         self.assertEqual(login_first(pack, _plan(), self.state, login, input_fn=lambda q: "n"), [])
 
-    def test_session_lost_reoffers_manual_login(self):
-        """If login_first marked portal done but CAPTCHA hits again, ask again instead of BLOCKED."""
+    def test_session_lost_reoffers_manual_login_once(self):
+        """If login_first marked portal done but CAPTCHA hits again, ask once more then retry."""
         attempts = {"n": 0}
 
         def tester(app, brief, state):
@@ -181,14 +180,52 @@ class ManualLogin(unittest.TestCase):
             return True
 
         self.state.data["manual_logins"] = {"portal": True}
-        res = run_plan(_plan(), self.state, {"portal": tester}, self.judge, manual_login=login)
+        res = run_plan(_plan(), self.state, {"portal": tester}, self.judge, manual_login=login,
+                       manual_login_apps=["portal"])
         self.assertEqual(asked, [("portal", "reCAPTCHA")])
         self.assertEqual(res["TC1"].verdict, "PASS")
         self.assertTrue(self.state.data["manual_logins"]["portal"])
+        self.assertEqual(self.state.data["manual_login_retries"]["portal"], 1)
+
+    def test_second_session_loss_is_blocked(self):
+        """Only one mid-run re-login per app; a further CAPTCHA is BLOCKED without another prompt."""
+        def tester(app, brief, state):
+            return StepResult(case_id=brief["case_id"], app=app, stuck=True, needs_login="reCAPTCHA again")
+
+        asked = []
+
+        def login(app, reason):
+            asked.append((app, reason))
+            return True
+
+        self.state.data["manual_logins"] = {"portal": True}
+        self.state.data["manual_login_retries"] = {"portal": 1}
+        res = run_plan(_plan(), self.state, {"portal": tester}, lambda *a: self.fail("no judge"),
+                       manual_login=login, manual_login_apps=["portal"])
+        self.assertEqual(asked, [])
+        self.assertEqual(res["TC1"].verdict, "BLOCKED")
 
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_needs_login_on_non_manual_app_is_blocked_without_offer(self):
+        """CRM is not in manual_login_apps; coordinator must not offer a person login."""
+        asked = []
+
+        def tester(app, brief, state):
+            return StepResult(case_id=brief["case_id"], app="crm", stuck=True,
+                              needs_login="maybe CAPTCHA or session issue")
+
+        def login(app, reason):
+            asked.append(app)
+            return True
+
+        plan = TestPlan(task_id=1, env="staging", cases=[
+            PlannedCase(id="TC1", title="c", expected="e",
+                        steps=[Step(text="login", app="crm")])],
+                        requirements=[])
+        res = run_plan(plan, self.state, {"crm": tester}, lambda *a: self.fail("no judge"),
+                       manual_login=login, manual_login_apps=["portal"])
+        self.assertEqual(asked, [])
+        self.assertEqual(res["TC1"].verdict, "BLOCKED")
 
 
 class VisibleBrowser(unittest.TestCase):
@@ -216,15 +253,19 @@ class VisibleBrowser(unittest.TestCase):
         self.assertFalse(T.still_on_login("https://staging5.rolustech.com:4225/home", start))
         self.assertFalse(T.still_on_login("https://staging5.rolustech.com:4225/", "https://staging5.rolustech.com:4225/"))
 
-    def test_force_headed(self):
-        with mock.patch.dict("os.environ", {"QA_HEADED": ""}, clear=False):
-            os.environ.pop("QA_HEADED", None)
-            self.assertFalse(T.headed())
-            T.force_headed()
-            self.assertTrue(T.headed())
-            with tempfile.TemporaryDirectory() as d:
-                self.assertNotIn("--headless",
-                                 T.playwright_toolset(Path(d), "portal")._connection_params.server_params.args)
+    def test_playwright_toolset_uses_storage_state_when_present(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            storage = T.storage_state_path(root, "portal")
+            storage.parent.mkdir(parents=True)
+            storage.write_text('{"cookies":[],"origins":[]}')
+            with mock.patch.dict("os.environ", {"QA_HEADED": "1"}):
+                args = T.playwright_toolset(root, "portal")._connection_params.server_params.args
+            self.assertIn("--isolated", args)
+            self.assertIn("--storage-state", args)
+            self.assertIn(str(storage.resolve()), args)
+            self.assertNotIn("--user-data-dir", args)
+            self.assertNotIn("--headless", args)
 
     def test_stale_profile_locks_cleared(self):
         with tempfile.TemporaryDirectory() as d:
@@ -249,25 +290,80 @@ class VisibleBrowser(unittest.TestCase):
             self.assertFalse((profile / "SingletonLock").exists())
             self.assertNotIn("--headless", ts._connection_params.server_params.args)
 
-    def test_release_profile_terminates_lock_holder(self):
+    def test_release_profile_does_not_kill_live_chrome(self):
         with tempfile.TemporaryDirectory() as d:
             profile = Path(d) / "profiles" / "portal"
             profile.mkdir(parents=True)
             (profile / "SingletonLock").symlink_to("host-424242")
             (profile / "SingletonCookie").symlink_to("x")
-            # First kill(0) says alive; after SIGTERM the process is gone.
-            alive = {"n": 0}
+            signals = []
+
             def fake_kill(pid, sig):
                 if pid != 424242:
                     raise ProcessLookupError()
-                alive["n"] += 1
-                if sig == 0 and alive["n"] == 1:
-                    return None
+                signals.append(sig)
                 if sig == 0:
-                    raise ProcessLookupError()
-                return None
+                    return None  # process still alive
+                raise AssertionError(f"must not send {sig}")
+
             with mock.patch("os.kill", side_effect=fake_kill):
                 self.assertTrue(T.profile_in_use(profile))
-                self.assertTrue(T.release_profile(profile, timeout=0.2))
-            self.assertFalse((profile / "SingletonLock").exists())
-            self.assertFalse((profile / "SingletonCookie").exists())
+                self.assertFalse(T.release_profile(profile, timeout=0.2))
+            self.assertTrue(signals)  # waited and probed
+            self.assertTrue(all(s == 0 for s in signals))  # never SIGTERM/SIGKILL
+            self.assertTrue((profile / "SingletonLock").is_symlink())  # dangling target; must not unlink
+
+    def test_manual_login_saves_storage_then_closes(self):
+        """After Enter: browser_storage_state then browser_close; no process kill."""
+        calls = []
+
+        class FakeRes:
+            isError = False
+
+        class FakeSess:
+            async def initialize(self):
+                return None
+
+            async def call_tool(self, name, args=None):
+                args = args or {}
+                calls.append((name, args))
+                if name == "browser_snapshot":
+                    class R:
+                        isError = False
+                        content = [type("P", (), {"text": "Page URL: https://x/home\n"})()]
+                    return R()
+                if name == "browser_storage_state":
+                    Path(args["filename"]).parent.mkdir(parents=True, exist_ok=True)
+                    Path(args["filename"]).write_text('{"cookies":[],"origins":[]}')
+                return FakeRes()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        class FakeStdio:
+            async def __aenter__(self):
+                return (None, None)
+
+            async def __aexit__(self, *a):
+                return False
+
+        msgs = []
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.dict("os.environ", {"DISPLAY": ":0"}), \
+                mock.patch("mcp.client.stdio.stdio_client", return_value=FakeStdio()), \
+                mock.patch("mcp.ClientSession", return_value=FakeSess()), \
+                mock.patch.object(T, "release_profile", return_value=True) as rel:
+            ok = T.manual_login(Path(d), "portal", "https://x/login", "u",
+                                input_fn=lambda q: "", out=msgs.append)
+        self.assertTrue(ok)
+        names = [c[0] for c in calls]
+        self.assertEqual(names[-2:], ["browser_storage_state", "browser_close"])
+        self.assertTrue(any("Login saved" in m for m in msgs))
+        rel.assert_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

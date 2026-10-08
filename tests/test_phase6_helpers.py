@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tester.config import ROOT
-from agent_tester.helpers import (HelperContext, McpBrowser, candidates, load_helpers, parse_snapshot,
+from agent_tester.helpers import (HelperContext, HelperError, McpBrowser, candidates, load_helpers, parse_snapshot,
                                   read_labelled_values, run_helper)
 from agent_tester.helpers.core.read_table import parse_tables
 from agent_tester.preflight.pack_loader import load_pack
@@ -83,6 +83,31 @@ class Browser(unittest.TestCase):
                                                                      ("textbox", "Password", "e6"), ("button", "Log In", "e7")])
         b = McpBrowser(FakeMcp([LOGIN]))
         self.assertEqual(asyncio.run(b.find(["Login", "Log in"], ("button",))).ref, "e7")   # case-insensitive, partial
+
+
+    def test_actions_send_target_not_ref(self):
+        """Playwright MCP 0.0.83 accepts target; ref is rejected. Helpers must send target."""
+        fake = FakeMcp([LOGIN, HOME])
+        b = McpBrowser(fake)
+        asyncio.run(b.snapshot())
+        asyncio.run(b.type("Username", "admin"))
+        asyncio.run(b.type("Password", "secret", secret=True))
+        asyncio.run(b.click("Log In"))
+        typed = [a for t, a in fake.calls if t == "browser_type"]
+        clicked = [a for t, a in fake.calls if t == "browser_click"]
+        self.assertTrue(all("target" in a and "ref" not in a for a in typed + clicked))
+        self.assertEqual(typed[0]["target"], "e5")
+        self.assertEqual(clicked[0]["target"], "e7")
+
+    def test_do_raises_on_playwright_error_text(self):
+        """Rejected MCP args look like success unless we check the reply text."""
+        async def bad(tool, args):
+            return '### Error\nInvalid arguments for tool "browser_click":\n✖ expected string, received undefined\n  → at target'
+
+        b = McpBrowser(bad)
+        with self.assertRaises(HelperError) as cm:
+            asyncio.run(b._do("browser_click", {"element": "x", "target": "e1"}))
+        self.assertIn("Invalid arguments", str(cm.exception))
 
     def test_tables_and_labelled_values(self):
         t = parse_tables(TABLE)[0]

@@ -318,9 +318,13 @@ class TesterCallbacks(unittest.TestCase):
         self.assertEqual(self.state.values["shipping_unpaid"]["value"], 400.0)
 
     def test_secret_scope(self):
+        # Passwords must never be returned to the model (use login_form helper instead).
         self.assertIn("error", self.tools["get_secret"]("HOME"))
         os.environ["X_PW"] = "pw"
-        self.assertEqual(self.tools["get_secret"]("X_PW"), {"value": "pw"})
+        out = self.tools["get_secret"]("X_PW")
+        self.assertIn("error", out)
+        self.assertNotIn("value", out)
+        self.assertNotIn("pw", str(out))
         os.environ.pop("X_PW")
 
     def test_page_text_redacted(self):

@@ -91,6 +91,22 @@ def parse_snapshot(text: str) -> list[Element]:
     return out
 
 
+
+_MCP_TOOL_ERROR = re.compile(
+    r"(?im)^(?:###\s*Error\b|Error\s*:)|\bInvalid arguments\b|Additional properties are not allowed"
+)
+
+
+def _mcp_tool_error(text: str) -> str | None:
+    """Playwright MCP puts failures in the tool text; helpers must not treat those as success."""
+    t = (text or "").strip()
+    if not t:
+        return None
+    if _MCP_TOOL_ERROR.search(t):
+        return t[:500]
+    return None
+
+
 class McpBrowser:
     """Thin adapter: call(tool_name, args) -> response text. Works with ADK's MCPTool or a fake in tests."""
 
@@ -105,7 +121,11 @@ class McpBrowser:
         self.calls.append((tool, {k: ("[masked]" if k == "text" and args.get("_secret") else v)
                                   for k, v in args.items() if k != "_secret"}))
         res = await self._call(tool, {k: v for k, v in args.items() if k != "_secret"})
-        return res if isinstance(res, str) else str(res)
+        text = res if isinstance(res, str) else str(res)
+        err = _mcp_tool_error(text)
+        if err:
+            raise HelperError(f"{tool} failed: {err}")
+        return text
 
     async def navigate(self, url: str) -> str:
         return await self._do("browser_navigate", {"url": url})
@@ -131,17 +151,17 @@ class McpBrowser:
 
     async def click(self, label, roles=("button", "link", "menuitem", "tab", "checkbox", "radio")) -> str:
         e = await self.find(label, roles)
-        out = await self._do("browser_click", {"element": e.name, "ref": e.ref})
+        out = await self._do("browser_click", {"element": e.name, "target": e.ref})
         self.last_snapshot = ""
         return out
 
     async def type(self, label, text: str, secret: bool = False, submit: bool = False) -> str:
         e = await self.find(label, ("textbox", "searchbox", "spinbutton", "combobox"))
-        return await self._do("browser_type", {"element": e.name, "ref": e.ref, "text": text, "submit": submit, "_secret": secret})
+        return await self._do("browser_type", {"element": e.name, "target": e.ref, "text": text, "submit": submit, "_secret": secret})
 
     async def select(self, label, value: str) -> str:
         e = await self.find(label, ("combobox", "listbox"))
-        return await self._do("browser_select_option", {"element": e.name, "ref": e.ref, "values": [value]})
+        return await self._do("browser_select_option", {"element": e.name, "target": e.ref, "values": [value]})
 
     async def screenshot(self, filename: str) -> str:
         """Pass an absolute path to Playwright; return basename for report evidence lists."""
@@ -151,7 +171,7 @@ class McpBrowser:
         elif path.is_absolute():
             path = path.resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
-        await self._do("browser_take_screenshot", {"filename": str(path)})
+        await self._do("browser_take_screenshot", {"filename": str(path), "scale": "css"})
         return path.name
 
     def page_text(self) -> str:
@@ -170,11 +190,15 @@ def adk_caller(toolset, tool_context):
             raise HelperError(f"browser tool {name} not available")
         res = await cache[name].run_async(args=args, tool_context=tool_context)
         if isinstance(res, dict) and "content" in res:
-            return "\n".join(c.get("text", "") for c in res["content"] if isinstance(c, dict))
+            text = "\n".join(c.get("text", "") for c in res["content"] if isinstance(c, dict))
+            if res.get("isError") or res.get("is_error"):
+                raise HelperError(f"{name} failed: {text[:500]}")
+            return text
         content = getattr(res, "content", None)
-        if content:
-            return "\n".join(getattr(c, "text", "") for c in content)
-        return str(res)
+        text = "\n".join(getattr(c, "text", "") for c in content) if content else str(res)
+        if getattr(res, "is_error", False) or getattr(res, "isError", False):
+            raise HelperError(f"{name} failed: {text[:500]}")
+        return text
     return call
 
 

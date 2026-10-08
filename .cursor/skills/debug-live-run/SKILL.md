@@ -12,12 +12,15 @@ Skill `qa-stack` + rule `live-run-gaps` explain *why* these failure modes exist.
 ## Artifacts (stack outputs)
 
 ```text
-runs/<run>/state.json     # plan, results, checkpoints, manual_logins
+runs/<run>/state.json     # plan, results, checkpoints, manual_logins, manual_login_retries
 runs/<run>/trace.jsonl    # ADK / tool trace
 runs/<run>/progress.log
 runs/<run>/shots/          # intended Playwright MCP evidence
-runs/<run>/profiles/<app> # MCP user-data-dir (login state for the run)
+runs/<run>/storage/<app>.json  # post-login cookies/localStorage for tester reopen
+runs/<run>/profiles/<app> # MCP user-data-dir (manual-login Chrome only)
 ```
+
+For CAPTCHA / login-loop / "browser keeps crashing", run skill `debug-browser-session` (and its `inspect_run.py`) before changing tester code.
 
 Also scan **repo root** for stray `*.png` (MCP cwd save — evidence path bug).
 

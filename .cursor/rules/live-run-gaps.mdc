@@ -1,0 +1,17 @@
+---
+description: Live-run gaps and fix order (HANDOVER §8–9) when changing reliability
+alwaysApply: true
+---
+
+# Live-run gaps (priority)
+
+1. ~~Evidence → absolute paths under `runs/<run>/shots/`~~ (fixed: `evidence_name` + helpers + report gating).
+2. Require recorded observation per verify step (else NOT VERIFIED).
+3. Enable SuiteCRM pack helpers from live UI; open-record-by-number.
+4. Scale `MAX_TOOL_CALLS_PER_CASE` with steps (40 too low for multi-status CRM).
+5. Persist login profile per app+env+user across runs (CAPTCHA every run today).
+6. Read-only Playwright network tools for API cases (e.g. TC6).
+7. Token accounting before LLM calls (not only page-read prune).
+8. Then: `eval --live`, more tasks, bugs/email/memory live, pre-prod, second pack.
+
+Stack constraints while fixing: keep MCP tool blocks, policy gate, no secrets in packs, no `--allowed-origins`.

@@ -112,6 +112,9 @@ def login_first(pack, plan, state, login, input_fn=input) -> list[str]:
         if a.strip().lower() in ("", "y", "yes") and login(app, "CAPTCHA at login (known for this app)"):
             done[app] = True
             did.append(app)
+            # Keep the tester headed on the same profile (manual_login also sets this).
+            from .agents.tester import force_headed
+            force_headed()
     state.save()
     return did
 

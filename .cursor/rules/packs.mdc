@@ -1,0 +1,36 @@
+---
+description: Pack.yaml, facts, helpers, evals — project config for the stack
+globs: packs/**/*
+alwaysApply: false
+---
+
+# Packs (project layer of the stack)
+
+Engine is generic; packs hold URLs, accounts (env names), allowlists, actions, helpers, facts, evals.
+
+```text
+packs/<slug>/{pack.yaml,facts.md,helpers/*.py,evals/}
+```
+
+## pack.yaml ↔ runtime
+
+| Key | Stack effect |
+|---|---|
+| `redmine.project_ids` | Selects pack after Redmine fetch |
+| `apps.*.envs` | Run URLs; browser site limit derived from these |
+| `apps.*.accounts.password_env` | Secret name in `.env` only |
+| `manual_login_apps` | Headed CAPTCHA login before cases |
+| `allowlist` | Known hosts (no plan-gate nag); not a security boundary |
+| `preapprovable_actions` / `always_ask_actions` / `risky_patterns` | `tools/policy.py` |
+| `helpers.<name>` | Enables MCP helper when `needs_config` filled from live UI |
+
+Validate: `.venv/bin/python -m agent_tester pack validate <slug>`
+
+## Helpers (Playwright MCP adapter)
+
+- `HELPER` dict + `async run(browser, ctx, **params)` → `{values, screenshots, notes}`
+- Use `McpBrowser` labels/refs; no CSS, no evaluate
+- Disabled until live path/labels set — never guess (Savostore helpers still empty)
+- Priority: CRM status/parcel helpers + open-by-number (`A1148` vs `1148`)
+
+No secrets in yaml/facts/evals. Wiki → addresses only.

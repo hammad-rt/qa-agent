@@ -1,0 +1,49 @@
+---
+description: qa-agent technology stack — use when choosing libraries, APIs, or wiring LLM/browser/Redmine/memory
+alwaysApply: true
+---
+
+# Stack (decision reference)
+
+Full notes: `docs/stack/`. Current state & gaps: `docs/HANDOVER.md`.
+
+## What we use
+
+| Layer | Choice | Where in repo |
+|---|---|---|
+| Language | Python 3.12+ venv, `requirements.txt` | — |
+| Agent framework | Google ADK (`google-adk`) `LlmAgent`, `Runner`, `InMemorySessionService`, `McpToolset` | `agent_tester/agents/` |
+| LLM | LiteLLM via ADK `LiteLlm`; model `openai/{LLM_MODEL}` (gemma4) at `LLM_BASE_URL` (vLLM, `/v1`) | `agents/llm.py` |
+| Browser (tester) | Playwright MCP `npx -y @playwright/mcp@latest` over stdio | `agents/tester.py` |
+| Browser (helpers/PDF) | Python Playwright / headless Chrome where installed | `helpers/`, `report/` |
+| Config | `pack.yaml` + `.env` (no secrets in packs) | `packs/`, `config.py` |
+| Models | Pydantic 2 (`TestPlan`, `Step`, verdicts…) | `models.py` |
+| Tracker | Redmine REST (`requests`) | `preflight/redmine.py` |
+| Memory | SQLite (+ optional Ollama `nomic-embed-text`) | `memory/` |
+| Reports | Jinja2 HTML → PDF | `report/` |
+| Email | SMTP to `REPORT_EMAIL_TO` only | `notify.py` |
+
+Coordinator is **plain code**, not ADK. Offline tests must run without ADK/Playwright (lazy imports).
+
+## Decision rules
+
+1. **Need model judgment?** → ADK `LlmAgent` + `LiteLlm(model="openai/…", api_base=…/v1)`. Use `api_base` not `base_url`. JSON mode only for planner/reviewer/judge.
+2. **Need browser for the tester?** → Playwright MCP `McpToolset` + `StdioConnectionParams`. One server + `--user-data-dir` profile per app per run. Pass full `os.environ` (DISPLAY). Do **not** use `--allowed-origins`; enforce sites in `tools/policy.py`.
+3. **Need deterministic UI routine?** → Helper (`HELPER` + `async run`), not more prompt text. Prefer `run_helper`.
+4. **Need a number?** → Read from page + `tools/values.calculate`. Never model mental math / `eval`.
+5. **Need project specificity?** → Pack only (`packs/<slug>/`). Never hard-code client apps into `agent_tester/`.
+6. **Need a secret?** → Masked prompt → `.env`. Model never sees password values.
+7. **Side-effect LLM call failed?** → Pause/resume. Never auto-replay a tester turn that already changed data.
+8. **Upgrade litellm?** → Prefer `>=1.84`; avoid 1.82.7/1.82.8. Model host only on Rolustech VPN.
+
+## Playwright MCP tools
+
+- OK pattern: snapshot → act by `ref` / label (`browser_click`, `browser_type`, `browser_navigate`, screenshots).
+- Blocked for tester: `browser_evaluate`, `browser_run_code*`, `browser_install`, `browser_file_upload`.
+- Optional `--caps` (network/storage/vision/…) stay off unless a deliberate, approved change.
+- Evidence files: absolute paths under `runs/<run>/shots/` (`evidence_name` + helpers; report skips missing PNGs).
+
+## Verdicts
+
+`PASS|FAIL|PARTIAL|BLOCKED|NOT VERIFIED|SKIPPED|AGENT INCOMPLETE` — see `core/core-testing-spec.md`.
+`AGENT INCOMPLETE` = agent limit, not an app bug.

@@ -45,7 +45,7 @@ th{background:#f5f5f5;text-align:left}h2{border-bottom:2px solid #eee;padding-bo
 {% if r and r.values %}<p>{% for k, v in r.values.items() %}<code>{{ k }} = {{ v }}</code> {% endfor %}</p>{% endif %}
 {% if r and r.note %}<div class="{{ 'mean' if r.verdict != 'PASS' else '' }}"><b>{{ 'What this means' if r.verdict != 'PASS' else 'Note' }}:</b> {{ r.note }}</div>{% endif %}
 {% if r and r.lessons_applied %}<p class="muted">Lessons applied: {{ r.lessons_applied | join(', ') }}</p>{% endif %}
-{% if r and r.evidence %}<div class="shots">{% for e in r.evidence %}{% if e.endswith('.png') %}<img src="shots/{{ e }}" alt="{{ e }}">{% else %}<span class="muted">{{ e }}</span> {% endif %}{% endfor %}</div>{% endif %}
+{% if r and r.evidence %}<div class="shots">{% for item in evidence_items(r.evidence) %}{% if item.kind == 'img' %}{% if item.ok %}<img src="shots/{{ item.name }}" alt="{{ item.name }}">{% else %}<span class="muted">missing evidence: {{ item.name }}</span> {% endif %}{% else %}<span class="muted">{{ item.name }}</span> {% endif %}{% endfor %}</div>{% endif %}
 </div>{% endfor %}
 
 {% if baseline or final %}<h2>Baseline vs final</h2><table><tr><th>Value</th><th>Baseline</th><th>Final</th></tr>
@@ -84,13 +84,26 @@ def build_report(state, pack=None, pdf: bool | None = None) -> Path:
         if a["tool"] == "mark_step":
             done.setdefault(a["case_id"], []).append(str(a["args"].get("n")))
     base, fin = state.data.get("baseline") or {}, state.data.get("final") or {}
+    shots_dir = state.dir / "shots"
+
+    def evidence_items(evidence):
+        items = []
+        for e in evidence or []:
+            bn = Path(str(e)).name
+            if bn.endswith(".png"):
+                items.append({"kind": "img", "name": bn, "ok": (shots_dir / bn).is_file()})
+            else:
+                items.append({"kind": "text", "name": bn})
+        return items
+
     html = Environment(autoescape=select_autoescape(default=True)).from_string(TEMPLATE).render(
         plan=plan, results=results, counts=counts, order=ORDER, run_id=state.dir.name,
         pack_name=pack.config.get("name") if pack else None, drafts=drafts, done=done,
         not_done=[r for r in results.values() if r.verdict in ("BLOCKED", "NOT VERIFIED", "AGENT INCOMPLETE")],
         baseline=base, final=fin, snap_keys=list(dict.fromkeys([*base, *fin])),
         ledger=state.data.get("ledger", []), unrestored=[u for u in state.data.get("settings", {}).values() if not u["verified"]],
-        learned=state.data.get("learned"), model=state.data.get("model"), notes=state.data.get("notes", []))
+        learned=state.data.get("learned"), model=state.data.get("model"), notes=state.data.get("notes", []),
+        evidence_items=evidence_items)
     out = state.dir / "report.html"
     out.write_text(redact(html))
     (state.dir / "report.json").write_text(redact(json.dumps(

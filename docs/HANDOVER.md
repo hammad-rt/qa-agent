@@ -154,7 +154,7 @@ What the finished run showed:
 
 ## 8. Known gaps and issues (most important first)
 
-1. **Screenshots land in the wrong folder.** `evidence_name` returns a bare file name, and Playwright MCP saves it in the folder the command was run from (the repo root on the laptop: `tc1-01-activity-list-showing-order-numbers.png`, `login-crm-admin.png`), not in `runs/<run>/shots/`. The report and judge then can't find the evidence. Fix: return an absolute path under the run's `shots/` folder, and have code check the file exists.
+1. ~~**Screenshots land in the wrong folder.**~~ **Fixed.** `evidence_name` returns an absolute path under `runs/<run>/shots/`; basenames are recorded only after the PNG exists; helpers use the same absolute `shot_prefix`; the report embeds `shots/<basename>` only when the file is present.
 2. **Testers don't record what they saw.** Verification steps end with a screenshot but no `record_value` or observation, so the judge can't confirm and says NOT VERIFIED. Fix: require one recorded observation per verify step (enforced in code before `mark_step` succeeds), and give the judge a short excerpt of the last page text.
 3. **SuiteCRM navigation is weak.** The tester can't find orders by number (wrong search field or format: `A1148` vs `1148`). All Savostore helpers are off because their page paths and labels were never filled in. Fix: fill in the `helpers:` settings in `pack.yaml` from a live session and turn on `crm_move_order_status`, `crm_add_parcel` and `crm_ship_parcel`, add an "open record by number" helper, or look up record IDs read-only through the existing savostore SuiteCRM connector and open them by URL.
 4. **The tool-call budget is too small for CRM cases.** 40 calls per case isn't enough for three status changes. Fix: scale the budget with the number of steps, or give each step its own budget.
@@ -167,14 +167,14 @@ What the finished run showed:
 11. **It only works on the office network.** The model server only resolves there, and the offline backup model isn't wired in.
 12. **Housekeeping:**
     - The README "Status" section is out of date (it still says 121 tests and no live run).
-    - Stray screenshots sit in the laptop repo root.
+    - Stray screenshots may still sit in the laptop repo root from older runs (pre-fix); new runs write under `runs/<run>/shots/`.
     - Each run keeps a Chrome profile (about 11 MB) on a disk that is about 96% full.
     - `runs/` retention is 5 full runs.
 13. **Speed:** one case at a time, about 1 to 4 minutes per case, one run at a time (lock file).
 
 ## 9. Improvements still to make (suggested order)
 
-1. Fix evidence paths and require recorded observations (gaps 1 and 2). This alone should turn most NOT VERIFIED results into real verdicts.
+1. ~~Fix evidence paths~~ (gap 1 done) and require recorded observations (gap 2). That should turn most NOT VERIFIED results into real verdicts.
 2. Make SuiteCRM reliable: fill in the helper settings from a live session, add "open record by number", and consider read-only lookups through the savostore connector.
 3. Scale the tool-call budget per step, and add a token-aware reply limit.
 4. Keep logins across runs (one profile per app, environment and user, with expiry checks), and ask the developers about reCAPTCHA on staging.

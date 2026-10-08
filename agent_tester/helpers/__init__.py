@@ -144,8 +144,15 @@ class McpBrowser:
         return await self._do("browser_select_option", {"element": e.name, "ref": e.ref, "values": [value]})
 
     async def screenshot(self, filename: str) -> str:
-        await self._do("browser_take_screenshot", {"filename": filename})
-        return filename
+        """Pass an absolute path to Playwright; return basename for report evidence lists."""
+        path = Path(filename)
+        if not path.is_absolute() and self.evidence_dir is not None:
+            path = (Path(self.evidence_dir) / path.name).resolve()
+        elif path.is_absolute():
+            path = path.resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        await self._do("browser_take_screenshot", {"filename": str(path)})
+        return path.name
 
     def page_text(self) -> str:
         return redact(self.last_snapshot)
@@ -226,6 +233,13 @@ async def run_helper(info: HelperInfo, browser: McpBrowser, ctx: HelperContext, 
                                      args=params, approval="denied", outcome=str(e))
             return {"error": f"Blocked: {e}. Do not retry this; continue or call finish()."}
     ctx.config = dict(info.config)
+    if ctx.state is not None:
+        shots = (Path(ctx.state.dir) / "shots").resolve()
+        shots.mkdir(parents=True, exist_ok=True)
+        if not ctx.shot_prefix:
+            ctx.shot_prefix = str(shots) + "/"
+        if browser.evidence_dir is None:
+            browser.evidence_dir = shots
     browser.guard = _guard(ctx.policy, meta.get("changes_data", False))
     try:
         out = await info.module.run(browser, ctx, **params)
@@ -235,7 +249,10 @@ async def run_helper(info: HelperInfo, browser: McpBrowser, ctx: HelperContext, 
     if ctx.state is not None:
         ctx.state.log_action(case_id=ctx.case_id, app=ctx.app, tool=f"helper:{info.name}", args=params,
                              approval=approval, outcome=outcome)
-    return _clean(out)
+    out = _clean(out)
+    if isinstance(out, dict) and out.get("screenshots"):
+        out["screenshots"] = [Path(x).name for x in out["screenshots"]]
+    return out
 
 
 _MONEY = re.compile(r"(?:[A-Z]{3}\s?|\$\s?)-?[\d,]+(?:\.\d+)?|-?[\d,]+\.\d{2}")

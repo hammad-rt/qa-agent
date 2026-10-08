@@ -8,6 +8,7 @@ import json
 import re
 from urllib.parse import urlparse
 import os
+import signal
 import time
 from pathlib import Path
 
@@ -47,6 +48,84 @@ def headed() -> bool:
     return os.environ.get("QA_HEADED", "") in ("1", "true", "yes")
 
 
+def force_headed() -> None:
+    """After a manual CAPTCHA login the tester must reopen headed on the same profile.
+    Headless Chrome often fails to reuse the headed session cookies."""
+    os.environ["QA_HEADED"] = "1"
+
+
+def _chrome_lock_pid(profile: Path) -> int | None:
+    """Chrome's SingletonLock is a symlink named hostname-pid. None if missing or unreadable."""
+    lock = profile / "SingletonLock"
+    if not lock.exists() and not lock.is_symlink():
+        return None
+    try:
+        target = os.readlink(lock)
+    except OSError:
+        return None
+    try:
+        return int(str(target).rsplit("-", 1)[-1])
+    except ValueError:
+        return None
+
+
+def profile_in_use(profile: Path) -> bool:
+    """True when another Chrome process still holds this user-data-dir."""
+    pid = _chrome_lock_pid(profile)
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def clear_stale_profile_locks(profile: Path) -> None:
+    """Remove Singleton* leftovers when Chrome is gone so the next MCP can open the profile."""
+    if profile_in_use(profile):
+        return
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        p = profile / name
+        try:
+            if p.exists() or p.is_symlink():
+                p.unlink()
+        except OSError:
+            pass
+
+
+def wait_profile_free(profile: Path, timeout: float = 20.0) -> bool:
+    """Wait until Chrome has released this user-data-dir (or clear a dead SingletonLock)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not profile_in_use(profile):
+            clear_stale_profile_locks(profile)
+            return True
+        time.sleep(0.25)
+    if not profile_in_use(profile):
+        clear_stale_profile_locks(profile)
+        return True
+    return False
+
+
+def release_profile(profile: Path, timeout: float = 20.0) -> bool:
+    """Make the profile reusable: wait for Chrome to exit, SIGTERM/SIGKILL the lock holder if needed."""
+    profile.mkdir(parents=True, exist_ok=True)
+    if wait_profile_free(profile, timeout=timeout):
+        return True
+    pid = _chrome_lock_pid(profile)
+    if pid is not None:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                break
+            if wait_profile_free(profile, timeout=8.0 if sig == signal.SIGTERM else 3.0):
+                return True
+    clear_stale_profile_locks(profile)
+    return not profile_in_use(profile)
+
+
 def playwright_toolset(run_dir: Path, app: str):
     """No --allowed-origins: Playwright matches it per scheme://host:port and blocks every other request,
     including a site's own CDN files and payment pages (it is not a security boundary either). The sites a run
@@ -62,6 +141,10 @@ def playwright_toolset(run_dir: Path, app: str):
     out = run_dir / "shots"
     profile = run_dir / "profiles" / app
     profile.mkdir(parents=True, exist_ok=True)
+    # Never start a second Chrome on a busy profile — that is the "browser crashed" handoff after CAPTCHA login.
+    if not release_profile(profile, timeout=25.0):
+        raise RuntimeError(
+            f"Chrome is still using profile {profile}; close that window (or kill the leftover process) and retry.")
     # one browser profile per app per run: logging in once (or a person solving a CAPTCHA once) lasts the run
     args = ["-y", "@playwright/mcp@latest", *([] if headed() else ["--headless"]), "--user-data-dir", str(profile),
             "--output-dir", str(out), "--viewport-size", "1366,900"]
@@ -137,13 +220,12 @@ class TesterSession:
             return {"ok": True}
 
         def evidence_name(what: str) -> dict:
-            """Get the filename to pass to browser_take_screenshot for evidence of `what`."""
+            """Absolute path for browser_take_screenshot; basename is recorded only after the PNG exists."""
             png, txt = s.ev.paths(s.case_id, what)
-            s.result.screenshots.append(png.name)
             if s.last_snapshot:
                 s.ev.save_snapshot(txt, s.last_snapshot, keep_emails=s.keep_emails)
                 s.result.snapshots.append(txt.name)
-            return {"filename": png.name}
+            return {"filename": str(png.resolve())}
 
         def get_secret(env_name: str) -> dict:
             """Return the password stored in env var env_name, only for typing into a login form."""
@@ -217,13 +299,18 @@ class TesterSession:
                 return {"error": f"params_json is not JSON: {e}"}
             if s.brief.get("read_only") and info.meta.get("changes_data"):
                 return {"error": "this turn is read-only; data-changing helpers are not allowed"}
-            browser = McpBrowser(adk_caller(s.toolset, tool_context))
+            shots = s.ev.shots.resolve()
+            shots.mkdir(parents=True, exist_ok=True)
+            browser = McpBrowser(adk_caller(s.toolset, tool_context), evidence_dir=shots)
             ctx = HelperContext(pack=s.pack, env=s.env, app=s.app, case_id=s.case_id, state=s.state,
-                                policy=s.policy, shot_prefix="")
+                                policy=s.policy, shot_prefix=str(shots) + "/")
             out = await _run(info, browser, ctx, params)
             for k, v in (out.get("values") or {}).items():
                 s.result.values[f"{name}.{k}"] = v
-            s.result.screenshots += [x for x in out.get("screenshots", []) if x not in s.result.screenshots]
+            for x in out.get("screenshots", []):
+                bn = Path(x).name
+                if bn not in s.result.screenshots and (shots / bn).is_file():
+                    s.result.screenshots.append(bn)
             return out
 
         tools = [record_value, calculate, request_approval, mark_step, evidence_name, get_secret, finish, recall_lessons,
@@ -266,6 +353,13 @@ class TesterSession:
     def after_tool(self, tool, args, tool_context, tool_response):
         if tool.name == "browser_snapshot":
             self.last_snapshot = _text_of(tool_response)
+        if tool.name == "browser_take_screenshot":
+            raw = args.get("filename") or ""
+            png = Path(raw) if Path(raw).is_absolute() else self.ev.shots / Path(raw).name
+            if png.is_file():
+                name = png.name
+                if name not in self.result.screenshots:
+                    self.result.screenshots.append(name)
         if tool.name.startswith("browser_"):
             blocked = self._check_page_site(tool.name, _text_of(tool_response))
             if blocked:
@@ -363,6 +457,7 @@ def manual_login(run_dir: Path, app: str, url: str, username: str | None, input_
     from mcp.client.stdio import stdio_client
     profile = run_dir / "profiles" / app
     profile.mkdir(parents=True, exist_ok=True)
+    clear_stale_profile_locks(profile)
     args = ["-y", "@playwright/mcp@latest", "--user-data-dir", str(profile), "--output-dir", str(run_dir / "shots"),
             "--viewport-size", "1366,900"]
 
@@ -382,6 +477,8 @@ def manual_login(run_dir: Path, app: str, url: str, username: str | None, input_
                 out(f"\nA browser window should now be open on {url}." +
                     (f" Log in as {username}" if username else " Log in") +
                     " (solve the CAPTCHA if there is one), wait for the home page, then press Enter here.")
+                out("  After Enter, this window closes and a new browser reopens with your saved login "
+                    "(headed, same profile).")
                 ok = False
                 for attempt in range(3):
                     ans = input_fn("  Press Enter when logged in, or type s to skip: ").strip().lower()
@@ -395,16 +492,25 @@ def manual_login(run_dir: Path, app: str, url: str, username: str | None, input_
                         continue
                     ok = True
                     break
-                try:
-                    await sess.call_tool("browser_close", {})
-                except Exception:  # noqa: BLE001
-                    pass
+                # Do not call browser_close: it tears down the page before Chrome flushes cookies to the
+                # profile. Exiting the MCP stdio session stops Chrome cleanly; we then wait for the lock.
                 return ok
     try:
-        return asyncio.run(go())
+        ok = asyncio.run(go())
     except Exception as e:  # noqa: BLE001  no display, npx missing...
         out(f"Couldn't open a browser window for the manual login ({type(e).__name__}: {e}).")
         return False
+    if not ok:
+        release_profile(profile)
+        return False
+    if not release_profile(profile, timeout=25.0):
+        out("Couldn't free the browser profile after login; close any leftover Chrome for this run and press Enter again.")
+        return False
+    # Brief pause so Chrome can flush cookies to the profile before the tester reopens it.
+    time.sleep(0.5)
+    force_headed()
+    out("Login saved. Reopening a headed browser with that session for the test cases.")
+    return True
 
 
 def still_on_login(page: str, start: str) -> bool:
@@ -490,6 +596,9 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
                         await toolset.close()
                     except Exception:  # noqa: BLE001
                         pass
+                    # MCP close returns before Chrome drops SingletonLock; wait so manual_login
+                    # (or the next case) does not open a second Chrome on the same profile.
+                    release_profile(run_dir / "profiles" / app, timeout=25.0)
             asyncio.run(go())
         finally:
             policy.read_only = was_ro

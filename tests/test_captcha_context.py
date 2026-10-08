@@ -1,5 +1,6 @@
 """#180974 fixes: CAPTCHA at login is handed to a person once (then the case is retried, or BLOCKED), and the
 tester's history stays small enough for the 65K model."""
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -142,18 +143,48 @@ class ManualLogin(unittest.TestCase):
         seen = []
         opener = lambda run_dir, app, url, user, input_fn=input: seen.append((app, url, user)) or True
         login = make_manual_login(pack, _plan(), self.state, opener=opener)
-        did = login_first(pack, _plan(), self.state, login, input_fn=lambda q: "")
-        self.assertEqual(did, ["portal"])
-        self.assertEqual(seen[0][0], "portal")
-        self.assertEqual(seen[0][2], "hammad.iqbal@rolustech.com")
-        self.assertTrue(seen[0][1].startswith("http"))
-        # already done: not asked again (resume)
-        self.assertEqual(login_first(pack, _plan(), self.state, login, input_fn=lambda q: self.fail("asked")), [])
+        prev = os.environ.get("QA_HEADED")
+        try:
+            did = login_first(pack, _plan(), self.state, login, input_fn=lambda q: "")
+            self.assertEqual(did, ["portal"])
+            self.assertEqual(seen[0][0], "portal")
+            self.assertEqual(seen[0][2], "hammad.iqbal@rolustech.com")
+            self.assertTrue(seen[0][1].startswith("http"))
+            self.assertTrue(T.headed())  # successful manual login keeps tester headed
+            # already done: not asked again (resume)
+            self.assertEqual(login_first(pack, _plan(), self.state, login, input_fn=lambda q: self.fail("asked")), [])
+        finally:
+            if prev is None:
+                os.environ.pop("QA_HEADED", None)
+            else:
+                os.environ["QA_HEADED"] = prev
 
     def test_login_first_skipped_by_user(self):
         pack = load_pack(PACK)
         login = make_manual_login(pack, _plan(), self.state, opener=lambda *a, **k: self.fail("opened"))
         self.assertEqual(login_first(pack, _plan(), self.state, login, input_fn=lambda q: "n"), [])
+
+    def test_session_lost_reoffers_manual_login(self):
+        """If login_first marked portal done but CAPTCHA hits again, ask again instead of BLOCKED."""
+        attempts = {"n": 0}
+
+        def tester(app, brief, state):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                return StepResult(case_id=brief["case_id"], app=app, stuck=True, needs_login="reCAPTCHA")
+            return StepResult(case_id=brief["case_id"], app=app)
+
+        asked = []
+
+        def login(app, reason):
+            asked.append((app, reason))
+            return True
+
+        self.state.data["manual_logins"] = {"portal": True}
+        res = run_plan(_plan(), self.state, {"portal": tester}, self.judge, manual_login=login)
+        self.assertEqual(asked, [("portal", "reCAPTCHA")])
+        self.assertEqual(res["TC1"].verdict, "PASS")
+        self.assertTrue(self.state.data["manual_logins"]["portal"])
 
 
 if __name__ == "__main__":
@@ -184,3 +215,59 @@ class VisibleBrowser(unittest.TestCase):
         self.assertTrue(T.still_on_login("https://staging5.rolustech.com:4225/login?next=/", start))
         self.assertFalse(T.still_on_login("https://staging5.rolustech.com:4225/home", start))
         self.assertFalse(T.still_on_login("https://staging5.rolustech.com:4225/", "https://staging5.rolustech.com:4225/"))
+
+    def test_force_headed(self):
+        with mock.patch.dict("os.environ", {"QA_HEADED": ""}, clear=False):
+            os.environ.pop("QA_HEADED", None)
+            self.assertFalse(T.headed())
+            T.force_headed()
+            self.assertTrue(T.headed())
+            with tempfile.TemporaryDirectory() as d:
+                self.assertNotIn("--headless",
+                                 T.playwright_toolset(Path(d), "portal")._connection_params.server_params.args)
+
+    def test_stale_profile_locks_cleared(self):
+        with tempfile.TemporaryDirectory() as d:
+            profile = Path(d) / "profiles" / "portal"
+            profile.mkdir(parents=True)
+            lock = profile / "SingletonLock"
+            lock.symlink_to("host-99999999")  # pid that is not running
+            (profile / "SingletonCookie").symlink_to("x")
+            self.assertFalse(T.profile_in_use(profile))
+            self.assertTrue(T.wait_profile_free(profile, timeout=1.0))
+            self.assertFalse(lock.exists())
+            self.assertFalse((profile / "SingletonCookie").exists())
+
+    def test_playwright_toolset_waits_for_free_profile(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            profile = root / "profiles" / "portal"
+            profile.mkdir(parents=True)
+            (profile / "SingletonLock").symlink_to("host-99999999")
+            with mock.patch.dict("os.environ", {"QA_HEADED": "1"}):
+                ts = T.playwright_toolset(root, "portal")
+            self.assertFalse((profile / "SingletonLock").exists())
+            self.assertNotIn("--headless", ts._connection_params.server_params.args)
+
+    def test_release_profile_terminates_lock_holder(self):
+        with tempfile.TemporaryDirectory() as d:
+            profile = Path(d) / "profiles" / "portal"
+            profile.mkdir(parents=True)
+            (profile / "SingletonLock").symlink_to("host-424242")
+            (profile / "SingletonCookie").symlink_to("x")
+            # First kill(0) says alive; after SIGTERM the process is gone.
+            alive = {"n": 0}
+            def fake_kill(pid, sig):
+                if pid != 424242:
+                    raise ProcessLookupError()
+                alive["n"] += 1
+                if sig == 0 and alive["n"] == 1:
+                    return None
+                if sig == 0:
+                    raise ProcessLookupError()
+                return None
+            with mock.patch("os.kill", side_effect=fake_kill):
+                self.assertTrue(T.profile_in_use(profile))
+                self.assertTrue(T.release_profile(profile, timeout=0.2))
+            self.assertFalse((profile / "SingletonLock").exists())
+            self.assertFalse((profile / "SingletonCookie").exists())

@@ -1,0 +1,52 @@
+---
+description: Python conventions for agent_tester using ADK, LiteLLM, and Playwright MCP
+globs: agent_tester/**/*.py
+alwaysApply: false
+---
+
+# agent_tester + stack
+
+## ADK / LiteLLM (`agents/llm.py`)
+
+```python
+LiteLlm(
+    model=f"openai/{settings.llm_model}",
+    api_base=settings.llm_base_url,  # must end with /v1
+    api_key=settings.llm_api_key,
+    max_tokens=...,
+    # response_format={"type": "json_object"} only if LLM_JSON_MODE and non-tester
+)
+```
+
+- `run_agent(..., retry=True)` only for planner/reviewer/judge — never auto-retry testers after a write.
+- Cap concurrency with `LLM_MAX_CONCURRENCY`. Lazy-import ADK so unittest works offline.
+- No local fallback model wired; if host won't resolve, fail fast (`model_host_ok`).
+
+## Playwright MCP (`agents/tester.py`)
+
+```text
+npx -y @playwright/mcp@latest [--headless] --user-data-dir runs/<run>/profiles/<app>
+  --output-dir runs/<run>/shots --viewport-size 1366,900
+```
+
+- `McpToolset` + `StdioConnectionParams` + `StdioServerParameters(command="npx", args=..., env=os.environ)`.
+- Site policy in code (`Policy` / after_tool) — never re-add `--allowed-origins`.
+- Block evaluate / run_code / install / file_upload. Action log from callbacks, not model prose.
+- Judge: brief + action log + values + evidence names — never tester opinions.
+
+## Helpers & values
+
+- Deterministic UI → `helpers` (`HELPER` + `run`) via `run_helper`.
+- Numbers → page extract + `tools/values.calculate` (no `eval`).
+- Passwords typed only inside helpers/tools from env.
+
+## Evidence & limits (HANDOVER)
+
+- Evidence paths absolute under `runs/<run>/shots/`; verify file exists.
+- Verify steps need `record_value`/observation before successful `mark_step`.
+- Context: prune page reads, cap chars, smaller `TESTER_MAX_TOKENS`; context errors → `AGENT INCOMPLETE` for the case.
+- Tool budget 40/case is tight for CRM — scale with steps if changing limits.
+
+## Tests
+
+`.venv/bin/python -m unittest discover -s tests -t .`

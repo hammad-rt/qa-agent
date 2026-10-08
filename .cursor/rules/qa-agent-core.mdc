@@ -1,0 +1,29 @@
+---
+description: Core qa-agent architecture and non-negotiables (HANDOVER §10)
+alwaysApply: true
+---
+
+# qa-agent core
+
+## Design split
+
+- **Agentic:** planning, missing steps, unfamiliar UI, verdicts (ADK + LiteLLM).
+- **Fixed code:** Redmine fetch, logins, value reads, math, approvals, action log, reports.
+- Project specifics only in `packs/<slug>/`. Engine stays multi-project.
+
+## Secrets & approvals
+
+- Secrets: masked prompt → `.env` only. Never in packs, memory text, reports, chats. Wiki = addresses only.
+- Model never sees passwords (`login_form` / `get_secret` type from env).
+- Data/money/settings/post/email → approval. `change_settings`, `redmine_post`, `send_email`, `prod_write` always one-by-one; never pre-approve. Prod needs explicit yes.
+- Bugs/cases post and non-default email only after per-item confirm.
+
+## Browser
+
+- Stay on this run's URL hosts; other sites need OK. No CAPTCHA solving (manual login or BLOCKED). No logout of run sessions.
+- Record status changes ≠ settings (don't auto-revert). Ledger test data; restore real settings.
+
+## Scope
+
+- No laptop installs / no new features unless asked. Prefer HANDOVER §8 gap fixes. Docs OK.
+- Stack details: rule `stack`, skill `qa-stack`, `docs/stack/`, `docs/HANDOVER.md`.

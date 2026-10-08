@@ -142,16 +142,24 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None)
                     raise RunPaused(f"{case.id}: {e}") from e
         if sr.needs_login:
             done = state.data.setdefault("manual_logins", {})
-            if manual_login is not None and not done.get(app) and manual_login(app, sr.needs_login):
-                done[app] = True
-                state.save()
-                state.checkpoint(f"manual login on {app} done; retrying {case.id}")
-                try:
-                    sr = tester(app, brief, state)
-                except RunPaused:
-                    raise
-                except Exception as e:                # noqa: BLE001
-                    sr.notes = f"retry after manual login failed: {type(e).__name__}: {e}"
+            if manual_login is not None:
+                # login_first may have marked the app done, but the handoff can still lose the
+                # session (profile lock / headless reopen). Re-offer instead of immediate BLOCKED.
+                if done.get(app):
+                    print(f"\nThe {app} session did not stick after the earlier login "
+                          f"(CAPTCHA or login page again). Please log in once more.")
+                    done[app] = False
+                    state.save()
+                if not done.get(app) and manual_login(app, sr.needs_login):
+                    done[app] = True
+                    state.save()
+                    state.checkpoint(f"manual login on {app} done; retrying {case.id}")
+                    try:
+                        sr = tester(app, brief, state)
+                    except RunPaused:
+                        raise
+                    except Exception as e:                # noqa: BLE001
+                        sr.notes = f"retry after manual login failed: {type(e).__name__}: {e}"
             if sr.needs_login:
                 return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,
                                   values={k: v for r in results for k, v in r.values.items()},

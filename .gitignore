@@ -7,3 +7,6 @@ memory/*.db
 memory/*.db-*
 __pycache__/
 *.pyc
+# Stray Playwright screenshots saved to the repo root instead of runs/<run>/shots/
+/*.png
+.cursor/hooks/state

@@ -1,6 +1,8 @@
 # qa-agent (phases 1-8)
 
 Multi-project Redmine test agent. Design: `docs/test-agent-rdp.md`, `docs/test-agent-technical-spec.md`.
+Handover (current gaps & rules): `docs/HANDOVER.md`.
+Stack cheat sheet: `docs/stack/`.
 General rules: `core/core-testing-spec.md`. Project packs: `packs/<slug>/` (Savostore is the first).
 
 ## Phase 1 contents

@@ -1,6 +1,6 @@
 # Agent guide (qa-agent)
 
-**Stack for decisions:** always-on Cursor rules `stack`, `qa-agent-core`, `live-run-gaps`, plus skill [`qa-stack`](.cursor/skills/qa-stack/SKILL.md). Detailed prose: [`docs/stack/`](docs/stack/), status/gaps: [`docs/HANDOVER.md`](docs/HANDOVER.md).
+**Stack for decisions:** always-on Cursor rules `stack`, `qa-agent-core`, `live-run-gaps`, `root-cause-first`, plus skill [`qa-stack`](.cursor/skills/qa-stack/SKILL.md). Detailed prose: [`docs/stack/`](docs/stack/), status/gaps: [`docs/HANDOVER.md`](docs/HANDOVER.md).
 
 | Need | Open |
 |---|---|
@@ -11,6 +11,8 @@
 | New project | skill `onboard-pack` |
 | New helper | skill `write-helper` |
 | Failed live run | skill `debug-live-run` |
+| Browser / login / CAPTCHA session bug | skill `debug-browser-session` |
+| Any bug fix | rule `root-cause-first` (evidence before edits) |
 | Audit gaps / code readiness | subagent `.cursor/agents/auditor.md` |
 | Labels / workflow | `core/core-testing-spec.md` |
 

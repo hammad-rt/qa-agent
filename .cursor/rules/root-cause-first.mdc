@@ -1,0 +1,27 @@
+---
+description: Prove the root cause with run evidence before changing code; check library assumptions; one change per commit
+alwaysApply: true
+---
+
+# Root cause first
+
+For any bug, crash, loop or "it still doesn't work":
+
+1. **Reproduce or locate the failing run.** Use the newest `runs/<run>/` folder. Don't edit code yet.
+2. **Collect evidence from what the run left behind:** `state.json` checkpoints and results, `progress.log`,
+   `trace.jsonl`, `profiles/<app>/` (browser profile), `shots/`, and live processes (`ps -ef --forest`).
+   For browser, login, CAPTCHA or "browser keeps crashing" problems, run skill `debug-browser-session` first.
+3. **State one cause and the evidence for it** (file, value, timestamp) in the chat before proposing a fix.
+   If the evidence doesn't single out one cause, gather more. Don't stack guesses.
+4. **Check library behaviour; don't assume it.** If a fix depends on how Playwright, Chrome, MCP stdio, ADK or
+   LiteLLM behaves (who closes or kills what, what gets flushed, what env a child gets), prove it with a small
+   run, the library source or its docs. Never write an unverified claim into a code comment.
+   Example of what went wrong: the comment "exiting the MCP stdio session stops Chrome cleanly" was wrong.
+   Playwright kills its browser when its server exits, so cookies were never written.
+5. **Then fix, smallest change first.** One behaviour change per commit, each checked with a real run or a test.
+   Don't combine unrelated changes (e.g. removing `browser_close` + forcing headed + unlimited retries).
+6. **Add a regression test** that fails on the old behaviour, and a log line at the point that broke
+   (browser start, login saved, browser closed, process killed, each with PID and time).
+
+Never "fix" by killing processes, deleting lock files or retrying without a cap unless the evidence shows that is
+the cause. Each of those can hide the real problem or create a loop.

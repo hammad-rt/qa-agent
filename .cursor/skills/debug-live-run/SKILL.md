@@ -29,6 +29,7 @@ Also scan **repo root** for stray `*.png` (MCP cwd save — evidence path bug).
 | NOT VERIFIED | Screenshot without `record_value` | Require observation in code |
 | CRM no records / budget | Helpers off; search format; 40 calls | Enable helpers; scale budget |
 | CAPTCHA / BLOCKED | Portal reCAPTCHA | Manual MCP login; never auto-solve |
+| Login doesn't stick / login loop / "browser keeps crashing" | Chrome killed before cookies saved, or session-only cookie | Skill `debug-browser-session` first |
 | Invisible login window | MCP child missing DISPLAY | Pass full env; `--headed` |
 | Model unreachable | LiteLLM host/VPN | `check` / fail-fast; resume later |
 | Context length | Huge SuiteCRM snapshot in ADK turn | Prune/cap; token accounting TODO |

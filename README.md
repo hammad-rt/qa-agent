@@ -121,10 +121,8 @@ General rules: `core/core-testing-spec.md`. Project packs: `packs/<slug>/` (Savo
     .venv/bin/python -m unittest discover -s tests -t .
 
 ## Status
-Phases 1-8 are built and covered by 121 offline tests. No live run yet: the LLM endpoint (internal only) and
-staging must be reachable from the machine running the agent, and the Redmine API key and account passwords
-must be set. Nothing in code is task-specific, but that only gets proven by live runs on several different
-tasks (for example #180966, #165348 and a fresh one) and a passing `eval --live`.
+Phases 1-8 are built and covered by 177 offline tests. First finished live run: #180974 on 6 Oct (TC3 PASS,
+TC1/TC2 NOT VERIFIED, TC4/TC5 AGENT INCOMPLETE, TC6 SKIPPED). Known gaps and next steps: `docs/HANDOVER.md`.
 
 ## CAPTCHA logins and tester memory (6 Oct, #180974)
 - Each app gets one browser profile per run (`runs/<run>/profiles/<app>`), so a login lasts the whole run.

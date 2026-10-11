@@ -308,10 +308,44 @@ class TesterCallbacks(unittest.TestCase):
         self.assertIn("error", self.s.before_tool(self.t("browser_evaluate"), {"function": "()=>1"}, None))
 
     def test_limit(self):
+        # reads are free: 5 snapshots don't use the 5-action budget
         for _ in range(5):
-            self.s.before_tool(self.t("browser_snapshot"), {}, None)
-        self.assertIn("Limit", self.s.before_tool(self.t("browser_snapshot"), {}, None)["error"])
+            self.assertIsNone(self.s.before_tool(self.t("browser_snapshot"), {}, None))
+        for i in range(5):
+            self.s.before_tool(self.t("browser_navigate"), {"url": f"https://shop.example/p{i}"}, None)
+        self.assertIn("Limit", self.s.before_tool(self.t("browser_navigate"), {"url": "https://shop.example/z"}, None)["error"])
         self.assertTrue(self.s.result.limit_hit)
+
+    def test_runaway_reads_still_stop(self):
+        r = None
+        for _ in range(21):
+            r = self.s.before_tool(self.t("browser_snapshot"), {}, None)
+        self.assertIn("Limit", r["error"])
+
+    def test_loop_warn_then_stop(self):
+        self.s.max_calls = 100
+        args = {"expression": "1+1"}
+        rs = [self.s.before_tool(self.t("calculate"), dict(args), None) for _ in range(5)]
+        self.assertIsNone(rs[0]); self.assertIsNone(rs[1])
+        self.assertIn("did not move", rs[2]["error"])
+        self.assertIn("Stop now", rs[4]["error"])
+        self.assertTrue(self.s.result.loop and self.s.result.limit_hit)
+
+    def test_mark_step_renews_step_allowance(self):
+        import agent_tester.agents.tester as T
+        self.s.max_calls = 100
+        old = T.ACTIONS_PER_STEP
+        T.ACTIONS_PER_STEP = 3
+        try:
+            for i in range(3):
+                self.assertIsNone(self.s.before_tool(self.t("calculate"), {"expression": f"a{i}"}, None))
+            self.s.before_tool(self.t("mark_step"), {"n": 1}, None)
+            self.s.result.steps_done.append(1)
+            for i in range(3):
+                self.assertIsNone(self.s.before_tool(self.t("calculate"), {"expression": f"b{i}"}, None))
+            self.assertIn("Limit", self.s.before_tool(self.t("calculate"), {"expression": f"c"}, None)["error"])
+        finally:
+            T.ACTIONS_PER_STEP = old
 
     def test_values_and_calc(self):
         self.tools["record_value"]("shipping_unpaid", "$400.00", "order A1158 summary")

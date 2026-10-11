@@ -45,6 +45,41 @@ def brief_for(plan: TestPlan, case: PlannedCase, steps: list[int], state: RunSta
     }
 
 
+MAX_CONTINUATIONS = 2
+
+
+def _maybe_continue(app, brief, sr, state, tester, log_mark):
+    """A long flow that ran out of budget while still finishing steps gets a continuation turn with a fresh budget,
+    starting from the steps it reached. Not after a loop, not without progress, and never after a turn that already
+    changed data (that could repeat the change)."""
+    n = 0
+    while (sr.limit_hit and not sr.needs_login and not getattr(sr, "loop", False) and sr.steps_done
+           and n < MAX_CONTINUATIONS):
+        total = len(brief.get("steps") or [])
+        if total and len(set(sr.steps_done)) >= total:
+            break
+        changed = [a for a in state.data["action_log"][log_mark:]
+                   if a.get("approval") in ("approved", "pre_approved")]
+        if changed:
+            break
+        n += 1
+        done_before = set(sr.steps_done)
+        nb = dict(brief)
+        nb["continue_from"] = {"steps_done": sorted(done_before), "notes": sr.notes}
+        state.checkpoint(f"{brief['case_id']} ({app}) ran out of budget after step(s) {sorted(done_before)}; "
+                         f"continuing (turn {n + 1})")
+        log_mark = len(state.data["action_log"])
+        nxt = tester(app, nb, state)
+        nxt.steps_done = sorted(done_before | set(nxt.steps_done))
+        nxt.values = {**sr.values, **nxt.values}
+        nxt.screenshots = sr.screenshots + [x for x in nxt.screenshots if x not in sr.screenshots]
+        nxt.snapshots = sr.snapshots + [x for x in nxt.snapshots if x not in sr.snapshots]
+        if set(nxt.steps_done) == done_before and nxt.limit_hit:
+            return nxt                              # no new progress: stop continuing
+        sr = nxt
+    return sr
+
+
 def discovery_key(area: str | None, app: str) -> str:
     return f"{area or 'general'}:{app}"
 
@@ -259,6 +294,7 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
                 if attempt > max_retries:
                     state.checkpoint(f"paused in {case.id} ({app}): {type(e).__name__}: {e}", status="paused")
                     raise RunPaused(f"{case.id}: {e}") from e
+        sr = _maybe_continue(app, brief, sr, state, tester, log_mark)
         if sr.needs_login:
             done = state.data.setdefault("manual_logins", {})
             retries = state.data.setdefault("manual_login_retries", {})
@@ -296,7 +332,8 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
         for k, v in sr.values.items():
             state.values.setdefault(k, {"value": v, "source": f"{case.id}/{app}"})
         if sr.stuck or sr.limit_hit:
-            why = "hit the step/time limit" if sr.limit_hit else "got stuck"
+            why = ("kept repeating the same action without progress" if getattr(sr, "loop", False)
+                   else "hit the step/time limit" if sr.limit_hit else "got stuck")
             return CaseResult(case_id=case.id, verdict="AGENT INCOMPLETE", expected=case.expected,
                               values={k: v for r in results for k, v in r.values.items()},
                               evidence=[s for r in results for s in r.screenshots],

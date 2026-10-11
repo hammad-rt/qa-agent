@@ -26,6 +26,22 @@ READ_ONLY_BROWSER = {"browser_snapshot", "browser_take_screenshot", "browser_wai
 BLOCKED_BROWSER = {"browser_evaluate", "browser_run_code", "browser_install", "browser_file_upload"}
 
 
+# Calls that only read or record (they don't move the browser) don't use up the action budget.
+FREE_TOOLS = {"browser_snapshot", "browser_take_screenshot", "browser_wait_for", "browser_find",
+              "browser_console_messages", "browser_network_requests", "mark_step", "record_value", "evidence_name",
+              "finish", "needs_manual_login", "recall_lessons", "propose_memory", "get_secret"}
+ACTIONS_PER_STEP = int(os.environ.get("TESTER_ACTIONS_PER_STEP", "30"))   # actions allowed without step progress
+LOOP_WARN, LOOP_STOP = 3, 5          # same call repeated this often without progress: warn, then stop
+
+
+def _call_sig(name: str, args: dict) -> str:
+    try:
+        return name + json.dumps({k: v for k, v in (args or {}).items() if k != "element"}, sort_keys=True,
+                                 default=str)
+    except (TypeError, ValueError):
+        return name + str(args)
+
+
 def tool_budget(n_steps: int, floor: int = 40, cap: int = 120, per_step: int = 20) -> int:
     """Per-case browser/tool call budget: floor from env, scales with steps, hard cap."""
     return max(floor, min(cap, per_step * max(int(n_steps), 1)))
@@ -179,7 +195,10 @@ class TesterSession:
         self.app, self.brief, self.state, self.policy, self.ev = app, brief, state, policy, evidence
         self.case_id = brief["case_id"]
         self.max_calls, self.deadline = max_calls, time.time() + max_minutes * 60
-        self.calls = 0
+        self.calls = 0                  # every tool call (safety net: 4x max_calls)
+        self.actions = 0                # calls that act on the browser/app; capped by max_calls
+        self.since_progress = 0         # actions since the last new mark_step
+        self._sigs: dict[str, int] = {} # call signature -> repeats since the last new mark_step
         self.result = StepResult(case_id=self.case_id, app=app)
         self.finished = False
         self.keep_emails = keep_emails
@@ -360,9 +379,11 @@ class TesterSession:
     def before_tool(self, tool, args, tool_context):
         name = tool.name
         self.calls += 1
-        if self.calls > self.max_calls or time.time() > self.deadline:
-            self.result.limit_hit = True
-            return {"error": "Limit reached. Call finish() now with what you have."} if name != "finish" else None
+        if name == "mark_step" and args.get("n") not in self.result.steps_done:
+            self.since_progress, self._sigs = 0, {}          # real progress: fresh per-step allowance
+        limit = self._budget_check(name, args)
+        if limit:
+            return limit
         if name in BLOCKED_BROWSER:
             return self._deny(name, args, "this browser tool is not allowed")
         if name == "browser_take_screenshot":
@@ -404,6 +425,37 @@ class TesterSession:
                 return self._deny(name, args, str(e))
             self.state.log_action(case_id=self.case_id, app=self.app, tool=name, args=_safe_args(args),
                                   plan_step=self.current_step)
+        return None
+
+    def _budget_check(self, name: str, args: dict):
+        """Progress-based budget. Reads (snapshots, screenshots, recording) are free; actions are capped per plan
+        step (reset by each new mark_step) and in total; the same call repeated without progress is a loop."""
+        if name == "finish":
+            return None
+        over_time = time.time() > self.deadline
+        if not over_time and self.calls > 4 * self.max_calls:
+            over_time = True                                 # runaway reads
+        if name not in FREE_TOOLS:
+            self.actions += 1
+            self.since_progress += 1
+            sig = _call_sig(name, args)
+            self._sigs[sig] = self._sigs.get(sig, 0) + 1
+            n = self._sigs[sig]
+            if n >= LOOP_STOP:
+                self.result.limit_hit = True
+                self.result.loop = True
+                self.state.log_action(case_id=self.case_id, app=self.app, tool="loop_detected",
+                                      args={"call": name, "repeats": n}, plan_step=self.current_step, outcome="stop")
+                return {"error": f"You repeated {name} with the same arguments {n} times without finishing a step. "
+                                 "Stop now: call finish(notes, stuck=True) describing where you are."}
+            if n == LOOP_WARN:
+                return {"error": f"You already ran {name} with these arguments {n - 1} times and it did not move the "
+                                 "case forward. Try a different way (menu path, search, another control) or finish."}
+            if self.since_progress > ACTIONS_PER_STEP or self.actions > self.max_calls:
+                over_time = True
+        if over_time:
+            self.result.limit_hit = True
+            return {"error": "Limit reached. Call finish() now with what you have, saying which step you reached."}
         return None
 
     def _fix_screenshot_args(self, args: dict) -> None:

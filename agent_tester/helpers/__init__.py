@@ -225,8 +225,21 @@ class HelperContext:
 
     def account(self, name: str) -> dict:
         """The user chosen for this run (asked at the plan gate) wins over pack.yaml; role markers stay from the pack."""
-        acc = dict(self.pack.accounts(self.app).get(name) or {})
+        accounts = self.pack.accounts(self.app) if self.pack else {}
         plan = (getattr(self.state, "data", None) or {}).get("plan") or {}
+        if name not in accounts:
+            # the model often passes the username/email instead of the account key: map it back
+            for key, a in accounts.items():
+                if a.get("username", "").lower() == name.lower():
+                    name = key
+                    break
+            else:
+                for r in plan.get("requirements", []):
+                    k = r.get("key", "")
+                    if k.startswith(f"account.{self.app}.") and (r.get("value") or "").lower() == name.lower():
+                        name = k.split(".", 2)[2]
+                        break
+        acc = dict(accounts.get(name) or {})
         for r in plan.get("requirements", []):
             if r.get("key") == f"account.{self.app}.{name}" and r.get("value"):
                 acc.update(username=r["value"], password_env=r.get("secret_env") or acc.get("password_env"))

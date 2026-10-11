@@ -6,7 +6,8 @@ alwaysApply: true
 # Live-run gaps (priority)
 
 1. ~~Evidence → absolute paths under `runs/<run>/shots/`~~ (fixed: `evidence_name` + helpers + report gating).
-2. Require recorded observation per verify step (else NOT VERIFIED).
+2. ~~Screenshots missing from report~~ (fixed ce923b8: every screenshot gets an absolute shots/ path; report embeds images).
+3. Require recorded observation per verify step (else NOT VERIFIED).
 3. Enable SuiteCRM pack helpers from live UI; open-record-by-number.
 4. ~~Scale `MAX_TOOL_CALLS_PER_CASE` with steps~~ (fixed: `tool_budget` floor/cap in `make_tester`).
 5. Persist login profile per app+env+user across runs (CAPTCHA every run today).

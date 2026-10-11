@@ -204,3 +204,11 @@ What the finished run showed:
 - Every tester turn is a fresh ADK session, so context problems happen inside one turn, usually one CRM turn with big SuiteCRM pages.
 - When a run fails, start with `runs/<run>/state.json` (results, checkpoints, `manual_logins`) and `trace.jsonl`.
 - Related helpers: the "test tasks savostore" bot holds the Savostore QA knowledge (test cases, past reports, the business workflow document), and the "MR Review bot" is unrelated (GitLab merge-request audits).
+
+
+## Update 2026-10-11 (branch `fixes`)
+
+- **Screenshots in the report.** The tester often called `browser_take_screenshot` without a filename. Playwright MCP then only returned the image inline, so nothing reached `shots/`. Now `before_tool` always sets an absolute `runs/<run>/shots/<case>-NN-<what>.png`, and the report embeds images as data URIs (they survive email and moving the folder).
+- **Budget on long flows.** Run 180966-175233 TC2–TC5 ran out at 40 calls on a 12-screen portal wizard, about half of them snapshots. The new budget doesn't count reads (snapshot, screenshot, record_value, mark_step). Actions are allowed per plan step (`TESTER_ACTIONS_PER_STEP`, default 30, reset by each new `mark_step`) within a total cap (`tool_budget`). The same call repeated 3 times without progress gets a warning and 5 stops the turn (run 182438 looped 21 times on an XSRF deep-link). A turn that ran out while still finishing steps gets up to 2 continuation turns with `continue_from`. This never happens after a data-changing approval.
+- **login_form account names.** The model's username/email now maps to the pack account key.
+- **Still to confirm live:** that continuation turns get back to the wizard step quickly (the browser restarts each turn); keeping one browser open per case would remove that cost.

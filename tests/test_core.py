@@ -68,10 +68,11 @@ class PolicyTests(unittest.TestCase):
         p = from_pack(self.pack, "staging")
         p.preapprove(["pay_staging_test_card"])
         self.assertEqual(p.gate("pay", "TC3", action_type="pay_staging_test_card"), "pre_approved")
+        p.preapprove(["change_settings"])
+        self.assertEqual(p.gate("save settings", "TC9", action_type="change_settings"), "pre_approved")
+        prod = from_pack(self.pack, "prod")
         with self.assertRaises(PolicyViolation):
-            p.preapprove(["change_settings"])
-        with self.assertRaises(PolicyViolation):  # always-ask with no approver
-            p.gate("save settings", "TC9", action_type="change_settings")
+            prod.preapprove(["change_settings"])
 
     def test_approver_and_denial(self):
         asked = []

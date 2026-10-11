@@ -45,6 +45,121 @@ def brief_for(plan: TestPlan, case: PlannedCase, steps: list[int], state: RunSta
     }
 
 
+def discovery_key(area: str | None, app: str) -> str:
+    return f"{area or 'general'}:{app}"
+
+
+def recipes_covering(memory, area: str | None, app: str) -> list[str]:
+    """Active/proposed recipe texts that cover this case area (and a light app recall fallback)."""
+    if memory is None:
+        return []
+    areas = [area] if area else None
+    rows = memory.preload(areas)
+    texts = [r["text"] for r in rows if r.get("kind") == "recipe" and r.get("text")]
+    if texts:
+        return texts
+    q = " ".join(x for x in (area, app) if x).strip()
+    if not q:
+        return []
+    return [r["text"] for r in memory.recall(q, k=5) if r.get("kind") == "recipe" and r.get("text")]
+
+
+def ensure_discovery(plan, case, app: str, state, testers: dict, memory) -> dict:
+    """If memory has no recipe for this area/app, run a bounded discovery pass once per area:app this run.
+    Returns {source, recipes, notes} stored under state.data['discovery'][key]."""
+    key = discovery_key(case.area, app)
+    store = state.data.setdefault("discovery", {})
+    if key in store:
+        return store[key]
+    if memory is None:
+        entry = {"source": "no_memory", "recipes": [], "notes": ""}
+        store[key] = entry
+        state.save()
+        return entry
+    recipes = recipes_covering(memory, case.area, app)
+    if recipes:
+        entry = {"source": "memory", "recipes": recipes, "notes": ""}
+        store[key] = entry
+        state.save()
+        state.checkpoint(f"discovery skipped for {key}: memory has {len(recipes)} recipe(s)")
+        return entry
+    tester = testers.get(app)
+    if tester is None:
+        entry = {"source": "skipped", "recipes": [], "notes": f"no tester for {app}"}
+        store[key] = entry
+        state.save()
+        return entry
+    from .models import Step
+    goal = case.title or case.id
+    disco_case_id = f"DISCO-{case.area or app}"
+    steps = [Step(
+        text=(f"Map how to reach the screens/actions needed for: {goal}. "
+              "Note menu labels, URLs and search paths. Do not change data, settings, or pay."),
+        app=app)]
+    pseudo = PlannedCase(id=disco_case_id, title=f"discover UI for {case.area or app}",
+                         area=case.area, steps=steps, type=case.type)
+    brief = brief_for(plan, pseudo, [0], state)
+    brief["discovery"] = True
+    brief["read_only"] = True
+    brief["max_tool_calls"] = 30
+    brief["discovery_goal"] = goal
+    notes, blocked = "", False
+    try:
+        sr = tester(app, brief, state)
+        notes = (sr.notes or "").strip()
+        if sr.needs_login:
+            blocked = True
+            notes = (notes + f"\nBLOCKED: login needs a person ({sr.needs_login})").strip()
+    except Exception as e:  # noqa: BLE001
+        notes = f"discovery failed: {type(e).__name__}: {e}"
+        state.data.setdefault("notes", []).append(notes)
+    # Collect recipes proposed during this run for the area (status proposed)
+    proposed = []
+    if memory is not None:
+        try:
+            for r in memory.store.query(memory.scopes, ["recipe"], statuses=("proposed", "active"),
+                                        areas=[case.area] if case.area else None):
+                if r.get("text"):
+                    proposed.append(r["text"])
+        except Exception:  # noqa: BLE001
+            pass
+    entry = {"source": "discovery", "recipes": proposed, "notes": notes, "blocked": blocked}
+    store[key] = entry
+    state.save()
+    ddir = state.dir / "discovery"
+    ddir.mkdir(parents=True, exist_ok=True)
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in (case.area or app))
+    (ddir / f"{safe}.md").write_text(
+        f"# Discovery {key}\n\nsource: discovery\n\n## Notes\n{notes}\n\n## Recipes\n"
+        + "\n".join(f"- {r}" for r in proposed) + "\n")
+    state.checkpoint(f"discovery done for {key}" + (" (blocked)" if blocked else ""))
+    return entry
+
+
+_ADMIN_DEEPLINK = "module=Administration&action="
+_ADMIN_DEEPLINK_WARN = (
+    "WARNING: do not browser_navigate to SuiteCRM module=Administration&action=… URLs "
+    "(XSRF / missing referer); use the menu labels in the recipe instead."
+)
+
+
+def _has_admin_deeplink(texts) -> bool:
+    return any(_ADMIN_DEEPLINK in (t or "") for t in texts)
+
+
+def inject_discovery(brief: dict, entry: dict) -> dict:
+    brief = dict(brief)
+    recipes = list(entry.get("recipes") or [])
+    notes = entry.get("notes") or ""
+    brief["recipes"] = recipes
+    brief["discovery_notes"] = notes
+    # Soft-sanitize: keep recipe text intact for memory diffs; warn this run's brief only.
+    if _has_admin_deeplink(recipes) or _ADMIN_DEEPLINK in notes:
+        if _ADMIN_DEEPLINK_WARN not in notes:
+            brief["discovery_notes"] = (notes + "\n" if notes else "") + _ADMIN_DEEPLINK_WARN
+    return brief
+
+
 def read_snapshot(plan: TestPlan, state: RunState, testers: dict[str, Tester], label: str) -> dict:
     """Baseline (before the first case) or final (after the last) read-only values (tech spec section 8)."""
     if not plan.baseline_steps or state.data.get(label):
@@ -91,7 +206,7 @@ def restore_pass(plan: TestPlan, state: RunState, testers: dict[str, Tester], un
 def run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge: Judge,
              on_case_done: Callable[[CaseResult], None] | None = None, max_retries: int = 1,
              manual_login: Callable[[str, str], bool] | None = None,
-             manual_login_apps: list[str] | None = None) -> dict[str, CaseResult]:
+             manual_login_apps: list[str] | None = None, memory=None) -> dict[str, CaseResult]:
     state.checkpoint("run started", status="running")
     read_snapshot(plan, state, testers, "baseline")
     by_id = {c.id: c for c in plan.cases}
@@ -100,7 +215,7 @@ def run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge:
             continue                                  # resume: already done
         case = by_id[cid]
         result = _run_case(plan, case, state, testers, judge, max_retries, manual_login,
-                           manual_login_apps)
+                           manual_login_apps, memory=memory)
         state.set_result(result)
         if on_case_done:
             on_case_done(result)
@@ -110,7 +225,7 @@ def run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge:
 
 
 def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
-              manual_login_apps=None) -> CaseResult:
+              manual_login_apps=None, memory=None) -> CaseResult:
     if case.skip_reason:
         return CaseResult(case_id=case.id, verdict="SKIPPED", expected=case.expected, note=case.skip_reason)
     for dep in case.depends_on:
@@ -125,7 +240,8 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
         tester = testers.get(app)
         if tester is None:
             return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected, note=f"no tester for app '{app}'")
-        brief = brief_for(plan, case, steps, state)
+        disco = ensure_discovery(plan, case, app, state, testers, memory)
+        brief = inject_discovery(brief_for(plan, case, steps, state), disco)
         attempt = 0
         while True:
             log_mark = len(state.data["action_log"])
@@ -187,9 +303,33 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
                               note=f"tester on {app} {why}: {sr.notes}".strip())
     full_brief = brief_for(plan, case, list(range(len(case.steps))), state)
     try:
-        return judge(full_brief, state.actions_for(case.id), results, state)
+        result = judge(full_brief, state.actions_for(case.id), results, state)
     except Exception as e:                        # noqa: BLE001  judge output unusable; keep the run going
         return CaseResult(case_id=case.id, verdict="AGENT INCOMPLETE", expected=case.expected,
                           values={k: v for r in results for k, v in r.values.items()},
                           evidence=[s for r in results for s in r.screenshots],
                           note=f"the judge could not decide: {type(e).__name__}: {str(e)[:300]}")
+    if memory is not None and result.verdict in ("PASS", "PARTIAL"):
+        _propose_success_recipe(memory, case, state)
+    return result
+
+
+def _propose_success_recipe(memory, case, state) -> None:
+    """If discovery found a path and nothing was proposed yet, propose a recipe from discovery notes."""
+    apps = {s.app for s in case.steps if s.app not in ("none", "redmine")}
+    for app in apps:
+        entry = (state.data.get("discovery") or {}).get(discovery_key(case.area, app)) or {}
+        if entry.get("source") != "discovery":
+            continue
+        if entry.get("recipes"):
+            continue
+        notes = (entry.get("notes") or "").strip()
+        if not notes or notes.startswith("discovery failed") or entry.get("blocked"):
+            continue
+        text = f"when working on {case.area or app} ({case.title}): {notes[:400]}"
+        try:
+            memory.propose("recipe", text, area=case.area, evidence=f"{state.dir.name}/{case.id}")
+            state.data.setdefault("notes", []).append(f"proposed recipe from discovery for {case.area or app}")
+            state.save()
+        except Exception:  # noqa: BLE001
+            pass

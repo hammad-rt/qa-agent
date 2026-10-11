@@ -176,7 +176,7 @@ What the finished run showed:
 
 1. ~~Fix evidence paths~~ (gap 1 done) and require recorded observations (gap 2). That should turn most NOT VERIFIED results into real verdicts.
 2. Make SuiteCRM reliable: fill in the helper settings from a live session, add "open record by number", and consider read-only lookups through the savostore connector.
-3. Scale the tool-call budget per step, and add a token-aware reply limit.
+3. ~~Scale the tool-call budget per step~~ (`tool_budget` + discovery-first when memory has no recipe). Still to do: token-aware reply limit before LLM calls.
 4. Keep logins across runs (one profile per app, environment and user, with expiry checks), and ask the developers about reCAPTCHA on staging.
 5. Run #180974 again, then #180966 and #165348, and a task with no Test Cases child to try Phase 8. Run `eval --live` and record the score.
 6. Add read-only network checks for API-level cases.
@@ -189,7 +189,7 @@ What the finished run showed:
 
 - No passwords in code, packs, memory, reports or chat. Secrets go only through the masked prompt into `.env`, and memory stores only env var names. The Redmine wiki has plaintext staging credentials: read addresses only, and never copy secrets from it.
 - The model never sees passwords. `login_form` and `get_secret` type them from env vars, and only into the login form.
-- Every data-changing, money-moving, settings, posting or email step needs approval. Settings changes, Redmine posts, emails and production writes are always asked one by one and never pre-approved. Production is read-only unless approved.
+- Every data-changing, money-moving, settings, posting or email step needs approval. Staging may pre-approve `change_settings` at the plan gate; Redmine posts, emails and production writes are always asked one by one. Production never pre-approves and is read-only unless approved.
 - Bug drafts and generated test cases are posted to Redmine only after the user approves each one. Report emails go only to the user's own inbox unless they confirm another address.
 - The browser stays on the run's sites, and any other site needs the user's OK. CAPTCHAs are never solved by the agent. A person logs in, or the case is BLOCKED.
 - Status changes on records aren't settings and aren't reverted. Use test records made for the run, owned by the run's chosen user, and log them in the ledger.

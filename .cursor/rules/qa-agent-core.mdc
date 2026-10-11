@@ -15,7 +15,7 @@ alwaysApply: true
 
 - Secrets: masked prompt → `.env` only. Never in packs, memory text, reports, chats. Wiki = addresses only.
 - Model never sees passwords (`login_form` / `get_secret` type from env).
-- Data/money/settings/post/email → approval. `change_settings`, `redmine_post`, `send_email`, `prod_write` always one-by-one; never pre-approve. Prod needs explicit yes.
+- Data/money/settings/post/email → approval. Staging may pre-approve `change_settings` at the plan gate; `redmine_post`, `send_email`, `prod_write` always one-by-one. Prod never pre-approves.
 - Bugs/cases post and non-default email only after per-item confirm.
 
 ## Browser

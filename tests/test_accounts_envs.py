@@ -142,7 +142,7 @@ class Environments(unittest.TestCase):
 
     def _policy(self, env):
         return Policy(allow_hosts=[], risky_patterns=[], env=env,
-                      preapprovable=["create_test_order", "pay_staging_test_card"], always_ask=["change_settings"])
+                      preapprovable=["create_test_order", "pay_staging_test_card", "change_settings"], always_ask=["redmine_post", "send_email", "prod_write"])
 
     def test_prod_never_preapproves(self):
         p = self._policy("prod")

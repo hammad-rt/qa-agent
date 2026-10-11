@@ -76,8 +76,9 @@ def console_approver(input_fn=input, out=print):
 
 
 def plan_gate(plan: TestPlan, input_fn=input, out=print, policy=None, issues: list[str] | None = None) -> tuple[bool, list[str]]:
-    """Returns (approved, action types pre-approved for this run). Always-ask actions (settings, posting,
-    email, prod writes) are never offered for pre-approval; they are asked each time."""
+    """Returns (approved, action types pre-approved for this run). Always-ask actions (posting,
+    email, prod writes) are never offered for pre-approval; they are asked each time.
+    change_settings may be in the pre-approve batch when the pack lists it and env != prod."""
     pre = []
     allowed = list(plan.preapprovable_actions)
     ask_each = []

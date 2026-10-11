@@ -27,19 +27,19 @@ def threshold_plan():
 
 
 class PreapprovalCrash(unittest.TestCase):
-    def test_gate_never_offers_always_ask_actions(self):
+    def test_gate_offers_change_settings_when_pack_allows(self):
         pol = from_pack(load_pack(PACK), "staging")
         out = []
         ok, pre = gate.plan_gate(threshold_plan(), input_fn=lambda _: "y", out=out.append, policy=pol)
         self.assertTrue(ok)
-        self.assertNotIn("change_settings", pre)
+        self.assertIn("change_settings", pre)
         pol.preapprove(pre)                       # no PolicyViolation
-        self.assertTrue(any("ask you before each" in o and "change_settings" in o for o in out))
+        self.assertFalse(any("ask you before each" in o and "change_settings" in o for o in out))
 
-    def test_autofix_trims_preapprovals(self):
+    def test_autofix_keeps_change_settings_when_pack_allows(self):
         pack = load_pack(PACK)
         p = autofix(threshold_plan(), pack.config.get("preapprovable_actions", []))
-        self.assertNotIn("change_settings", p.preapprovable_actions)
+        self.assertIn("change_settings", p.preapprovable_actions)
 
     def test_gate_asks_twice_when_plan_has_problems(self):
         prompts = []

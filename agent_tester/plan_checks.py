@@ -78,7 +78,7 @@ def _restored_later(plan: TestPlan, case) -> bool:
 def autofix(plan: TestPlan, preapprovable: list[str] | None = None) -> TestPlan:
     """Fixed-code repairs the planner often misses:
     - settings changed but never restored: one labelled restore step after the last case that changes settings;
-    - pre-approvals limited to what the pack allows (always-ask actions are asked each time)."""
+    - pre-approvals limited to what the pack allows (always-ask / prod-blocked actions stay out)."""
     from .models import Step
     plan = plan.model_copy(deep=True)
     if preapprovable is not None:

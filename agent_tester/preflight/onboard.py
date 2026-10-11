@@ -98,7 +98,7 @@ def draft_pack(rm, ref: str, redmine_host: str = "") -> Draft:
         "slug": slug, "name": name,
         "redmine": {"project_ids": [pid], "test_case_subject_prefix": tc_prefix, "wiki_project": None, "wiki_pages": env_pages},
         "apps": {}, "allowlist": {"staging": [], "prod": []},
-        "preapprovable_actions": [], "always_ask_actions": ["change_settings", "redmine_post", "send_email", "prod_write"],
+        "preapprovable_actions": ["change_settings"], "always_ask_actions": ["redmine_post", "send_email", "prod_write"],
         "risky_patterns": ["(?i)\\bpay( now)?\\b", "(?i)\\bplace order\\b", "(?i)\\bsubmit\\b", "(?i)\\bconfirm\\b", "(?i)\\bdelete\\b"],
         "memory_areas": ["ui"], "helpers": {},
     }

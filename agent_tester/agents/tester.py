@@ -26,6 +26,30 @@ READ_ONLY_BROWSER = {"browser_snapshot", "browser_take_screenshot", "browser_wai
 BLOCKED_BROWSER = {"browser_evaluate", "browser_run_code", "browser_install", "browser_file_upload"}
 
 
+def tool_budget(n_steps: int, floor: int = 40, cap: int = 120, per_step: int = 20) -> int:
+    """Per-case browser/tool call budget: floor from env, scales with steps, hard cap."""
+    return max(floor, min(cap, per_step * max(int(n_steps), 1)))
+
+
+def _is_xsrf_page(text: str) -> bool:
+    """True when SuiteCRM (or similar) shows a Cross-Site Request Forgery / referer block page."""
+    t = (text or "").lower()
+    return "cross site request forgery" in t or "acceptable referer" in t
+
+
+def _url_nav_key(url: str) -> str:
+    """Normalize path+query so absolute and relative admin deep-links compare equal."""
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = "http://local/" + raw.lstrip("/")
+    u = urlparse(raw)
+    path = u.path or "/"
+    q = u.query or ""
+    return f"{path}?{q}" if q else path
+
+
 def run_urls(pack, env: str, state) -> dict:
     """app -> base URL for this run: the URL resolved at the plan gate wins over pack.yaml (pre-prod etc.)."""
     urls = {a: pack.url(a, env) for a in pack.apps if pack.url(a, env)}
@@ -164,6 +188,9 @@ class TesterSession:
         self.memory, self.ledger = memory, ledger
         self.helpers, self.pack, self.env, self.toolset = helpers or {}, pack, env, toolset
         self.off_site: str | None = None      # page address outside this run's sites, until the user allows it or we go back
+        self._action_gated: set[str] = set()  # action_types already approved this turn (once per gated action)
+        self._xsrf_urls: set[str] = set()     # path?query keys that returned an XSRF page this session
+        self._last_nav_url: str | None = None # last browser_navigate URL (for XSRF attribution)
 
     # ---- tools exposed to the model -------------------------------------------------
     def tools(self):
@@ -309,9 +336,25 @@ class TesterSession:
                  needs_manual_login]
         if s.helpers and s.toolset is not None:
             tools.append(run_helper)
+        # Discovery is read-only for data writes but may propose recipes; ledger only on real cases.
+        if s.brief.get("discovery") or not s.brief.get("read_only"):
+            tools.append(propose_memory)
         if not s.brief.get("read_only"):
-            tools += [propose_memory, ledger_record, record_original, record_restored]
+            tools += [ledger_record, record_original, record_restored]
         return tools
+
+    def _step_action_type(self) -> str | None:
+        """action_type of the current plan step (or the next unfinished step that has one)."""
+        steps = self.brief.get("steps") or []
+        if self.current_step is not None:
+            for st in steps:
+                if st.get("n") == self.current_step and st.get("action_type"):
+                    return st["action_type"]
+        done = set(self.result.steps_done or [])
+        for st in steps:
+            if st.get("action_type") and st.get("n") not in done:
+                return st["action_type"]
+        return None
 
     # ---- callbacks: the code side of every tool call --------------------------------
     def before_tool(self, tool, args, tool_context):
@@ -329,11 +372,30 @@ class TesterSession:
                                               "go back (browser_navigate_back) or navigate to the app")
             try:
                 if name == "browser_navigate":
-                    self.policy.check_url(args.get("url", ""))
+                    url = args.get("url", "") or ""
+                    key = _url_nav_key(url)
+                    if key and key in self._xsrf_urls:
+                        return self._deny(
+                            name, args,
+                            "this URL already returned an XSRF / acceptable-referer page; "
+                            "open the screen via the discovery menu path instead of deep-linking again")
+                    self.policy.check_url(url)
+                    self._last_nav_url = url
                 label = " ".join(str(args.get(k, "")) for k in ("element", "text", "values") if args.get(k))
                 if name not in READ_ONLY_BROWSER and name != "browser_navigate":
                     risky = self.policy.is_risky(label) or bool(args.get("submit"))
-                    if risky:
+                    action_type = self._step_action_type()
+                    # Close the hole where Save on a change_settings step skipped the console gate.
+                    if action_type and action_type not in self._action_gated:
+                        how = self.policy.gate(f"{name}: {label}", f"{self.case_id} on {self.app}",
+                                               action_type=action_type, risky=risky,
+                                               details={"tool": name, "args": _safe_args(args)})
+                        self._action_gated.add(action_type)
+                        self.state.log_action(case_id=self.case_id, app=self.app, tool="request_approval",
+                                              args={"action_type": action_type, "description": f"{name}: {label}",
+                                                    "how": how, "via": "browser_gate"},
+                                              plan_step=self.current_step, approval=how)
+                    elif risky:
                         self.policy.gate(f"{name}: {label}", f"{self.case_id} on {self.app}", risky=True,
                                          details={"tool": name, "args": _safe_args(args)})
             except PolicyViolation as e:
@@ -353,9 +415,13 @@ class TesterSession:
                 if name not in self.result.screenshots:
                     self.result.screenshots.append(name)
         if tool.name.startswith("browser_"):
-            blocked = self._check_page_site(tool.name, _text_of(tool_response))
+            text = _text_of(tool_response)
+            blocked = self._check_page_site(tool.name, text)
             if blocked:
                 return {"error": blocked}
+            xsrf = self._note_xsrf(tool.name, args, text)
+            if xsrf:
+                return {"error": xsrf}
             return _cap_obj(_redact_obj(tool_response, self.keep_emails), MAX_PAGE_CHARS)
         return None
 
@@ -397,6 +463,30 @@ class TesterSession:
                                   plan_step=self.current_step, approval="denied", outcome=str(e))
             return (f"Blocked: the browser went to {host}, which this run may not use ({e}). "
                     "Go back with browser_navigate_back, or call finish() and say the case needs that site.")
+
+    def _note_xsrf(self, tool_name: str, args: dict, text: str) -> str | None:
+        """If the page is SuiteCRM XSRF, remember the URL key and tell the model to use the menu path."""
+        if not _is_xsrf_page(text):
+            return None
+        m = re.search(r"Page URL:\s*(\S+)", text or "")
+        page_url = m.group(1) if m else ""
+        # Prefer the URL we navigated to; XSRF pages sometimes keep or rewrite the address.
+        for candidate in (args.get("url") if tool_name == "browser_navigate" else None,
+                          self._last_nav_url, page_url):
+            key = _url_nav_key(candidate or "")
+            if key:
+                self._xsrf_urls.add(key)
+                break
+        else:
+            key = ""
+        self.state.checkpoint(
+            f"XSRF page on {self.app}/{self.case_id}: {key or page_url or '(unknown url)'} "
+            f"(via {tool_name}); do not deep-link again")
+        self.state.log_action(case_id=self.case_id, app=self.app, tool="xsrf_detected",
+                              args={"url_key": key, "page_url": page_url, "via": tool_name},
+                              plan_step=self.current_step, outcome="xsrf")
+        return ("XSRF / acceptable-referer page detected. Do not browser_navigate to this admin deep-link again. "
+                "Open the screen via the discovery menu/label path (Home or Administration menu), then continue.")
 
     def _deny(self, name, args, why):
         self.state.log_action(case_id=self.case_id, app=self.app, tool=name, args=_safe_args(args),
@@ -575,16 +665,36 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
         try:
             urls = run_urls(pack, env, state)
             toolset = playwright_toolset(run_dir, app)
-            sess = TesterSession(app, brief, state, policy, evidence, settings.max_tool_calls_per_case,
+            if brief.get("max_tool_calls") is not None:
+                max_calls = int(brief["max_tool_calls"])
+            elif brief.get("discovery"):
+                max_calls = max(25, min(40, settings.max_tool_calls_per_case))
+            else:
+                max_calls = tool_budget(len(brief.get("steps") or []), floor=settings.max_tool_calls_per_case)
+            sess = TesterSession(app, brief, state, policy, evidence, max_calls,
                                  settings.max_minutes_per_case, keep_emails=keep, memory=memory, ledger=Ledger(state),
                                  helpers=helpers, pack=pack, env=env, toolset=toolset)
-            instr = prompts.TESTER.format(app_label=pack.apps[app].get("label", app), base_url=urls.get(app) or pack.url(app, env), env=env)
-            if helpers:
+            base_url = urls.get(app) or pack.url(app, env)
+            if brief.get("discovery"):
+                instr = prompts.DISCOVERY.format(app_label=pack.apps[app].get("label", app), base_url=base_url, env=env)
+            else:
+                instr = prompts.TESTER.format(app_label=pack.apps[app].get("label", app), base_url=base_url, env=env)
+            if helpers and not brief.get("discovery"):
                 instr += "\nTested helpers (prefer them for these routine steps; call run_helper):\n" + "\n".join(
                     f"- {n}: {h.meta['description']} params {json.dumps(h.meta.get('params', {}))}"
                     + (" [changes data: needs approval]" if h.meta.get("changes_data") else "") for n, h in helpers.items())
-            if brief.get("read_only"):
+            if brief.get("read_only") and not brief.get("discovery"):
                 instr += "\nThis turn is READ-ONLY: log in and read values only. Never change anything."
+            recipes = brief.get("recipes") or []
+            disco_notes = (brief.get("discovery_notes") or "").strip()
+            if recipes or disco_notes:
+                instr += "\nUI map from discovery / memory (follow menu/label paths; do not re-explore from scratch):\n"
+                instr += ("On an XSRF / acceptable-referer page, return via Home/menu — never retry the same "
+                          "Administration deep-link with browser_navigate.\n")
+                for r in recipes:
+                    instr += f"- recipe: {r}\n"
+                if disco_notes:
+                    instr += disco_notes + "\n"
             agent = LlmAgent(name=f"tester_{app}", model=model(settings, max_tokens=TESTER_MAX_TOKENS),
                              instruction=lambda _c: instr, tools=[toolset, *sess.tools()],
                              before_tool_callback=sess.before_tool, after_tool_callback=sess.after_tool,

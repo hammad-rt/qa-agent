@@ -43,15 +43,16 @@ allowlist:
   prod: [app.savostore.com, savo.store]
 
 # Action types the user may pre-approve for a whole run at the plan gate.
+# change_settings is staging/preprod only (Policy.can_preapprove blocks it on prod).
 preapprovable_actions:
   - pay_staging_test_card
   - move_order_status
   - create_test_order
   - add_parcel
+  - change_settings
 
 # Never pre-approvable: always a one-off approval.
 always_ask_actions:
-  - change_settings
   - redmine_post
   - send_email
   - prod_write

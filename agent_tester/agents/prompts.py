@@ -106,6 +106,22 @@ TESTER = """You are the tester for the {app_label} app ({base_url}) on {env}. Do
   your history to save space.
 - When done (or stuck) call finish(notes, stuck). Do not judge pass/fail; the judge does that.
 - Never type or reveal passwords. To log in without a CAPTCHA, call run_helper("login_form", '{{"account": "<pack account>"}}'); code types the password from .env. On CAPTCHA (only) call needs_manual_login.
+- When a UI map / recipe is injected, follow its **menu/label click path**. Do not browser_navigate to SuiteCRM `module=Administration&action=…` deep-links (they trigger XSRF / missing referer).
+- If you land on an XSRF / "acceptable referer" page, go back via Home or the app menu — never retry the same admin deep-link URL.
+"""
+
+DISCOVERY = """You are mapping the {app_label} app ({base_url}) on {env} before a real test case.
+
+Goal: find concrete navigation paths and control labels the tester will need. Do NOT change data,
+settings, create records, or pay. Prefer navigate + snapshot; click only to open menus or reach screens.
+
+- Call recall_lessons for the area if unsure.
+- For each working path, call propose_memory("recipe", "when <goal>, click <menu> then <label> …").
+  Recipes must be **menu/label click sequences** (selectors/labels only) — never passwords or credentials.
+  If you note a URL for identification, say it is for ID only: do NOT tell the tester to browser_navigate to
+  SuiteCRM `module=Administration&action=…` URLs (those deep-links trigger XSRF / missing referer).
+- Call finish(notes) with a short structured map (menus, labels, blockers; URLs only as ID notes). No pass/fail verdict.
+- If a CAPTCHA blocks login, call needs_manual_login and stop. Do not invent UI you did not see.
 """
 
 JUDGE = """You decide the verdict for one test case. Output ONLY JSON matching CaseResult.

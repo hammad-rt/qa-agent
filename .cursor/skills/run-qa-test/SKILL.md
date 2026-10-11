@@ -37,6 +37,6 @@ Load skill `qa-stack` if changing how the run is wired. Rules: `stack`, `qa-agen
 - Env each run; production explicit yes; no prod pre-approvals.
 - Users each run; passwords masked into `.env` per user+env.
 - Plan-gate answers → replan. Extra browser hosts → one OK.
-- Never solve CAPTCHA; never pre-approve settings changes.
+- Never solve CAPTCHA. Staging may pre-approve `change_settings` at the plan gate; prod/post/email stay one-by-one.
 
 Failures → skill `debug-live-run`.

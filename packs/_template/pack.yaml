@@ -28,8 +28,8 @@ allowlist:
   staging: []
   prod: []
 
-preapprovable_actions: []
-always_ask_actions: [change_settings, redmine_post, send_email, prod_write]
+preapprovable_actions: [change_settings]
+always_ask_actions: [redmine_post, send_email, prod_write]
 
 risky_patterns:
   - "(?i)\\bpay( now)?\\b"

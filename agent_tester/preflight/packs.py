@@ -10,7 +10,8 @@ import yaml
 
 from .pack_loader import Pack, load_pack
 
-CORE_ALWAYS_ASK = {"change_settings", "redmine_post", "send_email", "prod_write"}
+# change_settings may be pack-preapprovable on staging/preprod; prod still never pre-approves.
+CORE_ALWAYS_ASK = {"redmine_post", "send_email", "prod_write"}
 REQUIRED = ("slug", "name", "redmine", "apps", "allowlist", "always_ask_actions", "risky_patterns")
 _PASSWORDISH = re.compile(r"(?i)^\s*(password|passwd|pwd|secret|api_?key|token)\s*:\s*['\"]?[^\s'\"#][^#\n]*$", re.M)
 _SLUG = re.compile(r"^[a-z][a-z0-9-]{1,40}$")

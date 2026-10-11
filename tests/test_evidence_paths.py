@@ -90,9 +90,11 @@ class ReportEvidenceGating(unittest.TestCase):
             st.set_result(CaseResult(case_id="TC1", verdict="PASS", note="ok",
                                      evidence=[f"/abs/elsewhere/{present}", missing]))
             html = build_report(st).read_text()
-            self.assertIn(f'src="shots/{present}"', html)
+            import base64
+            self.assertIn('src="data:image/png;base64,' + base64.b64encode(b"png").decode() + '"', html)
+            self.assertIn(f'alt="{present}"', html)
             self.assertNotIn("/abs/elsewhere/", html)  # basename only in src
-            self.assertNotIn(f'src="shots/{missing}"', html)
+            self.assertNotIn(f'alt="{missing}"', html)
             self.assertIn(f"missing evidence: {missing}", html)
 
 

@@ -3,6 +3,7 @@ questions and answers, what was learned, model. Writes report.html, report.json,
 when a headless browser is available."""
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 
@@ -45,7 +46,7 @@ th{background:#f5f5f5;text-align:left}h2{border-bottom:2px solid #eee;padding-bo
 {% if r and r.values %}<p>{% for k, v in r.values.items() %}<code>{{ k }} = {{ v }}</code> {% endfor %}</p>{% endif %}
 {% if r and r.note %}<div class="{{ 'mean' if r.verdict != 'PASS' else '' }}"><b>{{ 'What this means' if r.verdict != 'PASS' else 'Note' }}:</b> {{ r.note }}</div>{% endif %}
 {% if r and r.lessons_applied %}<p class="muted">Lessons applied: {{ r.lessons_applied | join(', ') }}</p>{% endif %}
-{% if r and r.evidence %}<div class="shots">{% for item in evidence_items(r.evidence) %}{% if item.kind == 'img' %}{% if item.ok %}<img src="shots/{{ item.name }}" alt="{{ item.name }}">{% else %}<span class="muted">missing evidence: {{ item.name }}</span> {% endif %}{% else %}<span class="muted">{{ item.name }}</span> {% endif %}{% endfor %}</div>{% endif %}
+{% if r and r.evidence %}<div class="shots">{% for item in evidence_items(r.evidence) %}{% if item.kind == 'img' %}{% if item.ok %}<img src="{{ item.src }}" alt="{{ item.name }}">{% else %}<span class="muted">missing evidence: {{ item.name }}</span> {% endif %}{% else %}<span class="muted">{{ item.name }}</span> {% endif %}{% endfor %}</div>{% endif %}
 </div>{% endfor %}
 
 {% if baseline or final %}<h2>Baseline vs final</h2><table><tr><th>Value</th><th>Baseline</th><th>Final</th></tr>
@@ -86,12 +87,20 @@ def build_report(state, pack=None, pdf: bool | None = None) -> Path:
     base, fin = state.data.get("baseline") or {}, state.data.get("final") or {}
     shots_dir = state.dir / "shots"
 
+    images: dict[str, str] = {}   # placeholder -> data URI, filled in after redaction so base64 is never altered
+
     def evidence_items(evidence):
         items = []
         for e in evidence or []:
             bn = Path(str(e)).name
             if bn.endswith(".png"):
-                items.append({"kind": "img", "name": bn, "ok": (shots_dir / bn).is_file()})
+                f = shots_dir / bn
+                ok = f.is_file()
+                # Embed the image so the report keeps its proof when the HTML/PDF is emailed or moved.
+                src = f"@@IMG:{bn}@@" if ok else ""
+                if ok:
+                    images[src] = "data:image/png;base64," + base64.b64encode(f.read_bytes()).decode()
+                items.append({"kind": "img", "name": bn, "ok": ok, "src": src})
             else:
                 items.append({"kind": "text", "name": bn})
         return items
@@ -105,7 +114,10 @@ def build_report(state, pack=None, pdf: bool | None = None) -> Path:
         learned=state.data.get("learned"), model=state.data.get("model"), notes=state.data.get("notes", []),
         evidence_items=evidence_items)
     out = state.dir / "report.html"
-    out.write_text(redact(html))
+    page = redact(html)
+    for key, uri in images.items():
+        page = page.replace(key, uri)
+    out.write_text(page)
     (state.dir / "report.json").write_text(redact(json.dumps(
         {"task_id": plan.task_id, "env": plan.env, "counts": counts,
          "results": {k: v.model_dump(mode="json") for k, v in results.items()},

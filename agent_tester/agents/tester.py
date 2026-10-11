@@ -365,6 +365,8 @@ class TesterSession:
             return {"error": "Limit reached. Call finish() now with what you have."} if name != "finish" else None
         if name in BLOCKED_BROWSER:
             return self._deny(name, args, "this browser tool is not allowed")
+        if name == "browser_take_screenshot":
+            self._fix_screenshot_args(args)
         if name.startswith("browser_"):
             if self.off_site and name not in ("browser_navigate", "browser_navigate_back", "browser_snapshot",
                                               "browser_take_screenshot"):
@@ -404,12 +406,37 @@ class TesterSession:
                                   plan_step=self.current_step)
         return None
 
+    def _fix_screenshot_args(self, args: dict) -> None:
+        """The model often calls browser_take_screenshot without a filename; Playwright MCP then returns the image
+        inline only and nothing reaches shots/ or the report. Always give it an absolute path under shots/
+        (ADK passes this same dict to the tool, so the in-place change is what runs)."""
+        raw = (args.get("filename") or "").strip()
+        p = Path(raw) if raw else None
+        if p is not None and p.is_absolute() and p.parent.resolve() == self.ev.shots.resolve():
+            return
+        what = p.stem if p is not None and p.stem else (self.brief.get("title") or "evidence")
+        png, txt = self.ev.paths(self.case_id, what)
+        if self.last_snapshot:
+            self.ev.save_snapshot(txt, self.last_snapshot, keep_emails=self.keep_emails)
+            if txt.name not in self.result.snapshots:
+                self.result.snapshots.append(txt.name)
+        args["filename"] = str(png.resolve())
+
     def after_tool(self, tool, args, tool_context, tool_response):
         if tool.name == "browser_snapshot":
             self.last_snapshot = _text_of(tool_response)
         if tool.name == "browser_take_screenshot":
             raw = args.get("filename") or ""
             png = Path(raw) if Path(raw).is_absolute() else self.ev.shots / Path(raw).name
+            if not png.is_file():
+                # fall back to a path the tool reported, copied into shots/
+                m = re.search(r"([^\s'\"()\[\]]+\.png)", _text_of(tool_response) or "")
+                if m and Path(m.group(1)).is_file():
+                    import shutil
+                    dst = self.ev.shots / Path(m.group(1)).name
+                    if Path(m.group(1)).resolve() != dst.resolve():
+                        shutil.copy(m.group(1), dst)
+                    png = dst
             if png.is_file():
                 name = png.name
                 if name not in self.result.screenshots:

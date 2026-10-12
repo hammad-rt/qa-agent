@@ -61,10 +61,14 @@ def ensure_data(plan, case, state, testers: dict, rules: list[dict]) -> CaseResu
                           note=f"test data not ready ({key}): {why}")
 
     clients = rule.get("test_client")
-    client = clients.get(plan.env) if isinstance(clients, dict) else clients
-    if clients and not client:
-        return blocked(f"no test client set for {plan.env} in the pack (data_prep.test_client); "
+    name = clients.get(plan.env) if isinstance(clients, dict) else clients
+    user = next((r.value for r in getattr(plan, "requirements", []) or []
+                 if r.key.startswith("account.portal.") and r.value), None)
+    if not (name or user):
+        return blocked("no portal test user picked and no test client set for this environment; "
                        "the agent will not create orders for an unconfirmed account")
+    client = (f"{name} (the CRM client of portal login {user})" if name and user else name
+              or f"the CRM client whose portal login / email is {user}")
     for k in ("find", "create"):
         rule = {**rule, k: rule[k].replace("{client}", client or "")}
     app = rule.get("app", "crm")

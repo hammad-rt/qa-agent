@@ -17,6 +17,7 @@ apps:
     label: Customer portal
     envs:
       staging: https://staging5.rolustech.com:4225/
+      preprod: https://westeros.rolustech.com:44310/   # Redmine wiki Pre_Prod_Cardentials
       prod: https://app.savostore.com/
     accounts:
       customer:
@@ -26,6 +27,7 @@ apps:
     label: CRM (SuiteCRM)
     envs:
       staging: https://staging5.rolustech.com:4220/
+      preprod: https://staging5.rolustech.com:44360/   # Redmine wiki Pre_Prod_Cardentials
       prod: https://savo.store/
     accounts:
       admin:
@@ -40,6 +42,7 @@ manual_login_apps: [portal]
 # to the sites of each run's URLs, and asks before using any other site (e.g. a payment page).
 allowlist:
   staging: [staging5.rolustech.com, checkout.stripe.com]
+  preprod: [westeros.rolustech.com, staging5.rolustech.com, checkout.stripe.com]
   prod: [app.savostore.com, savo.store]
 
 # Action types the user may pre-approve for a whole run at the plan gate.
@@ -91,7 +94,7 @@ data_prep:
       none: ["buy ?& ?ship"]
     app: crm
     value: test_order
-    test_client:          # per environment; prep is blocked where none is set
+    test_client:          # optional CRM name per env; otherwise the client is matched by the portal user picked at the start
       staging: Hammad Iqbal
     find: >-
       In the CRM, open Invoices (AOS_Invoices = shipping-only orders) and find one for the test client {client}

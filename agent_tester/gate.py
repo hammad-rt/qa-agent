@@ -30,7 +30,7 @@ def show_plan(plan: TestPlan, issues: list[str], out=print) -> None:
 
 def ask_batch(reqs, ctx, input_fn=None, secret_fn=getpass.getpass, write_secret=None, out=print) -> None:
     from .config import write_env_secret
-    from .auto import prompter
+    from .auto import prompter, is_auto
     input_fn = input_fn or prompter("")
     qs = G.open_questions(reqs)
     if not qs:
@@ -42,7 +42,8 @@ def ask_batch(reqs, ctx, input_fn=None, secret_fn=getpass.getpass, write_secret=
         if r.kind == "account" and r.value and r.default is None:
             answers[r.key] = ""          # only the masked password is needed
             continue
-        answers[r.key] = input_fn(f"     > ")
+        # the test user is always asked, even in automatic mode
+        answers[r.key] = (input if (r.kind == "account" and is_auto()) else input_fn)(f"     > ")
     G.apply_answers(reqs, answers, ctx, secret_prompt=secret_fn, write_secret=write_secret or write_env_secret)
 
 

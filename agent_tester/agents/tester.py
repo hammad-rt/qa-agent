@@ -34,6 +34,18 @@ ACTIONS_PER_STEP = int(os.environ.get("TESTER_ACTIONS_PER_STEP", "30"))   # acti
 LOOP_WARN, LOOP_STOP = 3, 5          # same call repeated this often without progress: warn, then stop
 
 
+RAW_TOOL_CALL = re.compile(r"<\|?tool_call\|?>|call:\w+\(")
+
+
+def nudge_text(final: str) -> str:
+    """The model ended its turn without finish() -- often by writing a tool call as plain text
+    (Gemma's `<|tool_call>call:name(...)` syntax) instead of a real function call. Ask it to go on."""
+    why = ("Your last message wrote a tool call as text, so it was not run."
+           if RAW_TOOL_CALL.search(final or "") else "You stopped without calling finish().")
+    return (why + " Continue from where you are using real function calls only (never write call syntax as text). "
+            "When the steps are done or you cannot go on, call finish().")
+
+
 def _call_sig(name: str, args: dict) -> str:
     try:
         return name + json.dumps({k: v for k, v in (args or {}).items() if k != "element"}, sort_keys=True,
@@ -782,7 +794,8 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
 
             async def go():
                 try:
-                    await run_agent(agent, prompt, settings, trace_path=run_dir / "trace.jsonl")
+                    await run_agent(agent, prompt, settings, trace_path=run_dir / "trace.jsonl",
+                                    follow_up=lambda final: nudge_text(final) if not (sess.finished or sess.result.limit_hit) else None)
                 except Exception as e:  # noqa: BLE001
                     if not _is_context_error(e):
                         raise

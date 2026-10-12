@@ -27,7 +27,7 @@ def model(settings: Settings, json_mode: bool = False, max_tokens: int | None = 
 
 
 async def run_agent(agent, prompt: str, settings: Settings, state: dict | None = None, app_name: str = "qa-agent",
-                    trace_path=None, retry: bool = False) -> str:
+                    trace_path=None, retry: bool = False, follow_up=None, max_follow_ups: int = 2) -> str:
     """Run one agent to completion and return its final text. retry=True only for agents without side
     effects (planner, reviewer, judge); testers are never replayed automatically."""
     if retry:
@@ -45,15 +45,20 @@ async def run_agent(agent, prompt: str, settings: Settings, state: dict | None =
     await svc.create_session(app_name=app_name, user_id="qa", session_id=sid, state=state or {})
     runner = Runner(agent=agent, app_name=app_name, session_service=svc)
     final = ""
+    msg, left = prompt, max_follow_ups
     async with _sem:
-        async for ev in runner.run_async(user_id="qa", session_id=sid,
-                                         new_message=types.Content(role="user", parts=[types.Part(text=prompt)])):
-            if trace_path:
-                _trace(trace_path, ev)
-            if ev.content and ev.content.parts:
-                text = "".join(p.text or "" for p in ev.content.parts if getattr(p, "text", None))
-                if text and ev.is_final_response():
-                    final = text
+        while msg:
+            async for ev in runner.run_async(user_id="qa", session_id=sid,
+                                             new_message=types.Content(role="user", parts=[types.Part(text=msg)])):
+                if trace_path:
+                    _trace(trace_path, ev)
+                if ev.content and ev.content.parts:
+                    text = "".join(p.text or "" for p in ev.content.parts if getattr(p, "text", None))
+                    if text and ev.is_final_response():
+                        final = text
+            # follow_up(final) -> a message to continue the same session (history kept), or None to stop.
+            msg = follow_up(final) if (follow_up and left > 0) else None
+            left -= 1
     return final
 
 

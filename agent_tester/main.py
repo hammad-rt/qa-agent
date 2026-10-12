@@ -247,6 +247,13 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
         (state.dir / "generated_cases.textile").write_text(casegen.to_textile(plan, bundle.issue.get("subject", "")))
         print(f"Generated cases saved in {state.dir / 'generated_cases.textile'}. "
               f"After the run you can post them to Redmine with: cases {state.dir} --post")
+    from .auto import is_auto
+    if is_auto():                                     # test data is the agent's job: find or create it in the run
+        for r in G.open_questions(plan.requirements):
+            if r.kind in ("data", "other"):
+                r.status, r.source = "resolved", "agent"
+                r.value = r.value or "found or created by the agent during the run (data prep)"
+                print(f"  {r.key}: I'll find or create this myself during the run.")
     still = G.open_questions(plan.requirements)
     state.set_plan(plan)
     if still:

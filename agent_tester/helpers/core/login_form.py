@@ -1,6 +1,8 @@
 """Log in through a username/password form. The password is read from the env var named in pack.yaml and
 typed by code; it never goes back to the model, the action log or the report."""
 import asyncio
+import getpass
+import sys
 import json
 import os
 import re
@@ -64,7 +66,30 @@ def _pick(boxes, field: dict):
     return boxes[i] if 0 <= i < len(boxes) else None
 
 
+class LoginRejected(HelperError):
+    """The form was filled and submitted but the site kept showing it (wrong password, LDAP error, ...)."""
+
+
 async def run(browser, ctx, account: str, path: str = ""):
+    try:
+        return await _attempt(browser, ctx, account, path)
+    except LoginRejected as e:
+        env_name = ctx.account(account).get("password_env")
+        if not (env_name and sys.stdin and sys.stdin.isatty()):
+            raise
+        # Ask the person for the password again (masked) and retry once before giving up.
+        print(f"\n{e}\nThe saved password may be wrong.")
+        pw = getpass.getpass(f"Re-enter the password for {ctx.account(account)['username']} ({env_name}), "
+                             "or press Enter to skip: ")
+        if not pw:
+            raise
+        from agent_tester.config import write_env_secret
+        write_env_secret(env_name, pw)
+        os.environ[env_name] = pw
+        return await _attempt(browser, ctx, account, path)
+
+
+async def _attempt(browser, ctx, account: str, path: str = ""):
     acc = ctx.account(account)
     env_name = acc.get("password_env")
     password = os.environ.get(env_name or "")
@@ -106,7 +131,7 @@ async def run(browser, ctx, account: str, path: str = ""):
     if still_on_form:
         seen = (f"the page says: {after['error']}" if after.get("error")
                 else "no error message, the form just stayed")
-        raise HelperError(f"login failed for {account} ({acc['username']}) using {used}; {seen}. "
+        raise LoginRejected(f"login failed for {account} ({acc['username']}) using {used}; {seen}. "
                           "Do not retry by hand.")
     _save_learned(ctx, {"user": _fdesc(form["user"]), "password": _fdesc(form["password"]),
                         "submit": _fdesc(sub) if sub else "Enter"})

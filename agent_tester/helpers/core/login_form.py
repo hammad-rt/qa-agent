@@ -44,7 +44,7 @@ async def run(browser, ctx, account: str, path: str = ""):
     else:                                     # no labelled button: submit with Enter
         await browser._do("browser_press_key", {"key": "Enter"})
     browser.last_snapshot = ""
-    await asyncio.sleep(float(cfg.get("wait_seconds", 3)))
+    await asyncio.sleep(float(os.environ.get("LOGIN_WAIT", cfg.get("wait_seconds", 3))))
     page = await browser.snapshot()
     markers = acc.get("role_markers", [])
     still_on_form = (await browser.find(PASS_LABELS, ("textbox",), required=False) is not None

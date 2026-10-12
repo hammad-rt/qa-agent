@@ -61,7 +61,7 @@ def _helper_calls() -> list[tuple[str, dict]]:
     browser = McpBrowser(rec)
     pack = load_pack(ROOT / "packs" / "savostore")
     with tempfile.TemporaryDirectory() as d, mock.patch.dict(
-        os.environ, {"SAVOSTORE_CRM_PASSWORD": "pw-for-schema-test"}
+        os.environ, {"SAVOSTORE_CRM_PASSWORD__ADMIN": "pw-for-schema-test", "LOGIN_WAIT": "0"}
     ):
         st = RunState(Path(d) / "r")
         shots = st.dir / "shots"

@@ -194,7 +194,7 @@ class GapTests(unittest.TestCase):
         ctx = self.ctx()
         r = G.resolve([Requirement(key="account.crm.admin")], ctx)[0]
         self.assertEqual(r.status, "missing")
-        self.assertEqual(r.secret_env, "SAVOSTORE_CRM_PASSWORD")
+        self.assertEqual(r.secret_env, "SAVOSTORE_CRM_PASSWORD__ADMIN")
         self.assertEqual(r.must_have, ["Admin"])
         stored = {}
 

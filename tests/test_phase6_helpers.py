@@ -120,7 +120,7 @@ class Browser(unittest.TestCase):
 class LoginHelper(unittest.TestCase):
     def test_password_typed_by_code_never_returned_or_logged(self):
         fake = FakeMcp([LOGIN, HOME])
-        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"SAVOSTORE_CRM_PASSWORD": "s3cret-pw"}):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"SAVOSTORE_CRM_PASSWORD__ADMIN": "s3cret-pw", "LOGIN_WAIT": "0"}):
             st = RunState(Path(d) / "r")
             pack = load_pack(PACK)
             info = load_helpers(pack)["login_form"]

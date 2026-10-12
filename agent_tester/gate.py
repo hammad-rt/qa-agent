@@ -28,8 +28,10 @@ def show_plan(plan: TestPlan, issues: list[str], out=print) -> None:
             out(f"  - {i}")
 
 
-def ask_batch(reqs, ctx, input_fn=input, secret_fn=getpass.getpass, write_secret=None, out=print) -> None:
+def ask_batch(reqs, ctx, input_fn=None, secret_fn=getpass.getpass, write_secret=None, out=print) -> None:
     from .config import write_env_secret
+    from .auto import prompter
+    input_fn = input_fn or prompter("")
     qs = G.open_questions(reqs)
     if not qs:
         return
@@ -44,8 +46,10 @@ def ask_batch(reqs, ctx, input_fn=input, secret_fn=getpass.getpass, write_secret
     G.apply_answers(reqs, answers, ctx, secret_prompt=secret_fn, write_secret=write_secret or write_env_secret)
 
 
-def choose_env(pack, input_fn=input, out=print) -> str | None:
+def choose_env(pack, input_fn=None, out=print) -> str | None:
     """Ask which environment to test on. Enter = staging. Production needs an explicit yes."""
+    from .auto import prompter
+    input_fn = input_fn or prompter("")
     from .preflight.gap_resolver import normalize_env
     known = {e for a in pack.apps.values() for e in a.get("envs", {})}
     out("\nWhich environment should I test on?")
@@ -62,7 +66,9 @@ def choose_env(pack, input_fn=input, out=print) -> str | None:
     return env
 
 
-def confirm_prod(input_fn=input, out=print) -> bool:
+def confirm_prod(input_fn=None, out=print) -> bool:
+    from .auto import prompter
+    input_fn = input_fn or prompter("n")
     out("Production: I'll only read, and I'll ask you before every action that changes data. Nothing can be"
         " pre-approved, no real payments unless you say so, and any setting I change I put back.")
     return input_fn("  Test on production? [y/N] ").strip().lower() in ("y", "yes")
@@ -75,10 +81,12 @@ def console_approver(input_fn=input, out=print):
     return approve
 
 
-def plan_gate(plan: TestPlan, input_fn=input, out=print, policy=None, issues: list[str] | None = None) -> tuple[bool, list[str]]:
+def plan_gate(plan: TestPlan, input_fn=None, out=print, policy=None, issues: list[str] | None = None) -> tuple[bool, list[str]]:
     """Returns (approved, action types pre-approved for this run). Always-ask actions (posting,
     email, prod writes) are never offered for pre-approval; they are asked each time.
     change_settings may be in the pre-approve batch when the pack lists it and env != prod."""
+    from .auto import prompter
+    input_fn = input_fn or prompter("y")
     pre = []
     allowed = list(plan.preapprovable_actions)
     ask_each = []

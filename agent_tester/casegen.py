@@ -83,8 +83,10 @@ def coverage_notes(plan: TestPlan, task_text: str) -> list[str]:
     return notes
 
 
-def ask_case_questions(plan: TestPlan, input_fn=input, out=print) -> list[dict]:
+def ask_case_questions(plan: TestPlan, input_fn=None, out=print) -> list[dict]:
     """One batch: what should happen, for generated cases the task is silent on. Blank answer skips the case."""
+    from .auto import prompter
+    input_fn = input_fn or prompter("")
     open_cases = [c for c in plan.cases if c.open_question and not c.skip_reason]
     if not open_cases:
         return []
@@ -102,9 +104,11 @@ def ask_case_questions(plan: TestPlan, input_fn=input, out=print) -> list[dict]:
     return answers
 
 
-def edit_cases(plan: TestPlan, input_fn=input, out=print) -> TestPlan:
+def edit_cases(plan: TestPlan, input_fn=None, out=print) -> TestPlan:
     """Drop cases (and cases that depend on them) or add one-line cases, before the run is approved.
     New ids never reuse a dropped id."""
+    from .auto import prompter
+    input_fn = input_fn or prompter("")
     n = 1 + max([int(c.id[1:]) for c in plan.cases if re.fullmatch(r"G\d+", c.id)] or [0])
     drop = {x.strip() for x in input_fn("\nDrop any cases? (ids, comma separated; blank for none) ").replace(" ", ",").split(",") if x.strip()}
     if drop:

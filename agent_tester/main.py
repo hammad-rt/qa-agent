@@ -99,8 +99,10 @@ def make_manual_login(pack, plan, state, input_fn=input, opener=None):
     return login
 
 
-def login_first(pack, plan, state, login, input_fn=input) -> list[str]:
+def login_first(pack, plan, state, login, input_fn=None) -> list[str]:
     """Apps listed in the pack's manual_login_apps (known CAPTCHA) are logged in by hand once before the cases."""
+    from .auto import prompter
+    input_fn = input_fn or prompter("y")
     used = {s.app for c in plan.cases for s in c.steps}
     done = state.data.setdefault("manual_logins", {})
     did = []
@@ -301,7 +303,8 @@ def _execute(settings, pack, plan, state, policy, memory) -> int:
                 if left:
                     print("\nThese settings were changed and not put back: " +
                           ", ".join(f"{u['app']}:{u['setting']} (was {u['original']})" for u in left))
-                    if input("Put them back now? [Y/n] ").strip().lower() in ("", "y", "yes"):
+                    from .auto import prompter
+                    if prompter("y")("Put them back now? [Y/n] ").strip().lower() in ("", "y", "yes"):
                         from .coordinator import restore_pass
                         restore_pass(plan, state, testers, left)
             except RunPaused as e:

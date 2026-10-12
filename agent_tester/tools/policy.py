@@ -21,6 +21,7 @@ class Policy:
     env: str = "staging"
     approver: Callable[[str, str, dict], bool] | None = None   # (action, reason, details) -> approved?
     log: list[dict] = field(default_factory=list)
+    auto: bool = False               # automatic mode: no approval prompts (staging runs; prod writes skipped)
     read_only: bool = False          # baseline/final reads and preflight: anything needing approval is refused
 
     def can_preapprove(self, action_type: str) -> bool:
@@ -61,6 +62,12 @@ class Policy:
         if self.read_only:
             self.log.append({"action": action, "type": action_type, "approval": "denied", "why": "read-only"})
             raise PolicyViolation(f"read-only step, not allowed: {action}")
+        if self.auto and action_type not in ("redmine_post", "send_email"):
+            if self.env == "prod":
+                self.log.append({"action": action, "type": action_type, "approval": "denied", "why": "prod write skipped (automatic mode)"})
+                raise PolicyViolation(f"production: data-changing step skipped in automatic mode: {action}")
+            self.log.append({"action": action, "type": action_type, "approval": "auto"})
+            return "approved"
         if action_type and action_type in self.preapproved and self.can_preapprove(action_type):
             self.log.append({"action": action, "type": action_type, "approval": "pre_approved"})
             return "pre_approved"
@@ -74,7 +81,8 @@ class Policy:
         return "approved"
 
 
-def from_pack(pack, env: str, approver=None) -> Policy:
+def from_pack(pack, env: str, approver=None, auto: bool | None = None) -> Policy:
+    from ..auto import is_auto
     c = pack.config
     return Policy(
         allow_hosts=list(c.get("allowlist", {}).get(env, [])),
@@ -83,4 +91,5 @@ def from_pack(pack, env: str, approver=None) -> Policy:
         always_ask=list(c.get("always_ask_actions", [])),
         env=env,
         approver=approver,
+        auto=is_auto() if auto is None else auto,
     )

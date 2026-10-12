@@ -39,7 +39,7 @@ manual_login_apps: [portal]
 # Known sites: pack URLs on these hosts don't need confirming at the plan gate. The browser itself is limited
 # to the sites of each run's URLs, and asks before using any other site (e.g. a payment page).
 allowlist:
-  staging: [staging5.rolustech.com]
+  staging: [staging5.rolustech.com, checkout.stripe.com]
   prod: [app.savostore.com, savo.store]
 
 # Action types the user may pre-approve for a whole run at the plan gate.

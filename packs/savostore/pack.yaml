@@ -113,6 +113,8 @@ data_prep:
         Shipping Only orders and find order {value}. Do not click Make a Payment or Pay By Card. Wait about 4 seconds, then
         read the page: it is usable if it shows a balance > 0, a Pay By Card button and the Savo Rewards box with
         "You can use up to $X" (X > 0). Reload once if the box says "no Savo Rewards".
+        If rewards from an earlier run are still applied (a pending amount with an X), click the X to remove them,
+        re-read the page and judge it again; that order is still usable.
     consumed_by: ["complete payment", "pay with", "\\bpays?\\b", "4242"]
   - id: buy_ship_order
     area: rewards

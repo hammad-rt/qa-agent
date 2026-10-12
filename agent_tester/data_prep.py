@@ -3,10 +3,14 @@ or create one, then check it is usable. Rules come from the pack's `data_prep` l
 on production too (only for the pack test user; payments stay skipped there)."""
 from __future__ import annotations
 
+import os
 import json
 import re
 
 from .models import CaseResult, PlannedCase, Step
+
+
+PREP_MAX_ACTIONS = int(os.environ.get("PREP_MAX_ACTIONS", "120"))
 
 
 def _case_text(case) -> str:
@@ -43,6 +47,8 @@ def _turn(tester, plan, state, rule, app, text, read_only, case_id):
                          steps=[Step(text=text, app=app)], values_to_record=[rule["value"]])
     brief = brief_for(plan, pseudo, [0], state)
     brief["data_prep"] = True
+    brief["max_tool_calls"] = PREP_MAX_ACTIONS            # creating an order is one long step; let it finish
+    brief["actions_per_step"] = PREP_MAX_ACTIONS
     brief["read_only"] = read_only
     brief["values_to_record"] = [rule["value"]] + list(rule.get("extra_values", []))
     return tester(app, brief, state)
@@ -91,6 +97,8 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
     text = (f"FIND: {rule['find']}\nDo not use: {', '.join(str(u) for u in used) or 'none'}.\n"
             f"If one fits, record it with record_value('{value}', '<its number exactly as shown, with its letter prefix, e.g. A1142>') "
             f"and record_value('{value}_record', '<the CRM record id from the page URL, the record=... part>'), then finish. "
+            f"An order with rewards still pending from an earlier run is still a fit (the check clears them). "
+            f"If you start creating an order, finish it and record it before doing anything else. "
             f"If none fits, CREATE: {rule['create']} Then record_value('{value}', <the new number>).")
     try:
         sr = _turn(tester, plan, state, rule, app, text, False, f"PREP-{key}")

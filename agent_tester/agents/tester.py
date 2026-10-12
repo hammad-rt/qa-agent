@@ -509,7 +509,7 @@ class TesterSession:
                                  "for another control or URL that reaches this step's goal (e.g. a different button with "
                                  "the same purpose). When the other route works, call propose_memory with it as a recipe "
                                  "so the next run goes straight there. If no route exists, finish(stuck=True)."}
-            if self.since_progress > ACTIONS_PER_STEP or self.actions > self.max_calls:
+            if self.since_progress > int(self.brief.get("actions_per_step") or ACTIONS_PER_STEP) or self.actions > self.max_calls:
                 over_time = True
         if over_time:
             self.result.limit_hit = True

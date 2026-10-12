@@ -30,6 +30,18 @@ Rewritten 2026-10-06 after the original file was lost. Sources: QA runs on #1809
 - A rewards balance of at least $100 or 50,000 KES is needed for the redemption cases.
 - Mandatory Shipment Protection (#180966) applies above a threshold set in the CRM. Production threshold: $150 (as of 30 Sep). Test at the threshold and just above it (150 and 151).
 
+## Savo Rewards: CRM facts (verified 2026-10-12)
+- Earn/redeem config: CRM `index.php?module=Administration&action=saveRewardsPanel`; fields "Rewards Earned (Percentage)" (normal 5) and "Rewards Redeemed (Percentage)" (normal 10). Changing them is a settings change: needs approval, record the original, restore after.
+- Shipping-only orders are `AOS_Invoices` records; Buy & Ship orders are `AOS_Quotes`.
+- Admin redemption: order DetailView > "Rewards Redeemed" subpanel > Create (name "Redeemed rewards by admin against <order>"; Redeemed Rewards editable, Applicable Rewards read-only).
+- Client: portal user "Hammad" = CRM client Hammad Iqbal (not "Sidney Test"). Match the client by the orders it owns, not by name. Contact fields: Total Rewards, Current Rewards, Rewards Used.
+- Earn happens only on the status change to Order Delivered (re-triggering overwrites). Earn = 5% of shipping after rewards (pending product confirmation).
+- Redeem cap = 10% of unpaid shipping; 0 once paid >= shipping.
+- Buy & Ship rewards box shows only at Awaiting Payment / Shipping Fee Invoiced; USD shows only Pay to Bank Account. Shipping ~$10/cu ft, $35 minimum.
+- Order fit check before any rewards case: invoice exists, balance > 0, unpaid shipping > 0, client matches. A paid order (e.g. A1148) is unusable; prepare a fresh shipping-only order with an invoice and unpaid shipping (needs approval).
+- Timing: apply/remove takes 3-5s; the rewards box shows a false "no rewards"/"up to $15.00" for 1-2s on load; CRM subpanels update ~8s late. Wait and recheck before any verdict.
+- Stripe path: Pay By Card > /shipping-only/stripe/<id>?appliedRewards=N > second "Pay by Card" > Stripe; choose USD; test card from the Payments section.
+
 ## UI recipes
 - Build a rewards balance: create a test order, pay it with the 4242 card, move it to Order Delivered in the CRM, then check the wallet.
 - After applying rewards on the portal, reload twice before reading values (first reload can be stale).

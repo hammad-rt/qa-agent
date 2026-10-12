@@ -208,3 +208,11 @@ class Candidates(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EvaluateParse(unittest.TestCase):
+    def test_real_playwright_reply_with_code_echo(self):
+        from agent_tester.helpers.core.login_form import parse_result
+        out = ('### Result\n"{\\"has_password\\":true,\\"user\\":{\\"idx\\":0,\\"name\\":\\"user_name\\"}}"\n'
+               "### Ran Playwright code\n```js\nawait page.evaluate('() => { const a = {b: 1}; }');\n```")
+        self.assertEqual(parse_result(out), {"has_password": True, "user": {"idx": 0, "name": "user_name"}})

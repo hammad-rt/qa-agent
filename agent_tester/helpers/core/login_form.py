@@ -42,9 +42,18 @@ ANALYZE_JS = r"""() => {
 
 async def analyze(browser) -> dict:
     out = await browser._do("browser_evaluate", {"function": ANALYZE_JS})
-    m = re.search(r"\{.*\}", (out or "").replace('\\"', '"'), re.S)
+    return parse_result(out)
+
+
+def parse_result(out: str) -> dict:
+    """Playwright MCP replies '### Result' + a JSON-encoded string, then echoes the code (which has braces too)."""
+    text = out or ""
+    m = re.search(r"### Result\s*\n(.+)", text)
+    raw = (m.group(1) if m else text).strip()
     try:
-        return json.loads(m.group(0)) if m else {}
+        v = json.loads(raw)
+        v = json.loads(v) if isinstance(v, str) else v
+        return v if isinstance(v, dict) else {}
     except ValueError:
         return {}
 

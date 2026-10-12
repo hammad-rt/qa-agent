@@ -108,8 +108,9 @@ data_prep:
     verify:
       app: portal
       text: >-
-        Follow recipe R1 step 4: on the portal open Shipping Only orders, find order {value} and open its invoice
-        page (/shipping-only/invoice/...). Do not click Make a Payment or Pay By Card. Wait about 4 seconds, then
+        Follow recipe R1 step 4: browser_navigate straight to <portal URL>/shipping-only/invoice/{record} (the
+        portal invoice address uses the CRM record id; do not use View Invoice). If {record} is unknown, open
+        Shipping Only orders and find order {value}. Do not click Make a Payment or Pay By Card. Wait about 4 seconds, then
         read the page: it is usable if it shows a balance > 0, a Pay By Card button and the Savo Rewards box with
         "You can use up to $X" (X > 0). Reload once if the box says "no Savo Rewards".
     consumed_by: ["complete payment", "pay with", "\\bpays?\\b", "4242"]

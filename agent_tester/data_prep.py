@@ -89,7 +89,8 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
         return blocked(f"no tester for {app}")
     used = [s["value"] for s in store.values() if s.get("consumed")] + list(rule.get("never_use", []))
     text = (f"FIND: {rule['find']}\nDo not use: {', '.join(str(u) for u in used) or 'none'}.\n"
-            f"If one fits, record it with record_value('{value}', '<its number exactly as shown, with its letter prefix, e.g. A1142>') and finish. "
+            f"If one fits, record it with record_value('{value}', '<its number exactly as shown, with its letter prefix, e.g. A1142>') "
+            f"and record_value('{value}_record', '<the CRM record id from the page URL, the record=... part>'), then finish. "
             f"If none fits, CREATE: {rule['create']} Then record_value('{value}', <the new number>).")
     try:
         sr = _turn(tester, plan, state, rule, app, text, False, f"PREP-{key}")
@@ -104,7 +105,7 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
         if vt is not None:
             try:
                 vr = _turn(vt, plan, state, rule, v.get("app", "portal"),
-                           v["text"].replace("{value}", str(rec)) +
+                           v["text"].replace("{value}", str(rec)).replace("{record}", str(sr.values.get(f"{value}_record") or "unknown")) +
                            f"\nIf it is usable, record_value('{value}_ok', 'yes'); otherwise record_value('{value}_ok', 'no: <why>').",
                            True, f"PREP-{key}-check")
                 ok = str(vr.values.get(f"{value}_ok", "")).lower()

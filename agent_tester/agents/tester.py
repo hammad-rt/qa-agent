@@ -6,6 +6,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+
+from . import raw_calls
 from urllib.parse import urlparse
 import os
 import time
@@ -789,7 +791,7 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
             agent = LlmAgent(name=f"tester_{app}", model=model(settings, max_tokens=TESTER_MAX_TOKENS),
                              instruction=lambda _c: instr, tools=[toolset, *sess.tools()],
                              before_tool_callback=sess.before_tool, after_tool_callback=sess.after_tool,
-                             before_model_callback=sess.before_model)
+                             before_model_callback=sess.before_model, after_model_callback=raw_calls.after_model)
             prompt = "Your steps:\n" + json.dumps(brief, indent=1, default=str)
 
             async def go():

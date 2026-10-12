@@ -267,7 +267,9 @@ def apply_answers(reqs: list[Requirement], answers: dict[str, str], ctx: GapCont
                 pack_user = (ctx.pack.accounts(r.key.split(".")[1]).get(r.key.split(".")[2]) or {}).get("username") \
                     if r.key.count(".") >= 2 else None
                 # the pack's own env var always held the pack user's password, so that user keeps it
-                r.secret_env = (base if r.value == pack_user and ctx.env == "staging"
+                pack_env = (ctx.pack.accounts(r.key.split(".")[1]).get(r.key.split(".")[2]) or {}).get("password_env") \
+                    if r.key.count(".") >= 2 else None
+                r.secret_env = ((pack_env or base) if r.value == pack_user and ctx.env == "staging"
                                 else password_env_for(base, r.value, ctx.env))
                 ctx.memory.put(sc, f"{r.key}.{ctx.env}.last_used", r.value, source="user")
             if r.secret_env and not os.environ.get(r.secret_env) and secret_prompt:

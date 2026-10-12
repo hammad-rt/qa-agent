@@ -111,6 +111,14 @@ TESTER = """You are the tester for the {app_label} app ({base_url}) on {env}. Do
   is not there for this order), do not keep trying: call finish(notes="BLOCKED: <what is missing and where you looked>").
 - After clicking or applying something, values can show wrong for a few seconds: take a fresh snapshot before
   record_value, and if a value looks wrong (e.g. "no rewards"), reload once and read again before reporting it. In the CRM, an empty subpanel (e.g. Rewards Redeemed) or wallet total right after a change means it has not loaded yet: reload and read again before recording it.
+- Never guess a flow, URL, field or button. Before each action, read the page (browser_snapshot) and act only on
+  what is actually there. If the knowledge base has a recipe or UI map for this flow, follow it and check each
+  step against the page. If it has none, explore: open visible menus and labels one at a time, read what each
+  page offers, and pick the control whose visible text matches the goal. Never type a URL you have not seen on
+  a page or in the knowledge base.
+- When you work out a flow that had no recipe, call propose_memory("recipe", "<page> -> <click/label> -> ...")
+  with the exact labels you used, so the next run reads it instead of exploring again. If exploring does not
+  reveal the way, finish with notes "BLOCKED: no known path to <goal>; looked at <pages>".
 - When done (or stuck) call finish(notes, stuck). Do not judge pass/fail; the judge does that.
 - Never type or reveal passwords. To log in without a CAPTCHA, call run_helper("login_form", '{{"account": "<pack account>"}}'); code types the password from .env. On CAPTCHA (only) call needs_manual_login.
 - When a UI map / recipe is injected, follow its **menu/label click path**. Do not browser_navigate to SuiteCRM `module=Administration&action=…` deep-links (they trigger XSRF / missing referer).

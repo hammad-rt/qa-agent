@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 
 import requests
@@ -47,12 +48,33 @@ class Redmine:
     def _get(self, path: str, **params) -> dict:
         if not self.key:
             raise RedmineError("REDMINE_API_KEY is not set")
-        r = self.s.get(f"{self.base}{path}", params=params, headers={"X-Redmine-API-Key": self.key}, timeout=self.timeout)
+        r, err = None, None
+        for attempt in range(3):                       # 5xx / network hiccups: retry a couple of times
+            try:
+                r = self.s.get(f"{self.base}{path}", params=params, headers={"X-Redmine-API-Key": self.key},
+                               timeout=self.timeout)
+                err = None
+            except requests.RequestException as e:
+                r, err = None, e
+            if r is not None and r.status_code < 500:
+                break
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+        if r is None:
+            raise RedmineError(f"couldn't reach Redmine at {self.base} ({type(err).__name__}). Check your connection or VPN and try again.")
         if r.status_code == 404:
-            raise RedmineError(f"not found: {path}")
+            raise RedmineError(f"not found: {path}. Check the task number.")
+        if r.status_code in (401, 403):
+            raise RedmineError(f"Redmine refused access ({r.status_code}) on {path}. Check REDMINE_API_KEY and that you can see this issue.")
+        if r.status_code >= 500:
+            raise RedmineError(f"Redmine is not responding ({r.status_code}) on {path}, even after 3 tries. "
+                               "It may be down for a moment; try again shortly, and check the task number.")
         if r.status_code >= 400:
             raise RedmineError(f"Redmine {r.status_code} on {path}")
-        return r.json()
+        try:
+            return r.json()
+        except ValueError:
+            raise RedmineError(f"Redmine sent something that isn't JSON for {path} (maybe a login or maintenance page).")
 
     def _post(self, path: str, body: dict) -> dict:
         if not self.key:

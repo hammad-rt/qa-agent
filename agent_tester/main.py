@@ -684,9 +684,24 @@ def unreachable_msg(settings, e) -> str:
 def main(argv=None) -> int:
     try:
         return _main(argv)
+    except KeyboardInterrupt:
+        print("\nStopped.")
+        return 130
     except Exception as e:  # noqa: BLE001
         if not model_unreachable(e):
-            raise
+            from .preflight.redmine import RedmineError
+            if os.environ.get("AGENT_DEBUG"):
+                raise
+            if isinstance(e, RedmineError):
+                print(f"\nRedmine: {e}")
+                return 3
+            import traceback
+            log = "agent_error.log"
+            with open(log, "w") as f:
+                traceback.print_exc(file=f)
+            print(f"\nSomething went wrong: {type(e).__name__}: {e}\nFull details saved to {log} "
+                  "(rerun with AGENT_DEBUG=1 to see the traceback).")
+            return 1
         from .config import Settings
         print("\n" + unreachable_msg(Settings.load(), e))
         return 4

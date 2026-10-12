@@ -11,3 +11,4 @@ __pycache__/
 /*.png
 .cursor/hooks/state
 packs/*/learned_logins.json
+agent_error.log

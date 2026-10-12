@@ -293,12 +293,13 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
             except Exception as e:                    # noqa: BLE001  model/browser hiccup
                 attempt += 1
                 changed = [a for a in state.data["action_log"][log_mark:] if a.get("approval") in ("approved", "pre_approved")]
-                if changed:                           # never replay a turn that already changed data
-                    state.checkpoint(f"paused in {case.id} ({app}) after a data-changing step: {type(e).__name__}: {e}", status="paused")
-                    raise RunPaused(f"{case.id}: failed after a data-changing step; check the record before resuming") from e
-                if attempt > max_retries:
-                    state.checkpoint(f"paused in {case.id} ({app}): {type(e).__name__}: {e}", status="paused")
-                    raise RunPaused(f"{case.id}: {e}") from e
+                if changed or attempt > max_retries:  # never replay a turn that changed data; mark the case and go on
+                    state.checkpoint(f"{case.id} ({app}) failed: {type(e).__name__}: {e}")
+                    return CaseResult(case_id=case.id, verdict="AGENT INCOMPLETE", expected=case.expected,
+                                      values={k: v for r in results for k, v in r.values.items()},
+                                      evidence=[s for r in results for s in r.screenshots],
+                                      note=f"tester on {app} crashed: {type(e).__name__}: {str(e)[:200]}"
+                                           + ("; it had already changed data, check the record" if changed else ""))
         sr = _maybe_continue(app, brief, sr, state, tester, log_mark)
         if sr.needs_login:
             done = state.data.setdefault("manual_logins", {})
@@ -334,6 +335,11 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
                                   evidence=[s for r in results for s in r.screenshots],
                                   note=f"login on {app} needs a person (CAPTCHA or robot check): {sr.needs_login}")
         results.append(sr)
+        if (sr.notes or "").strip().upper().startswith("BLOCKED:"):
+            return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,
+                              values={k: v for r in results for k, v in r.values.items()},
+                              evidence=[s for r in results for s in r.screenshots],
+                              note=f"{app}: {sr.notes.strip()[8:].strip()}")
         for k, v in sr.values.items():
             state.values.setdefault(k, {"value": v, "source": f"{case.id}/{app}"})
         if sr.stuck or sr.limit_hit:

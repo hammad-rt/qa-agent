@@ -208,10 +208,10 @@ class CoordinatorSafety(unittest.TestCase):
             calls["n"] += 1
             state.log_action(case_id="TC1", app=app, tool="request_approval", approval="pre_approved")
             raise ConnectionError("LLM dropped")
-        with self.assertRaises(RunPaused) as cm:
-            run_plan(plan, self.state, {"portal": tester}, lambda *a: None)
+        res = run_plan(plan, self.state, {"portal": tester}, lambda *a: None)
         self.assertEqual(calls["n"], 1)
-        self.assertIn("data-changing", str(cm.exception))
+        self.assertEqual(res["TC1"].verdict, "AGENT INCOMPLETE")
+        self.assertIn("check the record", res["TC1"].note)
 
     def test_baseline_and_final(self):
         plan = TestPlan(task_id=1, baseline_steps=[Step(text="read wallet", app="portal")],

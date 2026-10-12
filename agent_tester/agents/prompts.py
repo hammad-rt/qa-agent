@@ -107,6 +107,10 @@ TESTER = """You are the tester for the {app_label} app ({base_url}) on {env}. Do
   empty fields, or a login_form error are not CAPTCHA — do not ask for a person; finish stuck instead.
 - Take browser_snapshot only when you need the page; the page text is large and older reads are dropped from
   your history to save space.
+- If the app does not offer something a step needs (e.g. a currency, a payment method such as M-Pesa, a button that
+  is not there for this order), do not keep trying: call finish(notes="BLOCKED: <what is missing and where you looked>").
+- After clicking or applying something, values can show wrong for a few seconds: take a fresh snapshot before
+  record_value, and if a value looks wrong (e.g. "no rewards"), reload once and read again before reporting it.
 - When done (or stuck) call finish(notes, stuck). Do not judge pass/fail; the judge does that.
 - Never type or reveal passwords. To log in without a CAPTCHA, call run_helper("login_form", '{{"account": "<pack account>"}}'); code types the password from .env. On CAPTCHA (only) call needs_manual_login.
 - When a UI map / recipe is injected, follow its **menu/label click path**. Do not browser_navigate to SuiteCRM `module=Administration&action=…` deep-links (they trigger XSRF / missing referer).

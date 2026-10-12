@@ -35,6 +35,11 @@ class DataPrep(unittest.TestCase):
         r = data_prep.ensure_data(SimpleNamespace(env="prod"), case("a"), State(), {}, [{**RULES[0], "test_client": {"staging": "H"}}])
         self.assertEqual(r.verdict, "BLOCKED")
 
+    def test_env_limited_rule_blocks_with_note(self):
+        rule = {**RULES[0], "id": "w", "envs": ["staging"], "blocked_note": "top up by hand"}
+        r = data_prep.ensure_data(SimpleNamespace(env="prod", requirements=[]), case("a"), State(), {}, [rule])
+        self.assertEqual((r.verdict, "top up by hand" in r.note), ("BLOCKED", True))
+
     def test_prod_auto_except_payment(self):
         p = Policy(allow_hosts=[], risky_patterns=[], preapprovable=[], always_ask=[], env="prod", auto=True)
         self.assertEqual(p.gate("Save order", "r", risky=True), "approved")

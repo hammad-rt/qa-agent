@@ -16,15 +16,20 @@ def _case_text(case) -> str:
 
 
 def matching_rule(case, rules: list[dict]) -> dict | None:
-    text = _case_text(case)
+    m = matching_rules(case, rules)
+    return m[0] if m else None
+
+
+def matching_rules(case, rules: list[dict]) -> list[dict]:
+    text, out = _case_text(case), []
     for r in rules or []:
         w = r.get("when", {})
         if w.get("areas") and case.area not in w["areas"]:
             continue
         if any(re.search(k, text, re.I) for k in w.get("any", [])) and not any(
                 re.search(k, text, re.I) for k in w.get("none", [])):
-            return r
-    return None
+            out.append(r)
+    return out
 
 
 def consumes(case, rule: dict) -> bool:
@@ -44,10 +49,15 @@ def _turn(tester, plan, state, rule, app, text, read_only, case_id):
 
 
 def ensure_data(plan, case, state, testers: dict, rules: list[dict]) -> CaseResult | None:
-    """Prepare data for `case`. Returns None when ready (values in state.values), or a BLOCKED result."""
-    rule = matching_rule(case, rules)
-    if rule is None:
-        return None
+    """Run every matching prep rule in pack order. None when all are ready, else the first BLOCKED result."""
+    for rule in matching_rules(case, rules):
+        r = _ensure_one(plan, case, state, testers, rule)
+        if r is not None:
+            return r
+    return None
+
+
+def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | None:
     store = state.data.setdefault("prep", {})
     key, value = rule["id"], rule["value"]
     have = store.get(key)
@@ -60,6 +70,8 @@ def ensure_data(plan, case, state, testers: dict, rules: list[dict]) -> CaseResu
         return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,
                           note=f"test data not ready ({key}): {why}")
 
+    if rule.get("envs") and plan.env not in rule["envs"]:
+        return blocked(rule.get("blocked_note") or f"this preparation is not possible on {plan.env}")
     clients = rule.get("test_client")
     name = clients.get(plan.env) if isinstance(clients, dict) else clients
     user = next((r.value for r in getattr(plan, "requirements", []) or []
@@ -110,7 +122,7 @@ def ensure_data(plan, case, state, testers: dict, rules: list[dict]) -> CaseResu
 
 
 def after_case(case, state, rules: list[dict]) -> None:
-    rule = matching_rule(case, rules)
-    if rule and consumes(case, rule) and rule["id"] in state.data.get("prep", {}):
-        state.data["prep"][rule["id"]]["consumed"] = True
-        state.save()
+    for rule in matching_rules(case, rules):
+        if consumes(case, rule) and rule["id"] in state.data.get("prep", {}):
+            state.data["prep"][rule["id"]]["consumed"] = True
+            state.save()

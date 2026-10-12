@@ -112,3 +112,56 @@ data_prep:
         Pay By Card button and the Savo Rewards box with "You can use up to $X" (X > 0). The box can wrongly say
         "no Savo Rewards" on first load: reload once and wait 3 s before deciding.
     consumed_by: ["complete payment", "pay with", "\\bpays?\\b", "4242"]
+  - id: buy_ship_order
+    area: rewards
+    when:
+      areas: [rewards]
+      any: ["buy ?& ?ship"]
+    app: crm
+    value: test_quote
+    find: >-
+      In the CRM, open Quotes (AOS_Quotes = Buy & Ship orders) and find one for the test client {client} at status
+      "Awaiting Payment" or "Shipping Fee Invoiced" with an unpaid balance > 0 (the rewards box only shows then).
+    create: >-
+      Create a Buy & Ship order for the test client {client} only, with "QA-AGENT TEST" in its description, and move
+      it to "Awaiting Payment" (or "Shipping Fee Invoiced"). Do not pay and do not apply rewards.
+    verify:
+      app: portal
+      text: >-
+        Log in to the portal and open Buy & Ship order {value}. It is usable if it shows a balance > 0 and the Savo
+        Rewards box with "You can use up to $X" (X > 0). Reload once if the box says "no Savo Rewards".
+    consumed_by: ["complete payment", "pay with", "\\bpays?\\b", "4242"]
+  - id: paid_order_new_parcel
+    area: rewards
+    when:
+      areas: [rewards]
+      any: ["paid order", "already paid", "new parcel", "additional parcel", "parcel (is )?added"]
+    app: crm
+    value: paid_order
+    find: >-
+      In the CRM, find a shipping-only order (AOS_Invoices) of the test client {client} that is already paid and
+      has a parcel added after the payment, so a new unpaid amount exists.
+    create: >-
+      Take a paid shipping-only order of the test client {client} (any order with paid >= shipping), add a new
+      parcel to it marked Received with "QA-AGENT TEST" in its description, and move it on until the new amount is
+      invoiced. Do not pay and do not apply rewards.
+    consumed_by: ["complete payment", "pay with", "\\bpays?\\b", "4242"]
+  - id: wallet_topup
+    area: rewards
+    when:
+      areas: [rewards]
+      any: ["max(imum)?", "full cap", "\\bcap\\b", "more than", "exceed"]
+    envs: [staging]                 # earning needs a payment, which never happens on pre-prod/production
+    blocked_note: >-
+      the case needs a rewards balance above the cap, and topping it up means paying an order, which the agent
+      never does on pre-prod or production; top up the test client's wallet by hand and rerun
+    app: crm
+    value: wallet_ready
+    find: >-
+      Open the CRM contact of the test client {client} and read Current Rewards. If it is at least the redeem cap of
+      the order in values_so_far (test_order / test_quote; cap = 10% of unpaid shipping) plus $5, it is enough:
+      record_value('wallet_ready', '<Current Rewards>').
+    create: >-
+      Earn rewards: take a QA-AGENT TEST shipping-only order of {client}, pay it on the portal with the Stripe test
+      card from the Payments facts (staging only), then move it to "Order Delivered" in the CRM so 5% is earned.
+      Repeat until Current Rewards is enough, then record_value('wallet_ready', '<Current Rewards>').

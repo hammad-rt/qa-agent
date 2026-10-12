@@ -259,15 +259,14 @@ class CoordinatorTests(unittest.TestCase):
                        lambda *a: self.fail("judge should not run"))
         self.assertEqual(res["TC1"].verdict, "AGENT INCOMPLETE")
 
-    def test_pause_and_resume(self):
-        boom = {"n": 0}
-
+    def test_crash_marks_case_and_continues(self):
         def flaky(app, brief, state):
-            boom["n"] += 1
             raise ConnectionError("LLM down")
-        with self.assertRaises(RunPaused):
-            run_plan(self.plan(), self.state, {"portal": flaky, "crm": flaky}, lambda *a: None)
-        self.assertEqual(RunState(self.state.dir).data["status"], "paused")
+        res = run_plan(self.plan(), self.state, {"portal": flaky, "crm": flaky}, lambda *a: None)
+        self.assertEqual(res["TC1"].verdict, "AGENT INCOMPLETE")
+        self.assertEqual(len(res), 3)          # the run went on past the crash
+
+    def test_resume_after_crash(self):
         ok = lambda app, brief, state: StepResult(case_id=brief["case_id"], app=app)
         judge = lambda b, a, r, s: CaseResult(case_id=b["case_id"], verdict="PASS")
         res = run_plan(self.plan(), RunState(self.state.dir), {"portal": ok, "crm": ok}, judge)

@@ -36,6 +36,15 @@ ACTIONS_PER_STEP = int(os.environ.get("TESTER_ACTIONS_PER_STEP", "30"))   # acti
 LOOP_WARN, LOOP_STOP = 3, 5          # same call repeated this often without progress: warn, then stop
 
 
+ACTING_TOOLS = {"browser_click", "browser_type", "browser_fill_form", "browser_select_option", "browser_press_key",
+                "browser_navigate", "browser_navigate_back", "browser_drag", "browser_drop", "browser_file_upload",
+                "browser_handle_dialog", "run_helper"}
+
+
+def _settle_seconds() -> float:
+    return float(os.environ.get("TESTER_SETTLE_SECONDS", "4"))
+
+
 RAW_TOOL_CALL = re.compile(r"<\|?tool_call\|?>|call:\w+\(")
 
 
@@ -393,6 +402,18 @@ class TesterSession:
     def before_tool(self, tool, args, tool_context):
         name = tool.name
         self.calls += 1
+        settle = _settle_seconds()
+        now = time.monotonic()
+        last_act, last_snap = getattr(self, "_last_act", 0.0), getattr(self, "_last_snap", 0.0)
+        if name in ACTING_TOOLS:
+            self._last_act = now
+        elif name in ("browser_snapshot", "browser_take_screenshot", "browser_find"):
+            if last_act and now - last_act < settle:          # pages update 3-8 s late: let them settle
+                time.sleep(settle - (now - last_act))
+            self._last_snap = time.monotonic()
+        elif name == "record_value" and last_act and last_act > last_snap:
+            return {"error": "The page changed after your last read and may still be updating. "
+                             "Take a fresh browser_snapshot (it waits for the page to settle), then record the value again."}
         if name == "mark_step" and args.get("n") not in self.result.steps_done:
             self.since_progress, self._sigs = 0, {}          # real progress: fresh per-step allowance
         limit = self._budget_check(name, args)

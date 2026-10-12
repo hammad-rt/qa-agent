@@ -134,7 +134,7 @@ class LoginHelper(unittest.TestCase):
             self.assertEqual(st.data["action_log"][-1]["tool"], "helper:login_form")
 
     def test_missing_password_is_a_clear_error(self):
-        with mock.patch.dict(os.environ, {"SAVOSTORE_CRM_PASSWORD": ""}):
+        with mock.patch.dict(os.environ, {"SAVOSTORE_CRM_PASSWORD__ADMIN": ""}):
             info = load_helpers(load_pack(PACK))["login_form"]
             out = asyncio.run(run_helper(info, McpBrowser(FakeMcp([LOGIN])), ctx(), {"account": "admin"}))
         self.assertIn("SAVOSTORE_CRM_PASSWORD", out["error"])

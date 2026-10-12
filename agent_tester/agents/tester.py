@@ -41,7 +41,9 @@ ACTING_TOOLS = {"browser_click", "browser_type", "browser_fill_form", "browser_s
                 "browser_handle_dialog", "run_helper"}
 
 
-def _settle_seconds() -> float:
+def _settle_seconds(app: str = "") -> float:
+    if app == "crm":                                  # CRM subpanels/wallet totals load ~8 s late
+        return float(os.environ.get("TESTER_SETTLE_SECONDS_CRM", "10"))
     return float(os.environ.get("TESTER_SETTLE_SECONDS", "4"))
 
 
@@ -402,7 +404,7 @@ class TesterSession:
     def before_tool(self, tool, args, tool_context):
         name = tool.name
         self.calls += 1
-        settle = _settle_seconds()
+        settle = _settle_seconds(getattr(self, "app", ""))
         now = time.monotonic()
         last_act, last_snap = getattr(self, "_last_act", 0.0), getattr(self, "_last_snap", 0.0)
         if name in ACTING_TOOLS:

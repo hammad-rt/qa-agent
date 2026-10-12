@@ -9,4 +9,5 @@ __pycache__/
 *.pyc
 # Stray Playwright screenshots saved to the repo root instead of runs/<run>/shots/
 /*.png
-.cursor/hooks/statepacks/*/learned_logins.json
+.cursor/hooks/state
+packs/*/learned_logins.json

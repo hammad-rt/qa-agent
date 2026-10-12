@@ -91,12 +91,14 @@ data_prep:
       none: ["buy ?& ?ship"]
     app: crm
     value: test_order
+    test_client:          # per environment; prep is blocked where none is set
+      staging: Hammad Iqbal
     find: >-
-      In the CRM, open Invoices (AOS_Invoices = shipping-only orders) and find one for the test client Hammad Iqbal
+      In the CRM, open Invoices (AOS_Invoices = shipping-only orders) and find one for the test client {client}
       (portal user "Hammad"; match by the orders the client owns, not by the name "Sidney Test") that is at
       status "Invoiced & Shipped", has an invoice, nothing paid and unpaid shipping > 0.
     create: >-
-      Create a shipping-only order for the test client Hammad Iqbal only, with "QA-AGENT TEST" in its description,
+      Create a shipping-only order for the test client {client} only, with "QA-AGENT TEST" in its description,
       set its parcel to Received, then move the status one step at a time: Shipped to Warehouse > On Warehouse
       floor > Ready to Ship > Shipped > Invoiced & Shipped ("Shipped" alone does not create the invoice).
       Do not pay and do not apply rewards.

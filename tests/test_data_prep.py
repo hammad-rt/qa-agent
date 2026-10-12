@@ -31,6 +31,10 @@ class DataPrep(unittest.TestCase):
         data_prep.after_case(case("then complete payment"), st, RULES)
         self.assertTrue(st.data["prep"]["o"]["consumed"])
 
+    def test_no_client_for_env_blocks(self):
+        r = data_prep.ensure_data(SimpleNamespace(env="prod"), case("a"), State(), {}, [{**RULES[0], "test_client": {"staging": "H"}}])
+        self.assertEqual(r.verdict, "BLOCKED")
+
     def test_prod_auto_except_payment(self):
         p = Policy(allow_hosts=[], risky_patterns=[], preapprovable=[], always_ask=[], env="prod", auto=True)
         self.assertEqual(p.gate("Save order", "r", risky=True), "approved")

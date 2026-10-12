@@ -60,6 +60,13 @@ def ensure_data(plan, case, state, testers: dict, rules: list[dict]) -> CaseResu
         return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,
                           note=f"test data not ready ({key}): {why}")
 
+    clients = rule.get("test_client")
+    client = clients.get(plan.env) if isinstance(clients, dict) else clients
+    if clients and not client:
+        return blocked(f"no test client set for {plan.env} in the pack (data_prep.test_client); "
+                       "the agent will not create orders for an unconfirmed account")
+    for k in ("find", "create"):
+        rule = {**rule, k: rule[k].replace("{client}", client or "")}
     app = rule.get("app", "crm")
     tester = testers.get(app)
     if tester is None:

@@ -47,6 +47,16 @@ Rewritten 2026-10-06 after the original file was lost. Sources: QA runs on #1809
 - Data setup on staging needs the Administrator account (`admin`); `maria.tariq` is not an admin.
 - If login_form fails, do not retry by clicking Log In by hand; finish with notes "BLOCKED: CRM login failed".
 
+## Verified flows (from manual retest, 2026-10-12; follow these, check each step against the page)
+**R1 Prepare a shipping-only order (A1142):** CRM: open the client's shipping-only order (AOS_Invoices) -> open its parcel, set Received, Save -> move status one step at a time, saving each: Shipped to Warehouse, On Warehouse floor, Ready to Ship, Shipped, Invoiced & Shipped. Portal: open `/shipping-only/invoice/<id>`, wait ~4 s, check the balance, the Pay By Card button and rewards "up to" (= 10% of unpaid shipping; A1142: $44.00, up to $3.50).
+**R2 Buy & Ship (B1465):** AOS_Quotes record; the rewards box shows only at Awaiting Payment or Shipping Fee Invoiced. In USD the only option is Pay to Bank Account; there is no currency switch, so KES/M-Pesa cases are BLOCKED.
+**R3 Apply/remove rewards (portal):** type the amount, click Apply, wait 3-5 s before reading. Remove with the X, then wait again. An amount over the cap is rejected with a message that disappears after a few seconds (read it right away).
+**R4 Stripe (staging only):** Pay By Card -> `/shipping-only/stripe/<id>?appliedRewards=N` -> click the second "Pay by Card" -> on Stripe choose USD -> card 4242 4242 4242 4242, expiry 12/34, CVC 123, cardholder name (required). For B6, leave Stripe without paying and check the wallet did not drop.
+**R5 Wallet check:** portal wallet balance; CRM Contacts > <client> -> Total Rewards, Current Rewards, Rewards Used (wait ~10 s, reload if empty). Redemptions are in the order's Rewards Redeemed subpanel.
+**R6 Admin redemption:** CRM order -> Rewards Redeemed subpanel -> Create -> Redeemed Rewards <= Applicable Rewards -> Save. On A1142 this returned HTTP 500: after two failures take a screenshot and record FAIL.
+**R7 Earn rewards (staging only):** pay an order (R4) -> CRM: set it to Order Delivered (earn = 5% of shipping after rewards). To earn faster raise the earn % under Administration > Rewards panel, then restore 5% earn / 10% redeem.
+- Not verified: creating a brand-new order of either type. Explore it from the page and propose a recipe.
+
 ## UI recipes
 - Build a rewards balance: create a test order, pay it with the 4242 card, move it to Order Delivered in the CRM, then check the wallet.
 - After applying rewards on the portal, reload twice before reading values (first reload can be stale).

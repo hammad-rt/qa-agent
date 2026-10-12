@@ -31,8 +31,8 @@ apps:
       prod: https://savo.store/
     accounts:
       admin:
-        username: maria.tariq
-        password_env: SAVOSTORE_CRM_PASSWORD
+        username: admin              # staging Administrator; maria.tariq is not an admin and cannot do data prep
+        password_env: SAVOSTORE_CRM_PASSWORD__ADMIN
         role_markers: ["Admin"]      # text that must be visible after login for the admin role
 
 # Apps whose login shows a CAPTCHA: a person logs in once in a visible browser before the cases run.

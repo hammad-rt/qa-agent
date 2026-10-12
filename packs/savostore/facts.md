@@ -42,6 +42,11 @@ Rewritten 2026-10-06 after the original file was lost. Sources: QA runs on #1809
 - Timing: apply/remove takes 3-5s; the rewards box shows a false "no rewards"/"up to $15.00" for 1-2s on load; CRM subpanels update ~8s late. Wait and recheck before any verdict.
 - Stripe path: Pay By Card > /shipping-only/stripe/<id>?appliedRewards=N > second "Pay by Card" > Stripe; choose USD; test card from the Payments section.
 
+## CRM login (SuiteCRM)
+- Login fields are `user_name` and `username_password`; the button is `#bigbutton` (Enter also submits).
+- Data setup on staging needs the Administrator account (`admin`); `maria.tariq` is not an admin.
+- If login_form fails, do not retry by clicking Log In by hand; finish with notes "BLOCKED: CRM login failed".
+
 ## UI recipes
 - Build a rewards balance: create a test order, pay it with the 4242 card, move it to Order Delivered in the CRM, then check the wallet.
 - After applying rewards on the portal, reload twice before reading values (first reload can be stale).

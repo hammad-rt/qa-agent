@@ -494,16 +494,21 @@ class TesterSession:
             if intent:
                 self._sigs[intent] = self._sigs.get(intent, 0) + 1
             n = max(self._sigs[sig], self._sigs.get(intent, 0) if intent else 0)
-            if n >= LOOP_STOP:
+            clicky = name in ("browser_click", "browser_run_code_unsafe", "browser_evaluate")
+            warn_at, stop_at = (2, 4) if clicky else (LOOP_WARN, LOOP_STOP)   # a page click that did nothing: rethink at once
+            if n >= stop_at:
                 self.result.limit_hit = True
                 self.result.loop = True
                 self.state.log_action(case_id=self.case_id, app=self.app, tool="loop_detected",
                                       args={"call": name, "repeats": n}, plan_step=self.current_step, outcome="stop")
                 return {"error": f"You repeated {name} with the same arguments {n} times without finishing a step. "
                                  "Stop now: call finish(notes, stuck=True) describing where you are."}
-            if n == LOOP_WARN:
-                return {"error": f"You already ran {name} with these arguments {n - 1} times and it did not move the "
-                                 "case forward. Try a different way (menu path, search, another control) or finish."}
+            if n == warn_at:
+                return {"error": f"Blocked: you already did this {name} and the page did not move the step forward; "
+                                 "repeating it will not help. Take a fresh browser_snapshot, re-read the page and look "
+                                 "for another control or URL that reaches this step's goal (e.g. a different button with "
+                                 "the same purpose). When the other route works, call propose_memory with it as a recipe "
+                                 "so the next run goes straight there. If no route exists, finish(stuck=True)."}
             if self.since_progress > ACTIONS_PER_STEP or self.actions > self.max_calls:
                 over_time = True
         if over_time:

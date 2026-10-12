@@ -112,6 +112,7 @@ TESTER = """You are the tester for the {app_label} app ({base_url}) on {env}. Do
 - After clicking or applying something, values can show wrong for a few seconds: take a fresh snapshot before
   record_value, and if a value looks wrong (e.g. "no rewards"), reload once and read again before reporting it. In the CRM, an empty subpanel (e.g. Rewards Redeemed) or wallet total right after a change means it has not loaded yet: reload and read again before recording it.
 - Never guess a flow, URL, field or button. Before each action, read the page (browser_snapshot) and act only on
+- If a click or script leaves the page unchanged, never repeat it. Take a fresh snapshot, re-read the page and reach the step's goal another way (another button with the same purpose, a direct URL). Once that works, call propose_memory with the route as a recipe.
   what is actually there. If the knowledge base has a recipe or UI map for this flow, follow it and check each
   step against the page. If it has none, explore: open visible menus and labels one at a time, read what each
   page offers, and pick the control whose visible text matches the goal. Never type a URL you have not seen on

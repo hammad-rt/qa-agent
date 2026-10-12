@@ -49,6 +49,8 @@ class FakeMcp:
 
     async def __call__(self, tool, args):
         self.calls.append((tool, dict(args)))
+        if tool == "browser_evaluate":
+            return '{"has_password": false}' if self.page else '{"has_password": true, "user": {"idx": 0, "name": "user_name", "label": "Username"}, "password": {"idx": 1, "name": "username_password", "label": "Password"}, "submit": {"id": "bigbutton", "label": "Log In"}, "error": ""}'
         if tool == "browser_snapshot":
             return self.pages[min(self.page, len(self.pages) - 1)]
         if tool == "browser_click":

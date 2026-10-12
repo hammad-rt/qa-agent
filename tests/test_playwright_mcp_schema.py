@@ -36,6 +36,8 @@ class RecordingMcp:
 
     async def __call__(self, tool: str, args: dict):
         self.calls.append((tool, dict(args)))
+        if tool == "browser_evaluate":
+            return '{"has_password": false}' if self._shot else '{"has_password": true, "user": {"idx": 0, "name": "user_name", "label": "Username"}, "password": {"idx": 1, "name": "username_password", "label": "Password"}, "submit": {"id": "bigbutton", "label": "Log In"}, "error": ""}'
         if tool == "browser_snapshot":
             # After click, pretend we landed on home.
             return HOME_SNAP if self._shot else LOGIN_SNAP

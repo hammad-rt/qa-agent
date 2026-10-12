@@ -15,9 +15,44 @@ HELPER = {"name": "login_form", "app": "any", "changes_data": False, "action_typ
           "params": {"account": "account key from pack.yaml, e.g. admin", "path": "optional login path"},
           "needs_config": []}
 
-USER_LABELS = ["user_name", "Username", "User Name", "Email", "Email address", "Login", "User"]
-PASS_LABELS = ["username_password", "Password"]
-SUBMIT_LABELS = ["Log in", "Login", "Sign in", "Log In", "Sign In", "Submit"]
+# Read-only page analysis: finds the real login form from the DOM (input types, names, labels), never guesses.
+# "idx" is the field's position among visible text-like inputs, which is the order the snapshot lists textboxes.
+ANALYZE_JS = r"""() => {
+  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+  const TEXTLIKE = ['', 'text', 'email', 'password', 'tel', 'search', 'url', 'number'];
+  const boxes = [...document.querySelectorAll('input, textarea')].filter(e =>
+      vis(e) && (e.tagName === 'TEXTAREA' || TEXTLIKE.includes((e.getAttribute('type') || '').toLowerCase())));
+  const lab = e => ((e.labels && e.labels[0] && e.labels[0].innerText) || e.getAttribute('aria-label') ||
+      e.placeholder || e.value || e.innerText || '').trim().slice(0, 60);
+  const desc = e => e && {idx: boxes.indexOf(e), name: e.name || '', id: e.id || '', type: e.type || '', label: lab(e)};
+  const pw = boxes.find(e => (e.type || '').toLowerCase() === 'password');
+  const errText = [...document.querySelectorAll('.error, .alert, [role=alert], #login_error, .login_error, .errors')]
+      .filter(vis).map(e => e.innerText.trim()).filter(Boolean).join(' | ').slice(0, 200);
+  if (!pw) return JSON.stringify({has_password: false, error: errText});
+  const form = pw.form || document;
+  const before = boxes.filter(e => e !== pw && (form === document || e.form === form) &&
+      (e.compareDocumentPosition(pw) & Node.DOCUMENT_POSITION_FOLLOWING));
+  const user = before[before.length - 1] || null;
+  const btn = [...form.querySelectorAll('button, input[type=submit], input[type=button], input[type=image]')]
+      .filter(vis).find(b => (b.type || '').toLowerCase() !== 'reset') || null;
+  return JSON.stringify({has_password: true, user: desc(user), password: desc(pw),
+      submit: btn && {id: btn.id || '', name: btn.name || '', label: lab(btn)}, error: errText});
+}"""
+
+
+async def analyze(browser) -> dict:
+    out = await browser._do("browser_evaluate", {"function": ANALYZE_JS})
+    m = re.search(r"\{.*\}", (out or "").replace('\\"', '"'), re.S)
+    try:
+        return json.loads(m.group(0)) if m else {}
+    except ValueError:
+        return {}
+
+
+def _pick(boxes, field: dict):
+    """Map a DOM field to its snapshot ref by its position among textboxes (same DOM order)."""
+    i = (field or {}).get("idx", -1)
+    return boxes[i] if 0 <= i < len(boxes) else None
 
 
 async def run(browser, ctx, account: str, path: str = ""):
@@ -28,42 +63,52 @@ async def run(browser, ctx, account: str, path: str = ""):
         raise HelperError(f"password not set: add {env_name} through the masked prompt")
     cfg = ctx.config or {}
     await browser.navigate(ctx.url(path or cfg.get("path", "")))
-    await browser.snapshot()
-    learned = _learned(ctx).get(ctx.app, {})
-    user_el = await browser.find(([learned["user"]] if learned.get("user") else []) + list(cfg.get("user_label") or USER_LABELS), TEXT_ROLES, required=False)
-    pass_el = await browser.find(([learned["password"]] if learned.get("password") else []) + list(cfg.get("password_label") or PASS_LABELS), TEXT_ROLES, required=False)
+    form = await analyze(browser)
+    if not form.get("has_password"):
+        raise HelperError("no login form on this page (no visible password field); if you are already logged in, "
+                          "skip the login step")
+    if not form.get("user"):
+        raise HelperError("the login form has a password field but no username field before it")
+    snap = await browser.snapshot()
+    boxes = [e for e in parse_snapshot(snap) if e.role in TEXT_ROLES]
+    user_el, pass_el = _pick(boxes, form["user"]), _pick(boxes, form["password"])
     if not (user_el and pass_el):
-        # SuiteCRM-style forms (user_name / username_password / #bigbutton) often have unlabeled inputs:
-        # fall back to the first two text boxes on the page.
-        boxes = [e for e in parse_snapshot(browser.last_snapshot) if e.role in TEXT_ROLES]
-        if len(boxes) < 2:
-            raise HelperError("login form not found: no username/password fields on the page")
-        user_el, pass_el = user_el or boxes[0], pass_el or boxes[1]
-    await browser._do("browser_type", {"element": user_el.name or "username", "target": user_el.ref, "text": acc["username"]})
-    await browser._do("browser_type", {"element": pass_el.name or "password", "target": pass_el.ref, "text": password,
-                                       "_secret": True})
-    btn = await browser.find(([learned["submit"]] if learned.get("submit") else []) + list(cfg.get("submit_label") or SUBMIT_LABELS), ("button", "link"), required=False)
+        raise HelperError(f"login fields found in the page ({_fdesc(form['user'])}, {_fdesc(form['password'])}) "
+                          "but not in the snapshot")
+    await browser._do("browser_type", {"element": user_el.name or _fdesc(form["user"]), "target": user_el.ref,
+                                       "text": acc["username"]})
+    await browser._do("browser_type", {"element": pass_el.name or _fdesc(form["password"]), "target": pass_el.ref,
+                                       "text": password, "_secret": True})
+    sub = form.get("submit") or {}
+    btn = await browser.find(sub["label"], ("button", "link"), required=False) if sub.get("label") else None
     if btn:
         await browser._do("browser_click", {"element": btn.name, "target": btn.ref})
-    else:                                     # no labelled button: submit with Enter
+    else:                                     # the form has no labelled button: submit it with Enter
         await browser._do("browser_press_key", {"key": "Enter"})
     browser.last_snapshot = ""
     await asyncio.sleep(float(os.environ.get("LOGIN_WAIT", cfg.get("wait_seconds", 3))))
+    after = await analyze(browser)
     page = await browser.snapshot()
     markers = acc.get("role_markers", [])
-    still_on_form = (await browser.find(PASS_LABELS, ("textbox",), required=False) is not None
-                     or "username_password" in page or "bigbutton" in page)
+    still_on_form = bool(after.get("has_password"))
     role_ok = all(m.lower() in page.lower() for m in markers)
     shot = await browser.screenshot(f"{ctx.shot_prefix}login-{ctx.app}-{account}.png")
+    used = f"{_fdesc(form['user'])} / {_fdesc(form['password'])} / submit {_fdesc(sub) if sub else 'Enter'}"
     if still_on_form:
-        errs = [l.strip(" -") for l in page.splitlines() if re.search(r"(?i)invalid|incorrect|wrong|error|locked|failed", l)]
-        seen = f"; page says: {errs[0][:150]}" if errs else "; no error text, the form just stayed (likely wrong fields)"
-        raise HelperError(f"login failed for account {account} ({acc['username']}) using fields "
-                          f"'{user_el.name}'/'{pass_el.name}'{seen}. Do not retry by hand.")
-    _save_learned(ctx, {"user": user_el.name, "password": pass_el.name, "submit": btn.name if btn else ""})
-    return {"values": {"logged_in": "yes" if not still_on_form else "no",
+        seen = (f"the page says: {after['error']}" if after.get("error")
+                else "no error message, the form just stayed")
+        raise HelperError(f"login failed for {account} ({acc['username']}) using {used}; {seen}. "
+                          "Do not retry by hand.")
+    _save_learned(ctx, {"user": _fdesc(form["user"]), "password": _fdesc(form["password"]),
+                        "submit": _fdesc(sub) if sub else "Enter"})
+    return {"values": {"logged_in": "yes",
                        "role_ok": "yes" if role_ok else f"no (missing {', '.join(markers)})"},
-            "screenshots": [shot], "notes": f"Logged in as {account}" if not still_on_form else "Login form still shown"}
+            "screenshots": [shot], "notes": f"Logged in as {account} using {used}"}
+
+
+def _fdesc(f: dict | None) -> str:
+    f = f or {}
+    return f.get("name") or f.get("id") or f.get("label") or "?"
 
 
 def _learned_path(ctx) -> Path | None:
@@ -80,7 +125,7 @@ def _learned(ctx) -> dict:
 
 
 def _save_learned(ctx, fields: dict) -> None:
-    """Remember which fields worked for this app so the next run uses them first (no secrets stored)."""
+    """Record the login form that worked for this app (field names only, no secrets) in the knowledge files."""
     p = _learned_path(ctx)
     if not p or not fields.get("user") or os.environ.get("LOGIN_LEARN") == "0":
         return

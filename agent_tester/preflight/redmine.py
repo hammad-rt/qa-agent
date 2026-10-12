@@ -79,9 +79,17 @@ class Redmine:
     def _post(self, path: str, body: dict) -> dict:
         if not self.key:
             raise RedmineError("REDMINE_API_KEY is not set")
-        r = self.s.post(f"{self.base}{path}", json=body, headers={"X-Redmine-API-Key": self.key}, timeout=self.timeout)
+        try:   # no automatic retry: a POST that timed out may already have been created
+            r = self.s.post(f"{self.base}{path}", json=body, headers={"X-Redmine-API-Key": self.key}, timeout=self.timeout)
+        except requests.RequestException as e:
+            raise RedmineError(f"couldn't reach Redmine to save {path} ({type(e).__name__}). Check Redmine before "
+                               "retrying, in case it was saved anyway.")
+        if r.status_code in (401, 403):
+            raise RedmineError(f"Redmine refused to save {path} ({r.status_code}). Check REDMINE_API_KEY permissions.")
+        if r.status_code == 422:
+            raise RedmineError(f"Redmine rejected the data for {path}: {r.text[:200]}")
         if r.status_code >= 400:
-            raise RedmineError(f"Redmine {r.status_code} on POST {path}")
+            raise RedmineError(f"Redmine {r.status_code} on saving {path}; nothing was saved. Try again shortly.")
         return r.json() if r.content else {}
 
     def create_issue(self, project_id: int, subject: str, description: str, parent_id: int | None = None,

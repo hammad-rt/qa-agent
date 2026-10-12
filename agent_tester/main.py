@@ -322,6 +322,14 @@ def _execute(settings, pack, plan, state, policy, memory) -> int:
                 state.checkpoint("stopped by user (Ctrl-C)", status="paused")
                 print(f"\nStopped. Resume with: python -m agent_tester resume {state.dir}")
                 return 130
+            except Exception as e:  # noqa: BLE001  (anything outside a single case: keep the run resumable)
+                if os.environ.get("AGENT_DEBUG"):
+                    raise
+                _save_trace(state.dir / "agent_error.log")
+                state.checkpoint(f"stopped by error: {friendly_error(e)}", status="paused")
+                print(f"\nThe run stopped: {friendly_error(e)}\nFinished cases are saved. Details: "
+                      f"{state.dir / 'agent_error.log'}\nResume with: python -m agent_tester resume {state.dir}")
+                return 1
     except RunLocked as e:
         print(f"Can't start: {e}")
         return 5
@@ -331,9 +339,9 @@ def _execute(settings, pack, plan, state, policy, memory) -> int:
               ", ".join(f"{u['app']}:{u['setting']} (was {u['original']})" for u in led.unrestored()))
     if led.leftovers():
         print(f"{len(led.leftovers())} test record(s) left behind; see `leftovers {state.dir}`.")
-    finish_memory(memory, pack, state)
-    export_memory(memory, ROOT / "memory" / "memory-export.json")
-    out = build_report(state, pack)
+    _safe("saving what this run learned", finish_memory, memory, pack, state)
+    _safe("exporting memory", export_memory, memory, ROOT / "memory" / "memory-export.json")
+    out = _safe("building the report", build_report, state, pack) or state.dir / "state.json"
     report = state.data.get("report_pdf") or out
     counts: dict = {}
     for r in results.values():
@@ -345,7 +353,7 @@ def _execute(settings, pack, plan, state, policy, memory) -> int:
             notifier(f"QA report #{plan.task_id}", ", ".join(f"{v} {k}" for k, v in counts.items()), Path(report))
         except Exception as e:  # noqa: BLE001
             print(f"Report email not sent: {e}")
-    trimmed = apply_retention(settings.runs_dir, keep=settings.run_retention)
+    trimmed = _safe("trimming old runs", apply_retention, settings.runs_dir, keep=settings.run_retention)
     if trimmed:
         print(f"Trimmed {len(trimmed)} old run folder(s) to state.json and report only.")
     return 0 if all(r and r.verdict != "AGENT INCOMPLETE" for r in results.values()) else 4
@@ -681,6 +689,63 @@ def unreachable_msg(settings, e) -> str:
             "command again.")
 
 
+def friendly_error(e: BaseException) -> str:
+    """One plain sentence for any failure, so the user never sees a raw traceback."""
+    import requests
+    from .preflight.redmine import RedmineError
+    from .preflight.pack_loader import NoPackFound
+    from .tools.policy import PolicyViolation
+    from .notify import EmailNotAllowed
+    from .agents.llm import LLMOutputError
+    msg = str(e).strip() or type(e).__name__
+    if isinstance(e, RedmineError):
+        return f"Redmine: {msg}"
+    if isinstance(e, NoPackFound):
+        return f"No test pack matches this task: {msg}. Create one with `pack new` or `onboard`."
+    if isinstance(e, PolicyViolation):
+        return f"Blocked by a safety rule: {msg}"
+    if isinstance(e, EmailNotAllowed):
+        return f"Email not sent: {msg}"
+    if isinstance(e, LLMOutputError):
+        return f"The model gave an answer the agent couldn't use: {msg}. Try again; if it keeps happening, check the model server."
+    if isinstance(e, requests.Timeout):
+        return f"A server took too long to answer ({msg}). Check your connection or VPN and try again."
+    if isinstance(e, requests.ConnectionError):
+        return f"Couldn't connect to a server ({msg}). Check your connection or VPN and try again."
+    if isinstance(e, FileNotFoundError):
+        return f"A file or program is missing: {getattr(e, 'filename', None) or msg}."
+    if isinstance(e, PermissionError):
+        return f"No permission to access {getattr(e, 'filename', None) or msg}."
+    if isinstance(e, OSError) and getattr(e, "errno", None) == 28:
+        return "The disk is full. Free some space and try again."
+    if type(e).__name__ in ("YAMLError", "ScannerError", "ParserError", "JSONDecodeError"):
+        return f"A config or data file is malformed: {msg}"
+    if isinstance(e, KeyError):
+        return f"A required setting or field is missing: {msg}."
+    return f"Something went wrong: {type(e).__name__}: {msg}"
+
+
+def _save_trace(path: Path) -> Path:
+    import traceback
+    try:
+        with open(path, "w") as f:
+            traceback.print_exc(file=f)
+    except OSError:
+        pass
+    return path
+
+
+def _safe(what: str, fn, *a, **kw):
+    """Run an after-run chore; a failure prints one line instead of losing the finished run."""
+    try:
+        return fn(*a, **kw)
+    except Exception as e:  # noqa: BLE001
+        if os.environ.get("AGENT_DEBUG"):
+            raise
+        print(f"Warning: problem {what}: {friendly_error(e)}")
+        return None
+
+
 def main(argv=None) -> int:
     try:
         return _main(argv)
@@ -689,18 +754,10 @@ def main(argv=None) -> int:
         return 130
     except Exception as e:  # noqa: BLE001
         if not model_unreachable(e):
-            from .preflight.redmine import RedmineError
             if os.environ.get("AGENT_DEBUG"):
                 raise
-            if isinstance(e, RedmineError):
-                print(f"\nRedmine: {e}")
-                return 3
-            import traceback
-            log = "agent_error.log"
-            with open(log, "w") as f:
-                traceback.print_exc(file=f)
-            print(f"\nSomething went wrong: {type(e).__name__}: {e}\nFull details saved to {log} "
-                  "(rerun with AGENT_DEBUG=1 to see the traceback).")
+            log = _save_trace(Path("agent_error.log"))
+            print(f"\n{friendly_error(e)}\n(Details saved to {log}; rerun with AGENT_DEBUG=1 to see the traceback.)")
             return 1
         from .config import Settings
         print("\n" + unreachable_msg(Settings.load(), e))

@@ -243,7 +243,9 @@ class TesterSession:
         def record_value(name: str, raw_text: str, source: str) -> dict:
             """Record a value exactly as read on the page. raw_text is the text you saw, e.g. "$1,234.50"."""
             try:
-                v = V.parse_money(raw_text)
+                # IDs like A1142 / B1465 stay text: only plain amounts become numbers
+                v = raw_text.strip() if re.search(r"[A-Za-z]\d|\d[A-Za-z]|^[A-Za-z]{1,3}-?\d+$", raw_text.strip()) \
+                    and not re.match(r"^(USD|KES|EUR|GBP|PKR)\b", raw_text.strip(), re.I) else V.parse_money(raw_text)
             except ValueError:
                 v = raw_text
             V.record(s.state.values, name, v, source=f"{s.case_id}/{s.app}: {source}")

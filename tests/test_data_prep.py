@@ -50,3 +50,8 @@ class DataPrep(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OrderIdsStayText(unittest.TestCase):
+    def test_float_and_text_ids_in_do_not_use_list(self):
+        self.assertEqual(", ".join(str(u) for u in [1142.0, "B1465"]), "1142.0, B1465")

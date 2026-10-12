@@ -108,9 +108,10 @@ data_prep:
     verify:
       app: portal
       text: >-
-        Log in to the portal, open shipping-only invoice {value}. It is usable if it shows a balance > 0, the
-        Pay By Card button and the Savo Rewards box with "You can use up to $X" (X > 0). The box can wrongly say
-        "no Savo Rewards" on first load: reload once and wait 3 s before deciding.
+        Follow recipe R1 step 4: on the portal open Shipping Only orders, find order {value} and open its invoice
+        page (/shipping-only/invoice/...). Do not click Make a Payment or Pay By Card. Wait about 4 seconds, then
+        read the page: it is usable if it shows a balance > 0, a Pay By Card button and the Savo Rewards box with
+        "You can use up to $X" (X > 0). Reload once if the box says "no Savo Rewards".
     consumed_by: ["complete payment", "pay with", "\\bpays?\\b", "4242"]
   - id: buy_ship_order
     area: rewards

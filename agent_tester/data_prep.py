@@ -88,8 +88,8 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
     if tester is None:
         return blocked(f"no tester for {app}")
     used = [s["value"] for s in store.values() if s.get("consumed")] + list(rule.get("never_use", []))
-    text = (f"FIND: {rule['find']}\nDo not use: {', '.join(used) or 'none'}.\n"
-            f"If one fits, record it with record_value('{value}', <its number>) and finish. "
+    text = (f"FIND: {rule['find']}\nDo not use: {', '.join(str(u) for u in used) or 'none'}.\n"
+            f"If one fits, record it with record_value('{value}', '<its number exactly as shown, with its letter prefix, e.g. A1142>') and finish. "
             f"If none fits, CREATE: {rule['create']} Then record_value('{value}', <the new number>).")
     try:
         sr = _turn(tester, plan, state, rule, app, text, False, f"PREP-{key}")

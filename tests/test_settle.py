@@ -15,3 +15,10 @@ class Settle(unittest.TestCase):
             self.assertIn("fresh browser_snapshot", r["error"])
             sess.before_tool(tool("browser_snapshot"), {}, None)
             self.assertTrue(sl.called)
+
+
+class IntentLoop(unittest.TestCase):
+    def test_reworded_clicks_share_intent(self):
+        a = T._intent_sig("browser_click", {"element": "View Invoice", "target": "f1e348"})
+        b = T._intent_sig("browser_click", {"target": "[ref=f1e348]"})
+        self.assertEqual(a, b)

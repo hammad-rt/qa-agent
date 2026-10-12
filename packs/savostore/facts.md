@@ -48,6 +48,8 @@ Rewritten 2026-10-06 after the original file was lost. Sources: QA runs on #1809
 - If login_form fails, do not retry by clicking Log In by hand; finish with notes "BLOCKED: CRM login failed".
 
 ## Verified flows (from manual retest, 2026-10-12; follow these, check each step against the page)
+**Open a CRM order directly:** browser_navigate to `<crm URL>/index.php?module=AOS_Invoices&action=DetailView&record=<record id>` (same id as the portal invoice, read in this run). Don't click the order-number link in lists; it often doesn't navigate.
+
 **R1 Prepare a shipping-only order (A1142):** CRM: open the client's shipping-only order (AOS_Invoices) -> open its parcel, set Received, Save -> move status one step at a time, saving each: Shipped to Warehouse, On Warehouse floor, Ready to Ship, Shipped, Invoiced & Shipped. Portal: open `/shipping-only/invoice/<CRM record id>` directly (read the id from the CRM URL `record=` in the same run; never reuse an old id; "View Invoice" is not needed), wait ~4 s, check the balance, the Pay By Card button and rewards "up to" (= 10% of unpaid shipping; A1142: $44.00, up to $3.50).
 **R2 Buy & Ship (B1465):** AOS_Quotes record; the rewards box shows only at Awaiting Payment or Shipping Fee Invoiced. In USD the only option is Pay to Bank Account; there is no currency switch, so KES/M-Pesa cases are BLOCKED.
 **R3 Apply/remove rewards (portal):** type the amount, click Apply, wait 3-5 s before reading. Remove with the X, then wait again. An amount over the cap is rejected with a message that disappears after a few seconds (read it right away).

@@ -41,6 +41,17 @@ ACTING_TOOLS = {"browser_click", "browser_type", "browser_fill_form", "browser_s
                 "browser_handle_dialog", "run_helper"}
 
 
+def _intent_sig(name: str, args: dict) -> str | None:
+    """What the call is aimed at, ignoring wording: a click on the same ref, or a script quoting the same texts."""
+    if name == "browser_click":
+        ref = re.sub(r"\W|ref", "", str(args.get("target") or args.get("ref") or ""))
+        return f"click:{ref}" if ref else None
+    if name in ("browser_run_code_unsafe", "browser_evaluate"):
+        texts = sorted(set(re.findall(r"""['"]([^'"]{3,60})['"]""", str(args.get("code") or args.get("function") or ""))))
+        return "code:" + "|".join(texts) if texts else None
+    return None
+
+
 def _settle_seconds(app: str = "") -> float:
     if app == "crm":                                  # CRM subpanels/wallet totals load ~8 s late
         return float(os.environ.get("TESTER_SETTLE_SECONDS_CRM", "10"))
@@ -479,7 +490,10 @@ class TesterSession:
             self.since_progress += 1
             sig = _call_sig(name, args)
             self._sigs[sig] = self._sigs.get(sig, 0) + 1
-            n = self._sigs[sig]
+            intent = _intent_sig(name, args)              # same target reached by reworded calls/scripts
+            if intent:
+                self._sigs[intent] = self._sigs.get(intent, 0) + 1
+            n = max(self._sigs[sig], self._sigs.get(intent, 0) if intent else 0)
             if n >= LOOP_STOP:
                 self.result.limit_hit = True
                 self.result.loop = True

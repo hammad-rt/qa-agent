@@ -241,7 +241,8 @@ def restore_pass(plan: TestPlan, state: RunState, testers: dict[str, Tester], un
 def run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge: Judge,
              on_case_done: Callable[[CaseResult], None] | None = None, max_retries: int = 1,
              manual_login: Callable[[str, str], bool] | None = None,
-             manual_login_apps: list[str] | None = None, memory=None) -> dict[str, CaseResult]:
+             manual_login_apps: list[str] | None = None, memory=None,
+             data_prep: list[dict] | None = None) -> dict[str, CaseResult]:
     state.checkpoint("run started", status="running")
     read_snapshot(plan, state, testers, "baseline")
     by_id = {c.id: c for c in plan.cases}
@@ -249,8 +250,12 @@ def run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge:
         if state.result(cid):
             continue                                  # resume: already done
         case = by_id[cid]
-        result = _run_case(plan, case, state, testers, judge, max_retries, manual_login,
-                           manual_login_apps, memory=memory)
+        from .data_prep import ensure_data, after_case
+        result = None if case.skip_reason else ensure_data(plan, case, state, testers, data_prep or [])
+        if result is None:
+            result = _run_case(plan, case, state, testers, judge, max_retries, manual_login,
+                               manual_login_apps, memory=memory)
+            after_case(case, state, data_prep or [])
         state.set_result(result)
         if on_case_done:
             on_case_done(result)

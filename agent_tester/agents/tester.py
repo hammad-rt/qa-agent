@@ -755,6 +755,8 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
         helpers = {n: h for n, h in all_helpers.items() if h.enabled and h.meta.get("app", "any") in ("any", app)}
         was_ro = policy.read_only
         policy.read_only = bool(brief.get("read_only")) or was_ro
+        was_prep = policy.prep
+        policy.prep = bool(brief.get("data_prep"))
         try:
             urls = run_urls(pack, env, state)
             toolset = playwright_toolset(run_dir, app)
@@ -815,6 +817,7 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
             asyncio.run(go())
         finally:
             policy.read_only = was_ro
+            policy.prep = was_prep
         if not sess.finished and not sess.result.limit_hit:
             sess.result.stuck = True
             sess.result.notes = sess.result.notes or "tester stopped without calling finish()"

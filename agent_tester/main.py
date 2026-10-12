@@ -298,7 +298,7 @@ def _execute(settings, pack, plan, state, policy, memory) -> int:
                 results = run_plan(plan, state, testers, make_judge(settings, pack, memory), on_case_done=progress.case_done,
                                    manual_login=login,
                                    manual_login_apps=list(pack.config.get("manual_login_apps") or []),
-                                   memory=memory)
+                                   memory=memory, data_prep=list(pack.config.get("data_prep") or []))
                 left = Ledger(state).unrestored()
                 if left:
                     print("\nThese settings were changed and not put back: " +

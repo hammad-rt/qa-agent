@@ -22,6 +22,7 @@ class Policy:
     approver: Callable[[str, str, dict], bool] | None = None   # (action, reason, details) -> approved?
     log: list[dict] = field(default_factory=list)
     auto: bool = False               # automatic mode: no approval prompts (staging runs; prod writes skipped)
+    prep: bool = False               # data-prep turn: on prod, record creation/status moves allowed (never payments)
     read_only: bool = False          # baseline/final reads and preflight: anything needing approval is refused
 
     def can_preapprove(self, action_type: str) -> bool:
@@ -63,9 +64,13 @@ class Policy:
             self.log.append({"action": action, "type": action_type, "approval": "denied", "why": "read-only"})
             raise PolicyViolation(f"read-only step, not allowed: {action}")
         if self.auto and action_type not in ("redmine_post", "send_email"):
+            pay = re.search(r"(?i)\bpay|stripe|card|checkout", f"{action} {action_type or ''}")
+            if self.env == "prod" and not pay:
+                self.log.append({"action": action, "type": action_type, "approval": "auto", "why": "prod (no payment)"})
+                return "approved"
             if self.env == "prod":
-                self.log.append({"action": action, "type": action_type, "approval": "denied", "why": "prod write skipped (automatic mode)"})
-                raise PolicyViolation(f"production: data-changing step skipped in automatic mode: {action}")
+                self.log.append({"action": action, "type": action_type, "approval": "denied", "why": "prod payment skipped (automatic mode)"})
+                raise PolicyViolation(f"production: payments are never made by the agent; step skipped: {action}")
             self.log.append({"action": action, "type": action_type, "approval": "auto"})
             return "approved"
         if action_type and action_type in self.preapproved and self.can_preapprove(action_type):

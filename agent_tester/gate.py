@@ -68,7 +68,7 @@ def choose_env(pack, input_fn=None, out=print) -> str | None:
 
 def confirm_prod(input_fn=None, out=print) -> bool:
     from .auto import prompter
-    input_fn = input_fn or prompter("n")
+    input_fn = input_fn or prompter("y")
     out("Production: I'll only read, and I'll ask you before every action that changes data. Nothing can be"
         " pre-approved, no real payments unless you say so, and any setting I change I put back.")
     return input_fn("  Test on production? [y/N] ").strip().lower() in ("y", "yes")

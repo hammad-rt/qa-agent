@@ -79,3 +79,31 @@ helpers:
   crm_move_order_status: {path: null, selects: {}, submit_label: null, success_text: null, read_labels: []}
   crm_add_parcel:       {path: null, fields: {}, submit_label: null, success_text: null, read_labels: []}
   crm_ship_parcel:      {path: null, fields: {}, submit_label: null, success_text: null, read_labels: []}
+
+# Data preparation, every environment (test client only; payments on production are always skipped):
+# before a matching case, find a usable record or create one, then check it on the portal.
+data_prep:
+  - id: shipping_only_order
+    area: rewards
+    when:
+      areas: [rewards]
+      any: ["shipping[- ]only", "pay by card", "stripe", "abandon", "invoice"]
+      none: ["buy ?& ?ship"]
+    app: crm
+    value: test_order
+    find: >-
+      In the CRM, open Invoices (AOS_Invoices = shipping-only orders) and find one for the test client Hammad Iqbal
+      (portal user "Hammad"; match by the orders the client owns, not by the name "Sidney Test") that is at
+      status "Invoiced & Shipped", has an invoice, nothing paid and unpaid shipping > 0.
+    create: >-
+      Create a shipping-only order for the test client Hammad Iqbal only, with "QA-AGENT TEST" in its description,
+      set its parcel to Received, then move the status one step at a time: Shipped to Warehouse > On Warehouse
+      floor > Ready to Ship > Shipped > Invoiced & Shipped ("Shipped" alone does not create the invoice).
+      Do not pay and do not apply rewards.
+    verify:
+      app: portal
+      text: >-
+        Log in to the portal, open shipping-only invoice {value}. It is usable if it shows a balance > 0, the
+        Pay By Card button and the Savo Rewards box with "You can use up to $X" (X > 0). The box can wrongly say
+        "no Savo Rewards" on first load: reload once and wait 3 s before deciding.
+    consumed_by: ["complete payment", "pay with", "\\bpays?\\b", "4242"]

@@ -106,6 +106,8 @@ def login_first(pack, plan, state, login, input_fn=None) -> list[str]:
     used = {s.app for c in plan.cases for s in c.steps}
     done = state.data.setdefault("manual_logins", {})
     did = []
+    if os.environ.get("CAPTCHA_AUTO", "1") != "0":
+        return did          # try the checkbox automatically first; a person is asked mid-run only if a puzzle appears
     for app in pack.config.get("manual_login_apps", []) or []:
         if app not in used or done.get(app):
             continue

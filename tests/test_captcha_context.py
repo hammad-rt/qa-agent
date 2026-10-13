@@ -69,7 +69,7 @@ class History(unittest.TestCase):
 
     def test_prompts(self):
         self.assertIn("needs_manual_login", prompts.TESTER)
-        self.assertIn("never try to solve it", prompts.TESTER)
+        self.assertIn("ticks a reCAPTCHA", prompts.TESTER)
         self.assertIn("ONLY when you can see a CAPTCHA", prompts.TESTER)
         self.assertIn("not a setting", prompts.PLANNER)
         self.assertIn("belong to the user chosen for this run", prompts.PLANNER)
@@ -150,7 +150,10 @@ class ManualLogin(unittest.TestCase):
         seen = []
         opener = lambda run_dir, app, url, user, input_fn=input: seen.append((app, url, user)) or True
         login = make_manual_login(pack, _plan(), self.state, opener=opener)
-        did = login_first(pack, _plan(), self.state, login, input_fn=lambda q: "")
+        with mock.patch.dict(os.environ, {"CAPTCHA_AUTO": "1"}):
+            self.assertEqual(login_first(pack, _plan(), self.state, login, input_fn=lambda q: ""), [])  # auto tick first
+        with mock.patch.dict(os.environ, {"CAPTCHA_AUTO": "0"}):
+            did = login_first(pack, _plan(), self.state, login, input_fn=lambda q: "")
         self.assertEqual(did, ["portal"])
         self.assertEqual(seen[0][0], "portal")
         self.assertEqual(seen[0][2], "hammad.iqbal@rolustech.com")
@@ -367,3 +370,21 @@ class VisibleBrowser(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AutoCheckbox(unittest.TestCase):
+    def _run(self, reply):
+        import asyncio
+        from agent_tester.helpers.core import login_form as L
+        b = mock.Mock()
+        async def do(name, args): return reply
+        b._do = do
+        return asyncio.run(L.solve_checkbox(b))
+
+    def test_passed(self):
+        r = self._run('### Result\n"{\\"present\\": true, \\"passed\\": true, \\"challenge\\": false}"')
+        self.assertTrue(r["passed"])
+
+    def test_puzzle(self):
+        r = self._run('### Result\n"{\\"present\\": true, \\"passed\\": false, \\"challenge\\": true}"')
+        self.assertTrue(r["challenge"])

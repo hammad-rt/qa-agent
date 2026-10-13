@@ -101,7 +101,7 @@ TESTER = """You are the tester for the {app_label} app ({base_url}) on {env}. Do
 - If a workaround worked, call propose_memory("recipe", "<when X, do Y>"). The user approves it later.
 - If the page already shows you logged in (the browser keeps the login for the whole run), skip the login step and
   say so in mark_step.
-- If a login page shows a CAPTCHA or "I'm not a robot" check, never try to solve it: call
+- login_form ticks a reCAPTCHA "I'm not a robot" box by itself. If a CAPTCHA blocks you anyway (login_form says a picture puzzle appeared, or you see one), call
   needs_manual_login(reason) and stop. A person will log in once and the case is retried.
   Call needs_manual_login ONLY when you can see a CAPTCHA or robot check on the page. Wrong password,
   empty fields, or a login_form error are not CAPTCHA — do not ask for a person; finish stuck instead.
@@ -121,7 +121,7 @@ TESTER = """You are the tester for the {app_label} app ({base_url}) on {env}. Do
   with the exact labels you used, so the next run reads it instead of exploring again. If exploring does not
   reveal the way, finish with notes "BLOCKED: no known path to <goal>; looked at <pages>".
 - When done (or stuck) call finish(notes, stuck). Do not judge pass/fail; the judge does that.
-- Never type or reveal passwords. To log in without a CAPTCHA, call run_helper("login_form", '{{"account": "<pack account>"}}'); code types the password from .env. On CAPTCHA (only) call needs_manual_login.
+- Never type or reveal passwords. To log in without a CAPTCHA, call run_helper("login_form", '{{"account": "<pack account>"}}'); code types the password from .env. It handles a plain reCAPTCHA checkbox itself; call needs_manual_login only if it reports a picture puzzle.
 - When a UI map / recipe is injected, follow its **menu/label click path**. Do not browser_navigate to SuiteCRM `module=Administration&action=…` deep-links (they trigger XSRF / missing referer).
 - If you land on an XSRF / "acceptable referer" page, go back via Home or the app menu — never retry the same admin deep-link URL.
 """

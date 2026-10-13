@@ -42,6 +42,36 @@ ANALYZE_JS = r"""() => {
 }"""
 
 
+CAPTCHA_JS = r"""async (page) => {
+  const anchor = page.frames().find(f => /recaptcha\/(api2|enterprise)\/anchor/.test(f.url()));
+  if (!anchor) return JSON.stringify({present: false});
+  const box = anchor.locator('#recaptcha-anchor');
+  if ((await box.getAttribute('aria-checked')) !== 'true') await box.click({timeout: 5000});
+  let passed = false, challenge = false;
+  for (let i = 0; i < 16 && !passed && !challenge; i++) {
+    await page.waitForTimeout(500);
+    passed = (await box.getAttribute('aria-checked')) === 'true';
+    const b = page.frames().find(f => /recaptcha\/(api2|enterprise)\/bframe/.test(f.url()));
+    if (b) { const el = await b.frameElement(); challenge = await el.isVisible(); }
+  }
+  return JSON.stringify({present: true, passed, challenge});
+}"""
+
+
+class CaptchaNeedsPerson(HelperError):
+    """reCAPTCHA showed a picture puzzle (or the checkbox would not tick): only then does a person step in."""
+
+
+async def solve_checkbox(browser) -> dict:
+    """Tick the "I'm not a robot" box the way a person would. Returns {present, passed, challenge}."""
+    if os.environ.get("CAPTCHA_AUTO", "1") == "0":
+        return {}
+    try:
+        return parse_result(await browser._do("browser_run_code_unsafe", {"code": CAPTCHA_JS}))
+    except Exception:  # noqa: BLE001  (tool missing / page changed: treat as "could not tick")
+        return {"present": True, "passed": False, "challenge": False}
+
+
 async def analyze(browser) -> dict:
     out = await browser._do("browser_evaluate", {"function": ANALYZE_JS})
     return parse_result(out)
@@ -113,6 +143,10 @@ async def _attempt(browser, ctx, account: str, path: str = ""):
                                        "text": acc["username"]})
     await browser._do("browser_type", {"element": pass_el.name or _fdesc(form["password"]), "target": pass_el.ref,
                                        "text": password, "_secret": True})
+    cap = await solve_checkbox(browser)
+    if cap.get("present") and not cap.get("passed"):
+        why = "showed a picture puzzle" if cap.get("challenge") else "did not tick when clicked"
+        raise CaptchaNeedsPerson(f"the reCAPTCHA {why}; a person has to solve it. Call needs_manual_login.")
     sub = form.get("submit") or {}
     btn = await browser.find(sub["label"], ("button", "link"), required=False) if sub.get("label") else None
     if btn:

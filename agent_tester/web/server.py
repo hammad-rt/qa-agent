@@ -113,7 +113,7 @@ def run_detail(d: Path) -> dict:
     return {"summary": run_summary(d), "plan": st.get("plan"), "results": st.get("results"),
             "values": st.get("values"), "checkpoints": st.get("checkpoints"), "ledger": st.get("ledger"),
             "action_log": (st.get("action_log") or [])[-400:], "shots": shots, "progress": progress,
-            "reports": sorted(reports), "model": st.get("model")}
+            "reports": sorted(reports), "model": st.get("model"), "mode": st.get("mode")}
 
 
 def trace_lines(d: Path, since: int) -> dict:

@@ -34,12 +34,19 @@ pre.console{background:#0a0c10;border:1px solid var(--line);border-radius:8px;pa
 #zoom{position:fixed;inset:0;background:#000c;display:none;align-items:center;justify-content:center;z-index:9}#zoom img{max-width:95vw;max-height:95vh}
 table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left;font-size:13px;vertical-align:top}
 iframe{width:100%;height:78vh;border:1px solid var(--line);border-radius:8px;background:#fff}
+.blk{border:1px solid var(--line);border-radius:8px;margin-bottom:12px;background:var(--panel)}
+.blk>summary{padding:10px 12px;cursor:pointer;display:flex;gap:8px;align-items:center;list-style:none}
+.blk>summary::-webkit-details-marker{display:none}.blk .body{padding:4px 12px 12px}
+.verdict{border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin:8px 0;background:#10131a}
+.verdict div{margin:2px 0}.say{color:#c9cfdb;font-size:13px;margin:6px 0;white-space:pre-wrap}
+.toolbar{display:flex;gap:14px;align-items:center;margin-bottom:10px}.toolbar label{color:var(--mute);font-size:12px}
+.ev.read{opacity:.55}.hideReads .ev.read{display:none}
 </style></head><body>
 <aside>
   <h1>QA Agent</h1>
   <div class="new">
     <div class="row"><input id="task" placeholder="Redmine task #"><select id="env"><option>staging</option><option>pre-prod</option><option>production</option></select></div>
-    <input id="cases" placeholder="Cases (optional), e.g. TC1,TC2">
+    <input id="caseIds" placeholder="Cases (optional), e.g. TC1,TC2">
     <div class="row"><button class="pri" onclick="start(false)">Start run</button><button onclick="start(true)">Plan only</button></div>
     <div id="startErr" class="mute"></div>
   </div>
@@ -52,7 +59,7 @@ iframe{width:100%;height:78vh;border:1px solid var(--line);border-radius:8px;bac
   <div id="live" class="pane on">
     <div id="askBox"></div>
     <div id="consoleWrap" style="display:none"><div class="mute">Agent console</div><pre class="console" id="console"></pre></div>
-    <div class="mute">Steps</div><div id="events"><div class="empty">No steps yet.</div></div>
+    <div class="toolbar"><b>Steps</b><label><input type="checkbox" id="showReads" onchange="$('#events').classList.toggle('hideReads',!this.checked)"> show page reads</label><label><input type="checkbox" id="follow" checked> follow live</label></div><div id="events" class="hideReads"><div class="empty">No steps yet.</div></div>
   </div>
   <div id="cases" class="pane"></div>
   <div id="shots" class="pane"></div>
@@ -67,8 +74,8 @@ document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{document.querySelect
 async function api(p,b){const r=await fetch(p,b?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}:{});const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j}
 function pills(c){return Object.entries(c||{}).map(([k,v])=>`<span class="pill ${k.split(' ')[0]}">${v} ${esc(k)}</span>`).join('')}
 async function loadRuns(){try{const rs=await api('/api/runs');$('#runs').innerHTML=rs.map(r=>`<div class="run ${r.id==cur?'sel':''}" onclick="openRun('${r.id}')"><div class="t">#${esc(r.task)} <span class="pill ${r.status}">${esc(r.status)}</span></div><div class="mute">${esc(r.env||'')} · ${r.done}/${r.cases} cases · ${esc((r.started||'').replace('T',' '))}</div><div>${pills(r.counts)}</div></div>`).join('')||'<div class="empty">No runs yet.</div>'}catch(e){}}
-function openRun(id){if(cur!==id){cur=id;traceNext=0;$('#events').innerHTML='';}loadRuns();refresh()}
-async function start(dry){$('#startErr').textContent='';try{job=await api('/api/start',{task:$('#task').value,env:$('#env').value,cases:$('#cases').value,dry_run:dry});outLen=0;$('#console').textContent='';cur=null;$('#events').innerHTML='';$('#title').textContent='Starting #'+$('#task').value+'…';pollJob()}catch(e){$('#startErr').textContent=e.message}}
+function openRun(id){if(cur!==id){cur=id;traceNext=0;blocks=[];openBlock=null;$('#events').innerHTML='';}loadRuns();refresh()}
+async function start(dry){$('#startErr').textContent='';try{job=await api('/api/start',{task:$('#task').value,env:$('#env').value,cases:$("#caseIds").value,dry_run:dry});outLen=0;$('#console').textContent='';cur=null;$('#events').innerHTML='';$('#title').textContent='Starting #'+$('#task').value+'…';pollJob()}catch(e){$('#startErr').textContent=e.message}}
 async function resume(){try{job=await api('/api/start',{resume:cur});outLen=0;$('#console').textContent='';pollJob()}catch(e){alert(e.message)}}
 async function stopJob(){if(job&&confirm('Stop this run? It pauses and can be resumed.'))job=await api(`/api/jobs/${job.id}/stop`,{})}
 async function answer(){const i=$('#ans');await api(`/api/jobs/${job.id}/input`,{text:i.value});$('#askBox').innerHTML=''}
@@ -76,30 +83,58 @@ async function pollJob(){if(!job)return;try{const j=await api(`/api/jobs/${job.i
  if(j.run_dir&&cur!==j.run_dir){cur=j.run_dir;traceNext=0;$('#events').innerHTML='';loadRuns()}
  if(j.waiting){if(!$('#ans'))$('#askBox').innerHTML=`<div class="ask"><span style="flex:0 1 50%">${esc(j.prompt)}</span><input id="ans" type="${j.secret?'password':'text'}" autocomplete="off" placeholder="Type an answer, or leave empty for the default" onkeydown="if(event.key=='Enter')answer()"><button class="pri" onclick="answer()">Send</button></div>`,$('#ans').focus()}else $('#askBox').innerHTML='';
  $('#stopBtn').style.display=j.running?'':'none';if(!j.running){$('#askBox').innerHTML='';loadRuns()}}catch(e){}}
-function evHtml(e){const who=`<span class="who">${esc((e.at||'').slice(11))} · ${esc(e.author)}</span>`;
- if(e.calls)return e.calls.map(c=>{const a=c.args||{};let cls='',txt=`<code>${esc(c.name)}</code>`;
-  if(c.name=='mark_step'){cls='step';txt=`<b>Step ${esc(a.n)}</b> done${a.deviation?': '+esc(a.deviation):''}`}
-  else if(c.name=='finish'){cls='fin';txt=`<b>Finished</b>${a.stuck?' (stuck)':''}: ${esc(a.notes)}`}
-  else if(c.name=='record_value')txt=`Read <b>${esc(a.name)}</b> = <code>${esc(a.value)}</code>`;
-  else if(c.name=='browser_navigate')txt=`Open <code>${esc(a.url)}</code>`;
-  else if(c.name=='browser_click')txt=`Click <b>${esc(a.element||a.target)}</b>`;
-  else if(c.name=='browser_type')txt=`Type <code>${esc(a.text)}</code> into <b>${esc(a.element||a.target)}</b>`;
-  else if(c.name=='browser_fill_form')txt=`Fill ${(a.fields||[]).map(f=>`<b>${esc(f.name||f.element)}</b>=<code>${esc(f.value)}</code>`).join(', ')}`;
-  else if(c.name=='browser_snapshot')txt='Read the page';
-  else if(c.name=='browser_take_screenshot')txt='Screenshot';
-  else if(c.name=='run_helper')txt=`Helper <code>${esc(a.name)}</code> ${esc(a.params_json||'')}`;
-  else txt+=` ${esc(JSON.stringify(a).slice(0,160))}`;
-  return `<div class="ev ${cls}">${who}<br>${txt}</div>`}).join('');
- if(e.text){const t=String(e.text);return `<div class="ev">${who}<br>${esc(t.slice(0,600))}${t.length>600?'…':''}</div>`}
- return ''}
-async function refresh(){if(!cur)return;try{
- const t=await api(`/api/runs/${cur}/trace?since=${traceNext}`);if(t.lines.length){const box=$('#events');if(!traceNext)box.innerHTML='';box.insertAdjacentHTML('beforeend',t.lines.map(evHtml).join(''));traceNext=t.next;const p=$('#live');if(p.scrollHeight-p.scrollTop-p.clientHeight<300)p.scrollTop=p.scrollHeight}
- const d=await api(`/api/runs/${cur}`);const s=d.summary;$('#title').innerHTML=`#${esc(s.task)} on ${esc(s.env||'')} <span class="pill ${s.status}">${esc(s.status)}</span>`;
- $('#sub').innerHTML=`${s.done}/${s.cases} cases ${pills(s.counts)} · ${esc(s.last||'')}`;$('#resumeBtn').style.display=(s.status=='paused'&&!(job&&job.running))?'':'none';
- if(JSON.stringify(d)!==lastDetail){lastDetail=JSON.stringify(d);render(d)}}catch(e){}}
-function render(d){const res=d.results||{};
+const clean=t=>String(t??'').replace(/<\|[^|]*\|>/g,' ').replace(/^\s*(thought|analysis|final)\b\s*/i,'').replace(/\s+\n/g,'\n').trim();
+function tryJson(t){const m=String(t).match(/\{[\s\S]*\}/);if(!m)return null;try{return JSON.parse(m[0])}catch(e){return null}}
+function name(a){return esc(a.element||a.name||'a field')}
+function callHtml(c,who){const a=c.args||{};let cls='',txt;
+  switch(c.name){
+  case 'mark_step':cls='step';txt=`✔ <b>Step ${esc(a.n)}</b>${a.deviation?': '+esc(a.deviation):''}`;break;
+  case 'finish':cls='fin';txt=`<b>${a.stuck?'Stopped (stuck)':'Finished'}</b>: ${esc(clean(a.notes))}`;break;
+  case 'record_value':txt=`Read <b>${esc(a.name)}</b> = <code>${esc(a.value)}</code>`;break;
+  case 'browser_navigate':txt=`Open <code>${esc(a.url)}</code>`;break;
+  case 'browser_click':txt=`Click <b>${name(a)}</b>`;break;
+  case 'browser_type':txt=`Type <code>${esc(a.text)}</code> into <b>${name(a)}</b>`;break;
+  case 'browser_press_key':txt=`Press <code>${esc(a.key)}</code>`;break;
+  case 'browser_fill_form':txt=`Fill ${(a.fields||[]).map(f=>`<b>${esc(f.name||f.element)}</b> = <code>${esc(f.value)}</code>`).join(', ')}`;break;
+  case 'browser_select_option':txt=`Choose <code>${esc((a.values||[]).join(', '))}</code> in <b>${name(a)}</b>`;break;
+  case 'browser_snapshot':case 'browser_find':cls='read';txt=c.name=='browser_find'?`Look for “${esc(a.text)}”`:'Read the page';break;
+  case 'browser_take_screenshot':txt='📷 Screenshot';break;
+  case 'browser_wait_for':cls='read';txt='Wait';break;
+  case 'run_helper':{let p={};try{p=JSON.parse(a.params_json||'{}')}catch(e){};txt=a.name=='login_form'?`Log in as <b>${esc(p.account||'')}</b>`:`Run helper <code>${esc(a.name)}</code>`;break}
+  case 'needs_manual_login':cls='err';txt=`Needs a person to log in: ${esc(a.reason)}`;break;
+  case 'propose_memory':txt=`💡 Learned: ${esc(a.text||a.fact||JSON.stringify(a))}`;break;
+  default:txt=`<code>${esc(c.name)}</code> <span class="mute">${esc(JSON.stringify(a).slice(0,140))}</span>`}
+  return `<div class="ev ${cls}">${who}<br>${txt}</div>`}
+function verdictHtml(v){return `<div class="verdict"><div><span class="pill ${String(v.verdict||'').split(' ')[0]}">${esc(v.verdict)}</span> <b>Judge</b>${v.severity?` · severity ${esc(v.severity)}`:''}</div>
+ ${v.expected?`<div><b>Expected:</b> ${esc(v.expected)}</div>`:''}${v.actual?`<div><b>Actual:</b> ${esc(v.actual)}</div>`:''}${v.note?`<div class="mute">${esc(v.note)}</div>`:''}${v.bug_title?`<div><b>Bug:</b> ${esc(v.bug_title)}</div>`:''}</div>`}
+let blocks=[], openBlock=null;
+function caseTitle(id){const c=((lastPlan||{}).cases||[]).find(x=>x.id==id);return c?c.title:''}
+let lastPlan=null;
+function addEvent(e){const who=`<span class="who">${esc((e.at||'').slice(11,19))} · ${esc((e.author||'').replace('tester_',''))}</span>`;
+  const a=e.author||'';
+  if(a=='planner'||a=='reviewer'){ensure('plan','Planning');openBlock.html+=a=='reviewer'?`<div class="ev">${who}<br>Plan review: ${esc((tryJson(e.text)||{}).ok===false?'changes requested':'ok')}</div>`:`<div class="ev">${who}<br>Drafted the plan</div>`;return}
+  if(a=='judge'){const v=tryJson(e.text)||{};if(v.case_id){if(!openBlock||openBlock.id!=v.case_id)ensure(v.case_id);openBlock.verdict=v.verdict}openBlock&&(openBlock.html+=verdictHtml(v));openBlock&&(openBlock.closed=true);return}
+  if(!openBlock||openBlock.closed||openBlock.id=='plan'){ensure(nextCaseId())}
+  if(e.calls)openBlock.html+=e.calls.map(c=>callHtml(c,who)).join('');
+  else if(e.text){const t=clean(e.text);if(t)openBlock.html+=`<div class="say">${esc(t.length>700?t.slice(0,700)+'…':t)}</div>`}}
+let picked=null;
+function nextCaseId(){const done=new Set(blocks.map(b=>b.id));const c=((lastPlan||{}).cases||[]).find(x=>!done.has(x.id)&&(!picked||picked.includes(x.id)));return c?c.id:'case '+(blocks.length)}
+function ensure(id,title){if(openBlock&&openBlock.id==id&&!openBlock.closed)return;let b=blocks.find(x=>x.id==id&&!x.closed);if(!b){b={id,title:title||caseTitle(id),html:'',verdict:null,closed:false};blocks.push(b)}openBlock=b}
+function drawBlocks(){const box=$('#events');const open=new Set([...box.querySelectorAll('details[open]')].map(d=>d.dataset.id));
+  box.innerHTML=blocks.map((b,i)=>{const isLast=i==blocks.length-1;const o=open.has(b.id)||isLast;
+   return `<details class="blk" data-id="${esc(b.id)}" ${o?'open':''}><summary><b>${esc(b.id)}</b> <span>${esc(b.title)}</span> ${b.verdict?`<span class="pill ${b.verdict.split(' ')[0]}">${esc(b.verdict)}</span>`:(isLast&&!b.closed?'<span class="pill running">in progress</span>':'')}</summary><div class="body">${b.html}</div></details>`}).join('')||'<div class="empty">No steps yet.</div>';
+  if($('#follow').checked){const p=$('#live');p.scrollTop=p.scrollHeight}}
+async function refresh(){if(!cur)return;let d;
+ try{d=await api(`/api/runs/${cur}`)}catch(e){return}
+ lastPlan=d.plan;picked=(d.mode||{}).cases||null;
+ try{const s=d.summary;$('#title').innerHTML=`#${esc(s.task)} on ${esc(s.env||'')} <span class="pill ${s.status}">${esc(s.status)}</span>`;
+  $('#sub').innerHTML=`${s.done}/${s.cases} cases ${pills(s.counts)} · ${esc(s.last||'')}`;$('#resumeBtn').style.display=(s.status=='paused'&&!(job&&job.running))?'':'none'}catch(e){console.error(e)}
+ const key=JSON.stringify(d);if(key!==lastDetail){lastDetail=key;try{render(d)}catch(e){console.error('render',e)}}
+ try{const t=await api(`/api/runs/${cur}/trace?since=${traceNext}`);if(!traceNext){blocks=[];openBlock=null}
+  if(t.lines.length){for(const ln of t.lines){try{addEvent(ln)}catch(e){console.error('event',e,ln)}}traceNext=t.next;drawBlocks()}}catch(e){console.error('trace',e)}}
+function render(d){const res=d.results||{};d.shots=d.shots||[];d.reports=d.reports||[];d.action_log=d.action_log||[];
  $('#cases').innerHTML=((d.plan||{}).cases||[]).map(c=>{const r=res[c.id]||{};return `<div class="case"><h2>${esc(c.id)} · ${esc(c.title)} ${r.verdict?`<span class="pill ${r.verdict.split(' ')[0]}">${esc(r.verdict)}</span>`:'<span class="pill">pending</span>'}</h2>
- <ol>${(c.steps||[]).map(st=>`<li>[${esc(st.app)}] ${esc(st.text)} ${st.inferred?'<span class="inf">inferred</span>':''} ${st.changes_data?'<span class="chg">changes data</span>':''}</li>`).join('')}</ol>
+ <ol>${(c.steps||[]).map(st=>typeof st=='string'?`<li>${esc(st)}</li>`:`<li>[${esc(st.app)}] ${esc(st.text)} ${st.inferred?'<span class="inf">inferred</span>':''} ${st.changes_data?'<span class="chg">changes data</span>':''}</li>`).join('')}</ol>
  <div><b>Expected:</b> ${esc(c.expected)}</div>${r.actual?`<div><b>Actual:</b> ${esc(r.actual)}</div>`:''}${r.note?`<div><b>Notes:</b> ${esc(r.note)}</div>`:''}
  ${r.values&&Object.keys(r.values).length?`<div><b>Values:</b> ${Object.entries(r.values).map(([k,v])=>`${esc(k)}=<code>${esc(typeof v=='object'?v.value??JSON.stringify(v):v)}</code>`).join(' ')}</div>`:''}</div>`}).join('')||'<div class="empty">No plan yet.</div>';
  $('#shots').innerHTML=d.shots.length?`<div class="shots">${d.shots.slice().reverse().map(n=>`<div><img loading="lazy" src="/api/runs/${cur}/file?path=shots/${encodeURIComponent(n)}" onclick="zoom(this.src)"><div class="mute">${esc(n)}</div></div>`).join('')}</div>`:'<div class="empty">No screenshots yet.</div>';
@@ -109,4 +144,6 @@ function render(d){const res=d.results||{};
 function zoom(src){$('#zoom img').src=src;$('#zoom').style.display='flex'}
 (async()=>{const js=await api('/api/jobs');job=js.find(j=>j.running)||null;if(job)pollJob();loadRuns()})();
 setInterval(pollJob,1000);setInterval(refresh,2000);setInterval(loadRuns,5000);
+
+setTimeout(()=>{const m=location.hash.match(/run=([\w-]+)/);if(m)openRun(m[1]);const t=location.hash.match(/tab=(\w+)/);if(t){const b=[...document.querySelectorAll('.tab')].find(x=>x.dataset.p==t[1]);if(b)b.click()}},300);
 </script></body></html>

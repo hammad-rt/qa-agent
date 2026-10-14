@@ -35,6 +35,25 @@ def make_judge(settings: Settings, pack, memory=None):
     bugs = "\n".join(f"{b['n']}. [{b['severity']}] {b['text']}" for b in pack.known_bugs) or "(none)"
     instr = prompts.JUDGE.format(bugs=bugs) + "\n\nProject facts:\n" + pack.facts
 
+    def page_text(state, step_results, per=2500, most=8) -> list[dict]:
+        """What the page showed right after each step (snapshots taken by code, not the tester's words):
+        form fields, messages and headings only, so the judge can read typed/saved values itself."""
+        import re as _re
+        keep = _re.compile(r"textbox|spinbutton|combobox|checkbox|radio|alert|status|error|invalid|heading|"
+                           r"dialog|toast|message|required|value|saved|success", _re.I)
+        out = []
+        for sr in step_results:
+            for name in (getattr(sr, "snapshots", None) or [])[-most:]:
+                p = state.dir / "snapshots" / name
+                try:
+                    lines = [_re.sub(r"\s*\[ref=[^\]]+\]", "", l).rstrip() for l in p.read_text().splitlines()]
+                except OSError:
+                    continue
+                txt = "\n".join(l for l in lines if keep.search(l))[:per]
+                if txt:
+                    out.append({"after": name.rsplit(".", 1)[0], "page": txt})
+        return out[-most:]
+
     def judge(brief: dict, actions: list[dict], step_results: list, state) -> CaseResult:
         from google.adk.agents import LlmAgent
         agent = LlmAgent(name="judge", model=model(settings, json_mode=True), instruction=lambda _c: instr)
@@ -50,11 +69,13 @@ def make_judge(settings: Settings, pack, memory=None):
             "values": {k: v for sr in step_results for k, v in sr.values.items()},
             "evidence": [s for sr in step_results for s in sr.screenshots],
             "steps_done": sorted({n for sr in step_results for n in sr.steps_done}),
+            "page_text_at_steps": page_text(state, step_results),
         }
         def to_result(data: dict) -> CaseResult:
             if not isinstance(data, dict):
                 raise ValueError("expected a JSON object")
             data["case_id"] = brief["case_id"]
+            data["steps_done"] = payload["steps_done"]
             data.setdefault("expected", brief.get("expected", ""))
             return CaseResult.model_validate(data)
 

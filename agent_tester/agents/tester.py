@@ -358,6 +358,29 @@ class TesterSession:
             s.result.notes, s.result.stuck, s.finished = redact(notes), stuck, True
             return {"ok": True}
 
+        def ask_user(question: str, why: str = "") -> dict:
+            """Ask the person running the test when you are genuinely unsure and the page cannot tell you
+            (e.g. which of two similar menus the case means, or whether an unexpected screen is normal).
+            Never ask for passwords or codes. At most 3 questions per case; the answer is shown in the report."""
+            from ..auto import is_auto, ask_line
+            s.asked = getattr(s, "asked", 0) + 1
+            if s.asked > 3:
+                return {"error": "question limit reached for this case; decide from the page or finish(stuck=True)"}
+            if re.search(r"password|passcode|otp|one.time|2fa|secret|token", question, re.I):
+                return {"error": "never ask for passwords or codes; use run_helper login_form or needs_manual_login"}
+            q = redact(question)
+            if is_auto() and os.environ.get("QA_WEB") != "1" and not (sys.stdin and sys.stdin.isatty()):
+                ans = ""
+            else:
+                try:
+                    ans = ask_line(f"\n[{s.case_id}] The tester asks: {q}" + (f"\n  (why: {redact(why)})" if why else "")
+                                   + "\n  Your answer (Enter = let it decide): ").strip()
+                except EOFError:
+                    ans = ""
+            s.state.log_action(case_id=s.case_id, app=s.app, tool="ask_user", args={"question": q, "answer": ans},
+                               plan_step=getattr(s, "current_step", None), inferred=False, deviation=None)
+            return {"answer": ans} if ans else {"answer": "", "note": "no answer; decide from the page and say so in notes"}
+
         def recall_lessons(query: str) -> dict:
             """Search saved lessons, recipes and known bugs for this project, e.g. "rewards apply button"."""
             if s.memory is None:
@@ -427,7 +450,7 @@ class TesterSession:
             return out
 
         tools = [record_value, calculate, request_approval, mark_step, evidence_name, get_secret, finish, recall_lessons,
-                 needs_manual_login]
+                 needs_manual_login, ask_user]
         if s.helpers and s.toolset is not None:
             tools.append(run_helper)
         # Discovery is read-only for data writes but may propose recipes; ledger only on real cases.
@@ -471,6 +494,10 @@ class TesterSession:
         limit = self._budget_check(name, args)
         if limit:
             return limit
+        if isinstance(args.get("target"), str) and args["target"].startswith("ref="):
+            args["target"] = args["target"][4:]              # models often copy "ref=e15"; the tool wants "e15"
+        if isinstance(args.get("ref"), str) and args["ref"].startswith("ref="):
+            args["ref"] = args["ref"][4:]
         if name in BLOCKED_BROWSER:
             return self._deny(name, args, "this browser tool is not allowed")
         if name in ("browser_navigate", "browser_click") and _LOGOUT.search(str(args.get("url") or args.get("element") or "")) \

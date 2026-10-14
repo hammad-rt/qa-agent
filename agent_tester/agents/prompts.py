@@ -85,7 +85,10 @@ Task:
 
 TESTER = """You are the tester for the {app_label} app ({base_url}) on {env}. Do only the steps you are given.
 
-- Use the browser tools. Read the page with browser_snapshot before clicking.
+- Use the browser tools. Read the page with browser_snapshot before clicking. Element targets are like "e15" (not "ref=e15").
+- After typing or saving, read the result back (browser_snapshot) and record_value what the field/page now shows; a typed value is not a result.
+- When the page cannot tell you something and you are genuinely unsure, call ask_user(question) instead of guessing. Never ask for passwords.
+- Always end with finish(notes) describing what you saw.
 - Call mark_step(n) as soon as each plan step is done: each new step renews your action allowance, and a case that never marks steps runs out. If a click/type result already shows the new page, don't snapshot again.
 - Don't repeat an action that didn't work; try another path or finish(stuck=True).
 - If your steps include continue_from, an earlier turn already did those steps: the browser starts fresh, so get back to where it stopped by the quickest path (use its notes), then carry on with the remaining steps.
@@ -144,6 +147,9 @@ JUDGE = """You decide the verdict for one test case. Output ONLY JSON matching C
 
 You get: the case brief (task's expected result), the action log built by code from real tool calls,
 recorded values with sources, evidence file names, and known open bugs. You do NOT get the tester's opinions.
+page_text_at_steps is the page as captured BY CODE right after each marked step (fields with their current
+values, messages, headings). Treat it as a real observation: e.g. a textbox showing "200" after typing "200.50"
+verifies masking, and an error/alert line verifies a validation message. Use it before calling a case NOT VERIFIED.
 
 Shape: {{"case_id": "TC1", "verdict": "FAIL", "known_bug": null, "expected": "...", "actual": "what really happened",
 "values": {{"wallet_after": 60}}, "evidence": ["TC1-01-wallet.png"], "note": "...", "lessons_applied": [],

@@ -136,7 +136,8 @@ def run_sites(policy, plan) -> list[str]:
 
 
 def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_run: bool,
-             retest_bug: int | None = None, email: bool = False, email_progress: bool = False) -> int:
+             retest_bug: int | None = None, email: bool = False, email_progress: bool = False,
+             fresh_plan: bool = False) -> int:
     from . import gate
     from .agents.planner import plan_task
     from .plan_checks import check_plan
@@ -180,7 +181,7 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
             print(f"No earlier run links cases to bug {retest_bug}; the planner will pick cases related to it.")
             task_text += f"\n\nRETEST MODE: plan only the cases that check this fixed bug: {hint}"
     from .modes import drafted_plan
-    draft, draft_src, draft_state = (None, None, {}) if (dry_run or retest_bug) else \
+    draft, draft_src, draft_state = (None, None, {}) if (dry_run or retest_bug or fresh_plan) else \
         drafted_plan(settings.runs_dir, task_id, skip=state.dir)
     if draft is not None and getattr(draft, "env", env) != env:
         draft = None                                  # drafted for another environment: plan again
@@ -455,14 +456,37 @@ def cmd_leftovers(run_dir: Path) -> int:
     return 0
 
 
-def cmd_rerun(settings: Settings, task_id: int, cases: str) -> int:
+def cmd_rerun(settings: Settings, task_id: int, cases: str | None, src_run: str | None = None,
+              failed: bool = False) -> int:
     """Rerun selected cases from the latest approved plan. Goes through the plan gate again."""
     from . import gate
     from .modes import filter_plan, latest_plan, parse_cases
     from .plan_checks import check_plan
     from .run_state import RunState
     from .tools.policy import from_pack
-    old, src = latest_plan(settings.runs_dir, task_id)
+    if src_run:                                   # rerun the plan of one chosen run (web: "Rerun")
+        import json as _json
+        src = Path(src_run)
+        if not src.is_absolute():
+            src = settings.runs_dir / src_run
+        try:
+            st = _json.loads((src / "state.json").read_text())
+        except (OSError, ValueError):
+            print(f"Can't read the run {src_run}.")
+            return 1
+        if not st.get("plan"):
+            print(f"Run {src.name} has no plan to rerun; start a new run instead.")
+            return 1
+        from .models import TestPlan
+        old = TestPlan.model_validate(st["plan"])
+        if failed:
+            res = st.get("results") or {}
+            cases = ",".join(c.id for c in old.cases if (res.get(c.id) or {}).get("verdict") != "PASS")
+            if not cases:
+                print(f"Every case in {src.name} passed; nothing to rerun.")
+                return 0
+    else:
+        old, src = latest_plan(settings.runs_dir, task_id)
     if old is None:
         print(f"No approved plan for #{task_id} yet; use `test {task_id}` first.")
         return 1
@@ -791,11 +815,14 @@ def _main(argv=None) -> int:
     t.add_argument("--env", default=None, help="staging, pre-prod or production (asked if not given)")
     t.add_argument("--headed", action="store_true", help="show the testers' browser windows (debugging)")
     t.add_argument("--dry-run", action="store_true", help="plan and questions only")
+    t.add_argument("--fresh-plan", action="store_true", help="plan again even if a plan-only draft exists")
     t.add_argument("--email", action="store_true", help="email the report to REPORT_EMAIL_TO")
     t.add_argument("--email-progress", action="store_true", help="also email start, halfway, pause and finish")
     rr = sub.add_parser("rerun")
     rr.add_argument("task_id", type=int)
-    rr.add_argument("--cases", required=True)
+    rr.add_argument("--cases", default=None, help="default: all cases of the plan")
+    rr.add_argument("--from", dest="src_run", default=None, help="run folder whose plan to rerun (default: latest approved)")
+    rr.add_argument("--failed", action="store_true", help="only the cases that did not PASS in --from")
     rr.add_argument("--headed", action="store_true", help="show the testers' browser windows")
     wp = sub.add_parser("web", help="open the web UI (runs, live steps, reports)")
     wp.add_argument("--port", type=int, default=8765)
@@ -866,9 +893,10 @@ def _main(argv=None) -> int:
                 if not confirm_prod():
                     return 2
             a.env = env
-        return cmd_test(settings, a.task_id, a.case, a.env, a.dry_run, a.retest_bug, a.email, a.email_progress)
+        return cmd_test(settings, a.task_id, a.case, a.env, a.dry_run, a.retest_bug, a.email, a.email_progress,
+                        fresh_plan=a.fresh_plan)
     if a.cmd == "rerun":
-        return cmd_rerun(settings, a.task_id, a.cases)
+        return cmd_rerun(settings, a.task_id, a.cases, a.src_run, a.failed)
     if a.cmd == "web":
         from .web.server import serve
         return serve(a.host, a.port)

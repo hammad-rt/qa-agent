@@ -358,7 +358,27 @@ class Handler(BaseHTTPRequestHandler):
             if parts == ["api", "start"]:
                 if any(j.proc.poll() is None for j in JOBS.values()):
                     return self._send(409, {"error": "a run is already going; stop it or wait for it to finish"})
-                if b.get("resume"):
+                if b.get("rerun"):
+                    d = self._run(str(b["rerun"]))
+                    if not d:
+                        return self._send(404, {"error": "no such run"})
+                    task = d.name.split("-")[0]
+                    args = ["rerun", task, "--from", str(d)]
+                    if str(b.get("cases") or "").strip():
+                        args += ["--cases", str(b["cases"]).replace(" ", "")]
+                    elif b.get("failed"):
+                        args.append("--failed")
+                elif b.get("fresh"):
+                    d = self._run(str(b["fresh"]))
+                    if not d:
+                        return self._send(404, {"error": "no such run"})
+                    env = "staging"
+                    try:
+                        env = (json.loads((d / "state.json").read_text()).get("plan") or {}).get("env") or env
+                    except (OSError, ValueError):
+                        pass
+                    args = ["test", d.name.split("-")[0], "--env", env, "--fresh-plan"]
+                elif b.get("resume"):
                     d = self._run(str(b["resume"]))
                     if not d:
                         return self._send(404, {"error": "no such run"})

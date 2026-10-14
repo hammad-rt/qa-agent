@@ -62,7 +62,7 @@ iframe{width:100%;height:78vh;border:1px solid var(--line);border-radius:8px;bac
 </aside>
 <main>
   <div class="head"><div><h2 id="title">Pick a run or start one</h2><div id="sub" class="mute"></div></div>
-    <div class="row" style="flex:0 0 auto"><button id="resumeBtn" onclick="resume()" style="display:none">Resume</button><button id="stopBtn" class="dan" onclick="stopJob()" style="display:none">Stop</button></div></div>
+    <div class="row" style="flex:0 0 auto"><button id="resumeBtn" onclick="resume()" style="display:none">Resume</button><span id="rerunBtns" style="display:none"><button onclick="rerun({})" title="Run every case again from the start, same plan">↻ Rerun all</button><button onclick="rerun({failed:true})" title="Run again only the cases that did not pass">↻ Rerun not passed</button><button onclick="fresh()" title="Plan this task again from scratch, then run">New plan</button></span><button id="stopBtn" class="dan" onclick="stopJob()" style="display:none">Stop</button></div></div>
   <div class="tabs"><div class="tab on" data-p="live">Live</div><div class="tab" data-p="cases">Cases</div><div class="tab" data-p="shots">Screenshots</div><div class="tab" data-p="log">Actions</div><div class="tab" data-p="report">Report</div><div class="tab" data-p="know">Knowledge</div><div class="tab" data-p="mem">Memory</div></div>
   <div id="live" class="pane on">
     <div id="askBox"></div>
@@ -96,6 +96,12 @@ async function loadRuns(){try{const rs=await api('/api/runs');const ids=new Set(
  setHTML('#runs',(rs.length?bar:'')+rs.map(r=>`<div class="run ${r.id==cur?'sel':''}" onclick="openRun('${r.id}')"><div class="t"><input type="checkbox" class="rsel" ${sel.has(r.id)?'checked':''} onclick="event.stopPropagation();togSel('${r.id}',this.checked)"> #${esc(r.task)} <span class="pill ${r.status}">${esc(r.status)}</span><span class="racts"><button class="sm" title="Rename" onclick="event.stopPropagation();renameRun('${r.id}')">✎</button><button class="sm dan" title="Delete" onclick="event.stopPropagation();delRun('${r.id}')">✕</button></span></div>${r.label?`<div class="lbl">${esc(r.label)}</div>`:''}<div class="mute">${esc(r.env||'')} · ${r.done}/${r.cases} cases · ${esc((r.started||'').replace('T',' '))}</div><div>${pills(r.counts)}</div></div>`).join('')||'<div class="empty">No runs yet.</div>')}catch(e){}}
 function openRun(id){if(cur!==id){cur=id;traceNext=0;blocks=[];openBlock=null;$('#events').innerHTML='';}loadRuns();refresh()}
 async function start(dry){$('#startErr').textContent='';try{job=await api('/api/start',{task:$('#task').value,env:$('#env').value,cases:$("#caseIds").value,dry_run:dry});outLen=0;$('#console').textContent='';cur=null;$('#events').innerHTML='';$('#title').textContent='Starting #'+$('#task').value+'…';pollJob()}catch(e){$('#startErr').textContent=e.message}}
+async function rerun(o){if(!cur)return;if(job&&job.running){alert('A run is still going; stop it or wait for it to finish.');return}
+ const what=o.cases?'case '+o.cases:o.failed?'the cases that did not pass':'all cases';if(!confirm('Rerun '+what+' from the start with this plan?'))return;
+ try{job=await api('/api/start',{rerun:cur,...o});outLen=0;$('#console').textContent='';cur=null;$('#events').innerHTML='';$('#title').textContent='Rerunning…';pollJob()}catch(e){alert(e.message||e)}}
+async function fresh(){if(!cur)return;if(job&&job.running){alert('A run is still going; stop it or wait for it to finish.');return}
+ if(!confirm('Plan this task again from scratch and run it?'))return;
+ try{job=await api('/api/start',{fresh:cur});outLen=0;$('#console').textContent='';cur=null;$('#events').innerHTML='';$('#title').textContent='Planning again…';pollJob()}catch(e){alert(e.message||e)}}
 async function resume(){try{job=await api('/api/start',{resume:cur});outLen=0;$('#console').textContent='';pollJob()}catch(e){alert(e.message)}}
 async function stopJob(){if(job&&confirm('Stop this run? It pauses and can be resumed.'))job=await api(`/api/jobs/${job.id}/stop`,{})}
 async function answer(){const i=$('#ans');await api(`/api/jobs/${job.id}/input`,{text:i.value});$('#askBox').innerHTML='';$('#askBox').dataset.p=''}
@@ -148,12 +154,12 @@ async function refresh(){if(!cur)return;let d;
  try{d=await api(`/api/runs/${cur}`)}catch(e){return}
  lastPlan=d.plan;picked=(d.mode||{}).cases||null;
  try{const s=d.summary;setHTML('#title',`#${esc(s.task)} on ${esc(s.env||'')} <span class="pill ${s.status}">${esc(s.status)}</span>`);
-  setHTML('#sub',`${s.done}/${s.cases} cases ${pills(s.counts)} · ${esc(s.last||'')}`);$('#resumeBtn').style.display=(s.status=='paused'&&!(job&&job.running))?'':'none'}catch(e){console.error(e)}
+  setHTML('#sub',`${s.done}/${s.cases} cases ${pills(s.counts)} · ${esc(s.last||'')}`);$('#resumeBtn').style.display=(s.status=='paused'&&!(job&&job.running))?'':'none';$('#rerunBtns').style.display=(s.status!='running'&&!(job&&job.running))?'':'none'}catch(e){console.error(e)}
  const key=JSON.stringify(d);if(key!==lastDetail){lastDetail=key;try{render(d)}catch(e){console.error('render',e)}}
  try{const t=await api(`/api/runs/${cur}/trace?since=${traceNext}`);if(!traceNext){blocks=[];openBlock=null}
   if(t.lines.length){for(const ln of t.lines){try{addEvent(ln)}catch(e){console.error('event',e,ln)}}traceNext=t.next;drawBlocks()}}catch(e){console.error('trace',e)}}
 function render(d){const res=d.results||{};d.shots=d.shots||[];d.reports=d.reports||[];d.action_log=d.action_log||[];
- setHTML('#cases',((d.plan||{}).cases||[]).map(c=>{const r=res[c.id]||{};return `<div class="case"><h2>${esc(c.id)} · ${esc(c.title)} ${r.verdict?`<span class="pill ${r.verdict.split(' ')[0]}">${esc(r.verdict)}</span>`:'<span class="pill">pending</span>'}</h2>
+ setHTML('#cases',((d.plan||{}).cases||[]).map(c=>{const r=res[c.id]||{};return `<div class="case"><h2>${esc(c.id)} · ${esc(c.title)} ${r.verdict?`<span class="pill ${r.verdict.split(' ')[0]}">${esc(r.verdict)}</span>`:'<span class="pill">pending</span>'} <button class="sm" style="float:right" onclick="rerun({cases:'${esc(c.id)}'})" title="Rerun only this case with the same plan">↻ Rerun</button></h2>
  <ol>${(c.steps||[]).map(st=>typeof st=='string'?`<li>${esc(st)}</li>`:`<li>[${esc(st.app)}] ${esc(st.text)} ${st.inferred?'<span class="inf">inferred</span>':''} ${st.changes_data?'<span class="chg">changes data</span>':''}</li>`).join('')}</ol>
  <div><b>Expected:</b> ${esc(c.expected)}</div>${r.actual?`<div><b>Actual:</b> ${esc(r.actual)}</div>`:''}${r.note?`<div><b>Notes:</b> ${esc(r.note)}</div>`:''}
  ${r.values&&Object.keys(r.values).length?`<div><b>Values:</b> ${Object.entries(r.values).map(([k,v])=>`${esc(k)}=<code>${esc(typeof v=='object'?v.value??JSON.stringify(v):v)}</code>`).join(' ')}</div>`:''}</div>`}).join('')||'<div class="empty">No plan yet.</div>');

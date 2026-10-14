@@ -22,3 +22,11 @@ class WebUI(unittest.TestCase):
 
     def test_run_dir_from_output(self):
         self.assertEqual(W._run_dir_from("Pack: x. Run folder: /a/runs/182941-20261014-1\n"), "182941-20261014-1")
+
+
+class KnowledgeApi(unittest.TestCase):
+    def test_knowledge_lists_pack_learned(self):
+        from agent_tester.web.server import knowledge
+        k = {x["pack"]: x for x in knowledge()}
+        self.assertIn("savostore", k)
+        self.assertIn("## ", k["savostore"]["learned"])

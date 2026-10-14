@@ -20,6 +20,20 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNS = ROOT / "runs"
+PACKS = ROOT / "packs"
+
+
+def knowledge() -> list[dict]:
+    """Each pack's self-built knowledge base (learned.md) plus its hand-written facts.md, read-only facts."""
+    out = []
+    for p in sorted(PACKS.iterdir()) if PACKS.exists() else []:
+        if p.name.startswith("_") or not (p / "pack.yaml").exists():
+            continue
+        lf, ff = p / "learned.md", p / "facts.md"
+        out.append({"pack": p.name, "learned": lf.read_text() if lf.is_file() else "",
+                    "facts": ff.read_text() if ff.is_file() else "",
+                    "updated": lf.stat().st_mtime if lf.is_file() else None})
+    return out
 STATIC = Path(__file__).with_name("index.html")
 JOBS: dict[str, "Job"] = {}
 SECRET_WORDS = ("password", "secret", "token", "api key")
@@ -173,6 +187,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, [run_summary(d) for d in ds[:100]])
             if parts == ["api", "jobs"]:
                 return self._send(200, [j.info(len(j.out)) for j in JOBS.values()])
+            if parts == ["api", "knowledge"]:
+                return self._send(200, knowledge())
             if len(parts) >= 3 and parts[:2] == ["api", "runs"]:
                 d = self._run(parts[2])
                 if not d:
@@ -197,6 +213,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             parts = [p for p in urlparse(self.path).path.split("/") if p]
             b = self._body()
+            if parts == ["api", "knowledge"]:
+                name = str(b.get("pack", ""))
+                d = (PACKS / name).resolve()
+                if not name or d.parent != PACKS.resolve() or not (d / "pack.yaml").exists():
+                    return self._send(404, {"error": "no such pack"})
+                text = str(b.get("learned", ""))
+                if len(text) > 200_000:
+                    return self._send(400, {"error": "too long"})
+                (d / "learned.md").write_text(text if text.endswith("\n") else text + "\n")
+                return self._send(200, {"ok": True})
             if parts == ["api", "start"]:
                 if any(j.proc.poll() is None for j in JOBS.values()):
                     return self._send(409, {"error": "a run is already going; stop it or wait for it to finish"})

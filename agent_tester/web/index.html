@@ -41,6 +41,9 @@ iframe{width:100%;height:78vh;border:1px solid var(--line);border-radius:8px;bac
 .verdict div{margin:2px 0}.say{color:#c9cfdb;font-size:13px;margin:6px 0;white-space:pre-wrap}
 .toolbar{display:flex;gap:14px;align-items:center;margin-bottom:10px}.toolbar label{color:var(--mute);font-size:12px}
 .ev.read{opacity:.55}.hideReads .ev.read{display:none}
+.kn h3{font-size:14px;margin:14px 0 6px;color:var(--accent,#7aa2ff)}.kn ul{margin:0 0 8px 18px;padding:0}.kn li{margin:3px 0}
+.kn .new{color:#7ee2a8}.kn textarea{width:100%;min-height:420px;font-family:ui-monospace,monospace;font-size:12px}
+.kn .bar{display:flex;gap:8px;align-items:center;margin-bottom:8px}.kn details{margin-top:14px}
 </style></head><body>
 <aside>
   <h1>QA Agent</h1>
@@ -55,13 +58,13 @@ iframe{width:100%;height:78vh;border:1px solid var(--line);border-radius:8px;bac
 <main>
   <div class="head"><div><h2 id="title">Pick a run or start one</h2><div id="sub" class="mute"></div></div>
     <div class="row" style="flex:0 0 auto"><button id="resumeBtn" onclick="resume()" style="display:none">Resume</button><button id="stopBtn" class="dan" onclick="stopJob()" style="display:none">Stop</button></div></div>
-  <div class="tabs"><div class="tab on" data-p="live">Live</div><div class="tab" data-p="cases">Cases</div><div class="tab" data-p="shots">Screenshots</div><div class="tab" data-p="log">Actions</div><div class="tab" data-p="report">Report</div></div>
+  <div class="tabs"><div class="tab on" data-p="live">Live</div><div class="tab" data-p="cases">Cases</div><div class="tab" data-p="shots">Screenshots</div><div class="tab" data-p="log">Actions</div><div class="tab" data-p="report">Report</div><div class="tab" data-p="know">Knowledge</div></div>
   <div id="live" class="pane on">
     <div id="askBox"></div>
     <div id="consoleWrap" style="display:none"><div class="mute">Agent console</div><pre class="console" id="console"></pre></div>
     <div class="toolbar"><b>Steps</b><label><input type="checkbox" id="showReads" onchange="$('#events').classList.toggle('hideReads',!this.checked)"> show page reads</label><label><input type="checkbox" id="follow" checked> follow live</label></div><div id="events" class="hideReads"><div class="empty">No steps yet.</div></div>
   </div>
-  <div id="cases" class="pane"></div>
+  <div id="cases" class="pane"></div><div id="know" class="pane"></div>
   <div id="shots" class="pane"></div>
   <div id="log" class="pane"></div>
   <div id="report" class="pane"></div>
@@ -145,5 +148,18 @@ function zoom(src){$('#zoom img').src=src;$('#zoom').style.display='flex'}
 (async()=>{const js=await api('/api/jobs');job=js.find(j=>j.running)||null;if(job)pollJob();loadRuns()})();
 setInterval(pollJob,1000);setInterval(refresh,2000);setInterval(loadRuns,5000);
 
+let know=[],knowEdit=null;
+async function loadKnow(){try{know=await api('/api/knowledge')}catch(e){$('#know').innerHTML='<div class="mute">Could not load: '+esc(e.message||e)+'</div>';return}drawKnow()}
+function drawKnow(){const today=new Date().toISOString().slice(0,10);
+ $('#know').innerHTML=know.map((k,i)=>{
+  const head=`<div class="bar"><h2 style="margin:0">${esc(k.pack)}</h2><span class="mute">${k.updated?'updated '+new Date(k.updated*1000).toLocaleString():'nothing learned yet'}</span>
+   <span style="flex:1"></span>${knowEdit===i?`<button class="pri" onclick="saveKnow(${i})">Save</button><button onclick="knowEdit=null;drawKnow()">Cancel</button>`:`<button onclick="knowEdit=${i};drawKnow()">Edit</button>`}</div>`;
+  if(knowEdit===i)return `<div class="kn">${head}<textarea id="knowText">${esc(k.learned)}</textarea></div>`;
+  const secs=[];let cur=null;for(const ln of (k.learned||'').split('\n')){if(ln.startsWith('## ')){cur={h:ln.slice(3),items:[]};secs.push(cur)}else if(cur&&ln.startsWith('- '))cur.items.push(ln.slice(2))}
+  const body=secs.length?secs.map(s=>{const [area,app]=[s.h.slice(0,s.h.lastIndexOf(':')),s.h.slice(s.h.lastIndexOf(':')+1)];
+    return `<h3>${esc(area.replace(/_/g,' '))} <span class="mute">on ${esc(app)}</span></h3><ul>${s.items.map(t=>`<li class="${t.includes(today)?'new':''}">${esc(t)}</li>`).join('')}</ul>`}).join(''):'<div class="mute">Nothing learned yet. Routes and discovery notes appear here after a run.</div>';
+  return `<div class="kn">${head}${body}<details><summary class="mute">Hand-written facts (facts.md, read-only)</summary><pre style="white-space:pre-wrap">${esc(k.facts)}</pre></details></div>`}).join('<hr>')||'<div class="mute">No packs found.</div>'}
+async function saveKnow(i){try{await api('/api/knowledge',{pack:know[i].pack,learned:$('#knowText').value});knowEdit=null;await loadKnow()}catch(e){alert('Save failed: '+(e.message||e))}}
+document.querySelectorAll('.tab').forEach(t=>{if(t.dataset.p==='know')t.addEventListener('click',loadKnow)});
 setTimeout(()=>{const m=location.hash.match(/run=([\w-]+)/);if(m)openRun(m[1]);const t=location.hash.match(/tab=(\w+)/);if(t){const b=[...document.querySelectorAll('.tab')].find(x=>x.dataset.p==t[1]);if(b)b.click()}},300);
 </script></body></html>

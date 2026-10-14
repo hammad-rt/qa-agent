@@ -16,7 +16,7 @@ def enforce_rules(r: CaseResult, brief: dict, actions: list[dict], step_results:
     """Fixed checks on top of the judge's call."""
     shots = [s for sr in step_results for s in sr.screenshots]
     r.evidence = r.evidence or shots
-    if r.verdict == "PASS" and brief.get("evidence_required") and not shots:
+    if r.verdict == "PASS" and not shots:
         r.verdict, r.note = "NOT VERIFIED", ((r.note or "") + " Required evidence missing.").strip()
     if r.verdict == "FAIL" and not (r.actual or r.values):
         r.verdict, r.note = "NOT VERIFIED", ((r.note or "") + " FAIL without expected vs actual.").strip()

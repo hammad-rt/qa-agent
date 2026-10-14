@@ -147,7 +147,9 @@ class LedgerTests(unittest.TestCase):
     def test_judge_flags_unrestored(self):
         from agent_tester.agents.judge import enforce_rules
         self.led.record_original("TC9", "crm", "threshold", "150")
-        r = enforce_rules(CaseResult(case_id="TC9", verdict="PASS", note="ok"), {}, [], [], self.led.unrestored("TC9"))
+        from types import SimpleNamespace
+        shot = [SimpleNamespace(screenshots=["TC9_final.png"])]
+        r = enforce_rules(CaseResult(case_id="TC9", verdict="PASS", note="ok"), {}, [], shot, self.led.unrestored("TC9"))
         self.assertEqual(r.verdict, "PARTIAL")
         self.assertIn("not restored", r.note)
 
@@ -246,3 +248,15 @@ class ReportPhase3(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProofRule(unittest.TestCase):
+    def test_pass_without_any_screenshot_is_not_verified(self):
+        from agent_tester.agents.judge import enforce_rules
+        r = enforce_rules(CaseResult(case_id="TC1", verdict="PASS", note="ok"), {}, [], [], [])
+        self.assertEqual(r.verdict, "NOT VERIFIED")
+
+    def test_page_body_ignores_refs(self):
+        from agent_tester.agents.tester import _page_body
+        self.assertEqual(_page_body("button Save [ref=e12]"), _page_body("button Save [ref=e98]"))
+        self.assertNotEqual(_page_body("Total 200"), _page_body("Total 250"))

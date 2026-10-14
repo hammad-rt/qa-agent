@@ -11,6 +11,8 @@ from . import raw_calls
 from urllib.parse import urlparse
 import os
 import time
+import logging
+log = logging.getLogger(__name__)
 from pathlib import Path
 
 from ..config import Settings
@@ -222,6 +224,14 @@ def playwright_toolset(run_dir: Path, app: str):
         server_params=StdioServerParameters(command="npx", args=args, env=browser_env()), timeout=60))
 
 
+AUTO_SHOT_SETTLE = float(os.environ.get("AUTO_SHOT_SETTLE", "1.5"))
+
+
+def _page_body(snap: str) -> str:
+    """Snapshot text without element refs, so only real page changes count."""
+    return re.sub(r"\[ref=[^\]]*\]", "", snap or "")
+
+
 class TesterSession:
     """Holds the per-turn bookkeeping that the callbacks and tool functions share."""
 
@@ -288,9 +298,12 @@ class TesterSession:
                                    plan_step=s.current_step, approval="denied", outcome=str(e))
                 return {"approved": False, "reason": str(e)}
 
-        def mark_step(n: int, deviation: str = "", inferred: bool = False, reason: str = "") -> dict:
-            """Mark plan step n as done. Describe any difference from the plan in deviation."""
+        async def mark_step(n: int, tool_context, deviation: str = "", inferred: bool = False,
+                            reason: str = "") -> dict:
+            """Mark plan step n as done. Describe any difference from the plan in deviation.
+            A proof screenshot of the page is taken automatically."""
             s.current_step = n
+            await s.auto_shot(f"step{n}", tool_context)
             if n not in s.result.steps_done:
                 s.result.steps_done.append(n)
             s.state.log_action(case_id=s.case_id, app=s.app, tool="mark_step", args={"n": n, "reason": reason},
@@ -316,8 +329,10 @@ class TesterSession:
             s.result.notes, s.result.stuck, s.finished = f"needs a manual login: {s.result.needs_login}", True, True
             return {"ok": True, "next": "stop now; a person will log in and the case will be retried"}
 
-        def finish(notes: str, stuck: bool = False) -> dict:
-            """Call when your steps are done, or when you are stuck and cannot continue."""
+        async def finish(notes: str, tool_context, stuck: bool = False) -> dict:
+            """Call when your steps are done, or when you are stuck and cannot continue.
+            A final proof screenshot is taken automatically."""
+            await s.auto_shot("final", tool_context)
             s.result.notes, s.result.stuck, s.finished = redact(notes), stuck, True
             return {"ok": True}
 
@@ -514,6 +529,39 @@ class TesterSession:
         if over_time:
             self.result.limit_hit = True
             return {"error": "Limit reached. Call finish() now with what you have, saying which step you reached."}
+        return None
+
+    async def auto_shot(self, what: str, tool_context) -> str | None:
+        """Code-taken proof screenshot (never left to the model). Waits for the page to settle, then checks the
+        page did not change while the shot was taken (staging screenshots can lag a step); retakes once if so.
+        Never raises: a failed shot must not fail the case."""
+        if self.toolset is None or tool_context is None:
+            return None
+        from ..helpers import adk_caller
+        call = adk_caller(self.toolset, tool_context)
+        try:
+            png, txt = self.ev.paths(self.case_id, what)
+            self.ev.shots.mkdir(parents=True, exist_ok=True)
+            for attempt in range(2):
+                try:
+                    await call("browser_wait_for", {"time": AUTO_SHOT_SETTLE})
+                except Exception:
+                    pass
+                before = str(await call("browser_snapshot", {}) or "")
+                await call("browser_take_screenshot", {"filename": str(png.resolve()), "type": "png"})
+                after = str(await call("browser_snapshot", {}) or "")
+                if _page_body(before) == _page_body(after):
+                    break
+            self.last_snapshot = after or before
+            if self.last_snapshot:
+                self.ev.save_snapshot(txt, self.last_snapshot, keep_emails=self.keep_emails)
+                if txt.name not in self.result.snapshots:
+                    self.result.snapshots.append(txt.name)
+            if png.is_file() and png.name not in self.result.screenshots:
+                self.result.screenshots.append(png.name)
+                return png.name
+        except Exception as e:  # noqa: BLE001
+            log.warning("auto screenshot %s failed: %s", what, e)
         return None
 
     def _fix_screenshot_args(self, args: dict) -> None:

@@ -28,22 +28,24 @@ def show_plan(plan: TestPlan, issues: list[str], out=print) -> None:
             out(f"  - {i}")
 
 
-def ask_batch(reqs, ctx, input_fn=None, secret_fn=getpass.getpass, write_secret=None, out=print) -> None:
+def ask_batch(reqs, ctx, input_fn=None, secret_fn=None, write_secret=None, out=print) -> None:
     from .config import write_env_secret
     from .auto import prompter, is_auto
+    from .auto import secret_input, ask_line
     input_fn = input_fn or prompter("")
+    secret_fn = secret_fn or secret_input
     qs = G.open_questions(reqs)
     if not qs:
         return
     out("\nI need a few things before I start:")
     answers = {}
     for n, r in enumerate(qs, 1):
-        out(f"  {n}. {r.question}")
         if r.kind == "account" and r.value and r.default is None:
+            out(f"  {n}. {r.question}")
             answers[r.key] = ""          # only the masked password is needed
             continue
         # the test user is always asked, even in automatic mode
-        answers[r.key] = (input if (r.kind == "account" and is_auto()) else input_fn)(f"     > ")
+        answers[r.key] = (ask_line if (r.kind == "account" and is_auto()) else input_fn)(f"  {n}. {r.question}\n     > ")
     G.apply_answers(reqs, answers, ctx, secret_prompt=secret_fn, write_secret=write_secret or write_env_secret)
 
 
@@ -75,7 +77,9 @@ def confirm_prod(input_fn=None, out=print) -> bool:
     return input_fn("  Test on production? [y/N] ").strip().lower() in ("y", "yes")
 
 
-def console_approver(input_fn=input, out=print):
+def console_approver(input_fn=None, out=print):
+    from .auto import ask_line
+    input_fn = input_fn or ask_line
     def approve(action: str, reason: str, details: dict) -> bool:
         out(f"\nAPPROVAL NEEDED ({reason}): {action}")
         return input_fn("  Allow? [y/N] ").strip().lower() in ("y", "yes")

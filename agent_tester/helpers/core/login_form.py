@@ -105,11 +105,12 @@ async def run(browser, ctx, account: str, path: str = ""):
         return await _attempt(browser, ctx, account, path)
     except LoginRejected as e:
         env_name = ctx.account(account).get("password_env")
-        if not (env_name and sys.stdin and sys.stdin.isatty()):
+        from agent_tester.auto import web_mode, secret_input
+        if not (env_name and sys.stdin and (sys.stdin.isatty() or web_mode())):
             raise
         # Ask the person for the password again (masked) and retry once before giving up.
         print(f"\n{e}\nThe saved password may be wrong.")
-        pw = getpass.getpass(f"Re-enter the password for {ctx.account(account)['username']} ({env_name}), "
+        pw = secret_input(f"Re-enter the password for {ctx.account(account)['username']} ({env_name}), "
                              "or press Enter to skip: ")
         if not pw:
             raise

@@ -99,6 +99,8 @@ class Job:
         self.args = args
         self.started = time.time()
         self.out = ""
+        self.pending: dict | None = None      # the question the run is waiting on (from an ASK marker line)
+        self._buf = ""
         self.lock = threading.Lock()
         env = {**os.environ, "PYTHONUNBUFFERED": "1", "QA_WEB": "1"}
         self.proc = subprocess.Popen([sys.executable, "-u", "-m", "agent_tester", *args], cwd=ROOT,
@@ -112,26 +114,68 @@ class Job:
             chunk = os.read(fd, 4096)
             if not chunk:
                 break
-            with self.lock:
-                self.out += chunk.decode("utf-8", "replace")
+            self._feed(chunk.decode("utf-8", "replace"))
+        with self.lock:
+            self.out += self._buf
+            self._buf = ""
+
+    def _feed(self, text: str):
+        """Marker lines become a readable question (no newline, the answer is echoed after it) and set pending.
+        Other text goes straight to the console; a partial line is held only while it could be a marker."""
+        from ..auto import ASK_MARK
+        with self.lock:
+            self._buf += text
+            while self._buf:
+                if self._buf.startswith(ASK_MARK):
+                    if "\n" not in self._buf:
+                        break
+                    line, self._buf = self._buf.split("\n", 1)
+                    try:
+                        q = json.loads(line[len(ASK_MARK):])
+                    except ValueError:
+                        q = {"prompt": line[len(ASK_MARK):], "secret": False}
+                    q["secret"] = bool(q.get("secret")) or any(w in str(q.get("prompt", "")).lower() for w in SECRET_WORDS)
+                    self.pending = q
+                    if self.out and not self.out.endswith("\n"):
+                        self.out += "\n"
+                    self.out += str(q.get("prompt", "")) + " "
+                    continue
+                i = self._buf.find(ASK_MARK)
+                if i == -1:
+                    keep = 0
+                    for k in range(1, len(ASK_MARK)):          # a marker may be split across reads
+                        if self._buf.endswith(ASK_MARK[:k]):
+                            keep = k
+                    self.out += self._buf[:len(self._buf) - keep]
+                    self._buf = self._buf[len(self._buf) - keep:]
+                    break
+                self.out += self._buf[:i]
+                self._buf = self._buf[i:]
 
     def info(self, since: int = 0) -> dict:
         with self.lock:
             text = self.out
-        tail = text.rstrip().splitlines()[-1] if text.strip() else ""
-        waiting = self.proc.poll() is None and not text.endswith("\n") and bool(tail)
+        running = self.proc.poll() is None
+        if self.pending and running:
+            waiting, prompt, secret = True, str(self.pending.get("prompt", "")), bool(self.pending.get("secret"))
+        else:  # fallback for any prompt that did not come through ask_line
+            tail = text.rstrip().splitlines()[-1] if text.strip() else ""
+            waiting = running and not text.endswith("\n") and bool(tail)
+            prompt, secret = (tail if waiting else ""), waiting and any(w in tail.lower() for w in SECRET_WORDS)
         return {"id": self.id, "args": self.args, "started": self.started, "running": self.proc.poll() is None,
                 "code": self.proc.poll(), "out": text[since:], "len": len(text), "waiting": waiting,
-                "secret": waiting and any(w in tail.lower() for w in SECRET_WORDS), "prompt": tail if waiting else "",
+                "secret": secret, "prompt": prompt,
                 "run_dir": _run_dir_from(text)}
 
     def answer(self, text: str):
         if self.proc.poll() is None:
+            info = self.info()
+            secret = info["secret"]
             self.proc.stdin.write((text + "\n").encode())
             self.proc.stdin.flush()
-            secret = any(w in self.info()["prompt"].lower() for w in SECRET_WORDS)
             with self.lock:
-                self.out += ("********" if secret else text) + "\n"
+                self.pending = None
+                self.out += ("********" if secret and text else text) + "\n"
 
     def stop(self):
         if self.proc.poll() is None:
@@ -260,7 +304,7 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "out":
                 j = JOBS.get(parts[2])
                 return self._send(200, j.info(int(q.get("since", 0)))) if j else self._send(404, {"error": "no job"})
-            return self._send(404, {"error": "not found"})
+            return self._send(404, {"error": "unknown endpoint: this server is older than the page. Stop agent_tester web and start it again."})
         except Exception as e:  # noqa: BLE001
             return self._send(500, {"error": f"{type(e).__name__}: {e}"})
 
@@ -290,7 +334,7 @@ class Handler(BaseHTTPRequestHandler):
                         return self._send(404, {"error": "no such screenshot"})
                     f.unlink()
                     return self._send(200, {"ok": True})
-                return self._send(404, {"error": "not found"})
+                return self._send(404, {"error": "unknown endpoint: this server is older than the page. Stop agent_tester web and start it again."})
             if parts == ["api", "runs", "delete_many"]:
                 done, skipped = [], []
                 import shutil
@@ -340,7 +384,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif parts[3] == "stop":
                     j.stop()
                 return self._send(200, j.info(len(j.out)))
-            return self._send(404, {"error": "not found"})
+            return self._send(404, {"error": "unknown endpoint: this server is older than the page. Stop agent_tester web and start it again."})
         except Exception as e:  # noqa: BLE001
             return self._send(500, {"error": f"{type(e).__name__}: {e}"})
 

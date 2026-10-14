@@ -135,6 +135,11 @@ def run_sites(policy, plan) -> list[str]:
     return hosts
 
 
+def parse_cases_early(case):
+    from .modes import parse_cases
+    return parse_cases(case)
+
+
 def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_run: bool,
              retest_bug: int | None = None, email: bool = False, email_progress: bool = False,
              fresh_plan: bool = False) -> int:
@@ -162,6 +167,9 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
     if generate:
         print("No 'Test Cases - ...' task found; I'll write the cases from the task description for you to review.")
     state = RunState.new(settings.runs_dir, task_id)
+    state.data["env"] = env                       # known even if the run is stopped before planning
+    state.data["mode"] = {"cases": parse_cases_early(case)}
+    state.save()
     print(f"Pack: {pack.slug}. Run folder: {state.dir}")
 
     from .reliability import free_gb

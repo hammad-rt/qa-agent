@@ -363,8 +363,15 @@ class Handler(BaseHTTPRequestHandler):
                     if not d:
                         return self._send(404, {"error": "no such run"})
                     task = d.name.split("-")[0]
+                    st = _read_json(d / "state.json", {}) or {}
                     args = ["rerun", task, "--from", str(d)]
-                    if str(b.get("cases") or "").strip():
+                    if not st.get("plan"):          # cancelled before planning: start the same task again
+                        env = st.get("env") or "staging"
+                        args = ["test", task, "--env", str(env)]
+                        only = (st.get("mode") or {}).get("cases") or []
+                        if only:
+                            args += ["--cases", ",".join(only)]
+                    elif str(b.get("cases") or "").strip():
                         args += ["--cases", str(b["cases"]).replace(" ", "")]
                     elif b.get("failed"):
                         args.append("--failed")

@@ -62,7 +62,7 @@ iframe{width:100%;height:78vh;border:1px solid var(--line);border-radius:8px;bac
 </aside>
 <main>
   <div class="head"><div><h2 id="title">Pick a run or start one</h2><div id="sub" class="mute"></div></div>
-    <div class="row" style="flex:0 0 auto"><button id="resumeBtn" onclick="resume()" style="display:none">Resume</button><span id="rerunBtns" style="display:none"><button onclick="rerun({})" title="Run every case again from the start, same plan">↻ Rerun all</button><button onclick="rerun({failed:true})" title="Run again only the cases that did not pass">↻ Rerun not passed</button><button onclick="fresh()" title="Plan this task again from scratch, then run">New plan</button></span><button id="stopBtn" class="dan" onclick="stopJob()" style="display:none">Stop</button></div></div>
+    <div class="row" style="flex:0 0 auto"><button id="resumeBtn" onclick="resume()" style="display:none">Resume</button><span id="rerunBtns" style="display:none"><button id="rerunAll" onclick="rerun({})" title="Run every case again from the start, same plan">↻ Rerun all</button><button id="rerunFailed" onclick="rerun({failed:true})" title="Run again only the cases that did not pass">↻ Rerun not passed</button><button onclick="fresh()" title="Plan this task again from scratch, then run">New plan</button></span><button id="stopBtn" class="dan" onclick="stopJob()" style="display:none">Stop</button></div></div>
   <div class="tabs"><div class="tab on" data-p="live">Live</div><div class="tab" data-p="cases">Cases</div><div class="tab" data-p="shots">Screenshots</div><div class="tab" data-p="log">Actions</div><div class="tab" data-p="report">Report</div><div class="tab" data-p="know">Knowledge</div><div class="tab" data-p="mem">Memory</div></div>
   <div id="live" class="pane on">
     <div id="askBox"></div>
@@ -97,7 +97,7 @@ async function loadRuns(){try{const rs=await api('/api/runs');const ids=new Set(
 function openRun(id){if(cur!==id){cur=id;traceNext=0;blocks=[];openBlock=null;$('#events').innerHTML='';}loadRuns();refresh()}
 async function start(dry){$('#startErr').textContent='';try{job=await api('/api/start',{task:$('#task').value,env:$('#env').value,cases:$("#caseIds").value,dry_run:dry});outLen=0;$('#console').textContent='';cur=null;$('#events').innerHTML='';$('#title').textContent='Starting #'+$('#task').value+'…';pollJob()}catch(e){$('#startErr').textContent=e.message}}
 async function rerun(o){if(!cur)return;if(job&&job.running){alert('A run is still going; stop it or wait for it to finish.');return}
- const what=o.cases?'case '+o.cases:o.failed?'the cases that did not pass':'all cases';if(!confirm('Rerun '+what+' from the start with this plan?'))return;
+ const what=o.cases?'Rerun case '+o.cases+' with this plan?':o.failed?'Rerun the cases that did not pass?':$('#rerunAll').textContent.includes('Start')?'Start this task again (it stopped before planning)?':'Rerun all cases from the start with this plan?';if(!confirm(what))return;
  try{job=await api('/api/start',{rerun:cur,...o});outLen=0;$('#console').textContent='';cur=null;$('#events').innerHTML='';$('#title').textContent='Rerunning…';pollJob()}catch(e){alert(e.message||e)}}
 async function fresh(){if(!cur)return;if(job&&job.running){alert('A run is still going; stop it or wait for it to finish.');return}
  if(!confirm('Plan this task again from scratch and run it?'))return;
@@ -154,7 +154,7 @@ async function refresh(){if(!cur)return;let d;
  try{d=await api(`/api/runs/${cur}`)}catch(e){return}
  lastPlan=d.plan;picked=(d.mode||{}).cases||null;
  try{const s=d.summary;setHTML('#title',`#${esc(s.task)} on ${esc(s.env||'')} <span class="pill ${s.status}">${esc(s.status)}</span>`);
-  setHTML('#sub',`${s.done}/${s.cases} cases ${pills(s.counts)} · ${esc(s.last||'')}`);$('#resumeBtn').style.display=(s.status=='paused'&&!(job&&job.running))?'':'none';$('#rerunBtns').style.display=(s.status!='running'&&!(job&&job.running))?'':'none'}catch(e){console.error(e)}
+  setHTML('#sub',`${s.done}/${s.cases} cases ${pills(s.counts)} · ${esc(s.last||'')}`);$('#resumeBtn').style.display=(s.status=='paused'&&!(job&&job.running))?'':'none';$('#rerunBtns').style.display=(s.status!='running'&&!(job&&job.running))?'':'none';{const hp=!!((d.plan||{}).cases||[]).length;$('#rerunAll').textContent=hp?'↻ Rerun all':'↻ Start again';$('#rerunAll').title=hp?'Run every case again from the start, same plan':'This run stopped before it had a plan: start the same task again';$('#rerunFailed').style.display=hp&&s.done?'':'none'}}catch(e){console.error(e)}
  const key=JSON.stringify(d);if(key!==lastDetail){lastDetail=key;try{render(d)}catch(e){console.error('render',e)}}
  try{const t=await api(`/api/runs/${cur}/trace?since=${traceNext}`);if(!traceNext){blocks=[];openBlock=null}
   if(t.lines.length){for(const ln of t.lines){try{addEvent(ln)}catch(e){console.error('event',e,ln)}}traceNext=t.next;drawBlocks()}}catch(e){console.error('trace',e)}}

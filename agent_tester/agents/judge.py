@@ -75,7 +75,35 @@ def make_judge(settings: Settings, pack, memory=None):
             if not isinstance(data, dict):
                 raise ValueError("expected a JSON object")
             data["case_id"] = brief["case_id"]
-            data["steps_done"] = payload["steps_done"]
+            data["steps_done"] = [str(n) for n in payload["steps_done"]]
+            # small type slips from the model must never cost a verdict: coerce instead of rejecting
+            for k in ("evidence", "bug_draft_ids"):
+                if k in data:
+                    v = data[k] if isinstance(data[k], list) else [data[k]]
+                    data[k] = [str(x) for x in v if x is not None]
+            if "lessons_applied" in data:
+                v = data["lessons_applied"] if isinstance(data["lessons_applied"], list) else [data["lessons_applied"]]
+                ids = [str(x).strip().lstrip("#") for x in v]
+                data["lessons_applied"] = [int(x) for x in ids if x.isdigit()]
+            for k in ("actual", "note", "expected", "bug_title"):
+                if k in data and data[k] is not None and not isinstance(data[k], str):
+                    data[k] = json.dumps(data[k]) if isinstance(data[k], (dict, list)) else str(data[k])
+            if isinstance(data.get("values"), dict):
+                data["values"] = {str(k): (v if isinstance(v, (int, float, str)) and not isinstance(v, bool) else
+                                           json.dumps(v) if isinstance(v, (dict, list)) else str(v))
+                                  for k, v in data["values"].items()}
+            elif "values" in data:
+                data["values"] = {}
+            if isinstance(data.get("severity"), str):
+                data["severity"] = data["severity"].strip().capitalize() or None
+                if data["severity"] not in ("Critical", "High", "Medium", "Low"):
+                    data["severity"] = None
+            kb = data.get("known_bug")
+            if kb is not None and not isinstance(kb, int):
+                kb = str(kb).strip().lstrip("#")
+                data["known_bug"] = int(kb) if kb.isdigit() else None
+            if isinstance(data.get("verdict"), str):
+                data["verdict"] = data["verdict"].strip().upper().replace("_", " ")
             data.setdefault("expected", brief.get("expected", ""))
             return CaseResult.model_validate(data)
 

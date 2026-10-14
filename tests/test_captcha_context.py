@@ -285,7 +285,7 @@ class VisibleBrowser(unittest.TestCase):
     def test_playwright_toolset_waits_for_free_profile(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            profile = root / "profiles" / "portal"
+            profile = T.profile_path(root, "portal")
             profile.mkdir(parents=True)
             (profile / "SingletonLock").symlink_to("host-99999999")
             with mock.patch.dict("os.environ", {"QA_HEADED": "1"}):
@@ -388,3 +388,22 @@ class AutoCheckbox(unittest.TestCase):
     def test_puzzle(self):
         r = self._run('### Result\n"{\\"present\\": true, \\"passed\\": false, \\"challenge\\": true}"')
         self.assertTrue(r["challenge"])
+
+
+def _isolate_browser_home():
+    """Each test gets its own shared-browser folder (runs/.browser by default)."""
+    import shutil, unittest as _u
+    for cls in [v for v in globals().values() if isinstance(v, type) and issubclass(v, _u.TestCase)]:
+        orig = cls.setUp
+
+        def setUp(self, _orig=orig):
+            d = tempfile.mkdtemp()
+            p = mock.patch.dict("os.environ", {"QA_BROWSER_DIR": d})
+            p.start()
+            self.addCleanup(p.stop)
+            self.addCleanup(shutil.rmtree, d, True)
+            _orig(self)
+        cls.setUp = setUp
+
+
+_isolate_browser_home()

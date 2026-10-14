@@ -125,9 +125,31 @@ def headed() -> bool:
     return os.environ.get("QA_HEADED", "") in ("1", "true", "yes")
 
 
+def browser_home(run_dir: Path) -> Path:
+    """Browser logins are shared by every run on one environment (only one run goes at a time), so a portal
+    login + CAPTCHA done for one task is reused by the next. Staging and production never share a session.
+    QA_BROWSER_DIR overrides the base folder (default: runs/.browser)."""
+    env = "staging"
+    try:
+        data = json.loads((run_dir / "state.json").read_text())
+        env = (data.get("plan") or {}).get("env") or data.get("env") or env
+    except (OSError, ValueError):
+        pass
+    base = Path(os.environ.get("QA_BROWSER_DIR") or (Path(run_dir).resolve().parent / ".browser"))
+    env = re.sub(r"[^A-Za-z0-9_-]+", "_", str(env)) or "staging"
+    return base / env
+
+
+def profile_path(run_dir: Path, app: str) -> Path:
+    return browser_home(run_dir) / "profiles" / app
+
+
 def storage_state_path(run_dir: Path, app: str) -> Path:
     """Cookies + local storage saved after a manual login; testers reload this instead of hoping the profile survived."""
-    return run_dir / "storage" / f"{app}.json"
+    return browser_home(run_dir) / "storage" / f"{app}.json"
+
+
+_LOGOUT = re.compile(r"log[\s_-]?out|sign[\s_-]?out|logoff", re.I)
 
 
 def _chrome_lock_pid(profile: Path) -> int | None:
@@ -205,7 +227,7 @@ def playwright_toolset(run_dir: Path, app: str):
     out = run_dir / "shots"
     out.mkdir(parents=True, exist_ok=True)
     storage = storage_state_path(run_dir, app)
-    profile = run_dir / "profiles" / app
+    profile = profile_path(run_dir, app)
     # Never start a second Chrome on a busy profile — that is the "browser crashed" handoff after CAPTCHA login.
     if storage.is_file():
         # Isolated context loaded from the post-login storage file (covers session-only cookies too).
@@ -451,6 +473,10 @@ class TesterSession:
             return limit
         if name in BLOCKED_BROWSER:
             return self._deny(name, args, "this browser tool is not allowed")
+        if name in ("browser_navigate", "browser_click") and _LOGOUT.search(str(args.get("url") or args.get("element") or "")) \
+                and not _LOGOUT.search(json.dumps(self.brief.get("steps") or [])):
+            return self._deny(name, args, "logging out is not allowed: the browser login is shared by later runs "
+                                          "(log out only when the test case itself is about logging out)")
         if name == "browser_take_screenshot":
             self._fix_screenshot_args(args)
         if name.startswith("browser_"):
@@ -722,7 +748,8 @@ def manual_login(run_dir: Path, app: str, url: str, username: str | None, input_
     runs/<run>/storage/<app>.json, closes Chrome cleanly, then testers reload that file. Returns True when done."""
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
-    profile = run_dir / "profiles" / app
+    profile = profile_path(run_dir, app)
+    storage_state_path(run_dir, app).parent.mkdir(parents=True, exist_ok=True)
     profile.mkdir(parents=True, exist_ok=True)
     shots = run_dir / "shots"
     shots.mkdir(parents=True, exist_ok=True)
@@ -905,7 +932,7 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
                         pass
                     # MCP close returns before Chrome drops SingletonLock; wait so manual_login
                     # (or the next case) does not open a second Chrome on the same profile.
-                    release_profile(run_dir / "profiles" / app, timeout=25.0)
+                    release_profile(profile_path(run_dir, app), timeout=25.0)
             asyncio.run(go())
         finally:
             policy.read_only = was_ro

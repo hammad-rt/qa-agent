@@ -21,6 +21,58 @@ from urllib.parse import parse_qs, unquote, urlparse
 ROOT = Path(__file__).resolve().parents[2]
 RUNS = ROOT / "runs"
 PACKS = ROOT / "packs"
+MEM_FIELDS = ("id", "kind", "scope", "area", "text", "status", "source", "evidence", "linked_issue",
+              "created_at", "last_confirmed_at", "success_count", "failure_count")
+
+
+def _mem_db():
+    """Open the memory DB without loading the embedder. value_or_ref and secrets are never sent to the browser."""
+    import os
+    from ..memory.store import MemoryStore
+    return MemoryStore(Path(os.environ.get("MEMORY_DB", str(ROOT / "memory" / "memory.db"))), None)
+
+
+def memory_list() -> list[dict]:
+    st = _mem_db()
+    try:
+        rows = st.db.execute(f"SELECT {', '.join(MEM_FIELDS)} FROM memories ORDER BY "
+                             "CASE status WHEN 'proposed' THEN 0 WHEN 'needs_recheck' THEN 1 WHEN 'active' THEN 2 ELSE 3 END, id DESC").fetchall()
+        return [dict(zip(MEM_FIELDS, r)) for r in rows]
+    finally:
+        st.close()
+
+
+def memory_change(mid: int, action: str, text: str = "") -> dict:
+    from ..memory.store import STATUSES
+    st = _mem_db()
+    try:
+        row = st.get(mid)
+        if not row:
+            return {"error": "no such memory"}
+        status = {"approve": "active", "reject": "retired", "retire": "retired", "restore": "active",
+                  "recheck": "needs_recheck"}.get(action)
+        if status in STATUSES:
+            st.set_status(mid, status)
+        elif action == "edit":
+            text = " ".join((text or "").split())
+            if not text:
+                return {"error": "text is empty"}
+            st.db.execute("UPDATE memories SET text = ?, embedding = NULL WHERE id = ?", (text, mid))
+            st.db.commit()
+        elif action == "delete":
+            st.db.execute("INSERT INTO memories_fts(memories_fts, rowid, text, area, applies_when) "
+                          "VALUES ('delete', ?, ?, ?, ?)", (mid, row["text"], row.get("area"), row.get("applies_when")))
+            st.db.execute("DELETE FROM memories WHERE id = ?", (mid,))
+            st.db.commit()
+        else:
+            return {"error": f"unknown action {action}"}
+        return {"ok": True}
+    finally:
+        st.close()
+
+
+def _job_on(run: str) -> bool:
+    return any(j.info()["run_dir"] == run and j.proc.poll() is None for j in JOBS.values())
 
 
 def knowledge() -> list[dict]:
@@ -115,6 +167,7 @@ def run_summary(d: Path) -> dict:
             "status": "running" if live else st.get("status", "unknown"), "cases": len(plan.get("cases") or []),
             "done": len(results), "counts": counts, "started": cps[0]["at"] if cps else None,
             "last": cps[-1]["label"] if cps else None, "mtime": d.stat().st_mtime,
+            "label": (d / "label.txt").read_text().strip() if (d / "label.txt").exists() else "",
             "report": next((f.name for f in (d / "report.html", d / "report.pdf") if f.exists()), None)}
 
 
@@ -189,6 +242,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, [j.info(len(j.out)) for j in JOBS.values()])
             if parts == ["api", "knowledge"]:
                 return self._send(200, knowledge())
+            if parts == ["api", "memory"]:
+                return self._send(200, memory_list())
             if len(parts) >= 3 and parts[:2] == ["api", "runs"]:
                 d = self._run(parts[2])
                 if not d:
@@ -213,6 +268,39 @@ class Handler(BaseHTTPRequestHandler):
         try:
             parts = [p for p in urlparse(self.path).path.split("/") if p]
             b = self._body()
+            if len(parts) == 4 and parts[:2] == ["api", "memory"] and parts[2].isdigit():
+                r = memory_change(int(parts[2]), parts[3], str(b.get("text", "")))
+                return self._send(400 if "error" in r else 200, r)
+            if len(parts) == 4 and parts[:2] == ["api", "runs"]:
+                d = self._run(parts[2])
+                if not d:
+                    return self._send(404, {"error": "no such run"})
+                if _job_on(d.name):
+                    return self._send(409, {"error": "this run is still going; stop it first"})
+                if parts[3] == "delete":
+                    import shutil
+                    shutil.rmtree(d)
+                    return self._send(200, {"ok": True})
+                if parts[3] == "label":
+                    (d / "label.txt").write_text(str(b.get("label", "")).strip()[:200] + "\n")
+                    return self._send(200, {"ok": True})
+                if parts[3] == "delete_shot":
+                    f = _safe(d, "shots/" + Path(str(b.get("name", ""))).name)
+                    if not f or f.suffix.lower() != ".png":
+                        return self._send(404, {"error": "no such screenshot"})
+                    f.unlink()
+                    return self._send(200, {"ok": True})
+                return self._send(404, {"error": "not found"})
+            if parts == ["api", "runs", "delete_many"]:
+                done, skipped = [], []
+                import shutil
+                for name in b.get("ids") or []:
+                    d = self._run(str(name))
+                    if d and not _job_on(d.name):
+                        shutil.rmtree(d); done.append(d.name)
+                    else:
+                        skipped.append(str(name))
+                return self._send(200, {"deleted": done, "skipped": skipped})
             if parts == ["api", "knowledge"]:
                 name = str(b.get("pack", ""))
                 d = (PACKS / name).resolve()

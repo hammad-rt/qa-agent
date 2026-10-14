@@ -30,3 +30,28 @@ class KnowledgeApi(unittest.TestCase):
         k = {x["pack"]: x for x in knowledge()}
         self.assertIn("savostore", k)
         self.assertIn("## ", k["savostore"]["learned"])
+
+
+class MemoryApi(unittest.TestCase):
+    def test_approve_edit_delete(self):
+        import os, tempfile
+        from pathlib import Path
+        from agent_tester.memory.store import MemoryStore
+        from agent_tester.web import server
+        with tempfile.TemporaryDirectory() as t:
+            db = Path(t) / "m.db"
+            s = MemoryStore(db, None)
+            mid = s.add("recipe", "project:x", "old text", "run", status="proposed"); s.close()
+            old = os.environ.get("MEMORY_DB"); os.environ["MEMORY_DB"] = str(db)
+            try:
+                self.assertEqual(server.memory_change(mid, "approve"), {"ok": True})
+                self.assertEqual(server.memory_change(mid, "edit", "new text"), {"ok": True})
+                rows = server.memory_list()
+                self.assertEqual((rows[0]["status"], rows[0]["text"]), ("active", "new text"))
+                self.assertNotIn("value_or_ref", rows[0])
+                self.assertEqual(server.memory_change(mid, "delete"), {"ok": True})
+                self.assertEqual(server.memory_list(), [])
+                self.assertIn("error", server.memory_change(999, "approve"))
+            finally:
+                os.environ.pop("MEMORY_DB", None)
+                if old: os.environ["MEMORY_DB"] = old

@@ -44,6 +44,11 @@ iframe{width:100%;height:78vh;border:1px solid var(--line);border-radius:8px;bac
 .kn h3{font-size:14px;margin:14px 0 6px;color:var(--accent,#7aa2ff)}.kn ul{margin:0 0 8px 18px;padding:0}.kn li{margin:3px 0}
 .kn .new{color:#7ee2a8}.kn textarea{width:100%;min-height:420px;font-family:ui-monospace,monospace;font-size:12px}
 .kn .bar{display:flex;gap:8px;align-items:center;margin-bottom:8px}.kn details{margin-top:14px}
+.runbar{display:flex;align-items:center;gap:8px;padding:6px 16px;border-bottom:1px solid var(--line)}
+.racts{float:right;display:none}.run:hover .racts{display:inline}.sm{padding:2px 7px;font-size:12px}.lbl{font-size:12px;color:#c9b8ff;margin:2px 0}
+.rsel{vertical-align:middle;margin:0 4px 0 0}.shotbox{position:relative}.shotbox .x{position:absolute;top:6px;right:6px;display:none}.shotbox:hover .x{display:block}
+.mem{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:8px}.mem .acts{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
+.mem textarea{width:100%;min-height:70px}.mfil{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}
 </style></head><body>
 <aside>
   <h1>QA Agent</h1>
@@ -58,13 +63,13 @@ iframe{width:100%;height:78vh;border:1px solid var(--line);border-radius:8px;bac
 <main>
   <div class="head"><div><h2 id="title">Pick a run or start one</h2><div id="sub" class="mute"></div></div>
     <div class="row" style="flex:0 0 auto"><button id="resumeBtn" onclick="resume()" style="display:none">Resume</button><button id="stopBtn" class="dan" onclick="stopJob()" style="display:none">Stop</button></div></div>
-  <div class="tabs"><div class="tab on" data-p="live">Live</div><div class="tab" data-p="cases">Cases</div><div class="tab" data-p="shots">Screenshots</div><div class="tab" data-p="log">Actions</div><div class="tab" data-p="report">Report</div><div class="tab" data-p="know">Knowledge</div></div>
+  <div class="tabs"><div class="tab on" data-p="live">Live</div><div class="tab" data-p="cases">Cases</div><div class="tab" data-p="shots">Screenshots</div><div class="tab" data-p="log">Actions</div><div class="tab" data-p="report">Report</div><div class="tab" data-p="know">Knowledge</div><div class="tab" data-p="mem">Memory</div></div>
   <div id="live" class="pane on">
     <div id="askBox"></div>
     <div id="consoleWrap" style="display:none"><div class="mute">Agent console</div><pre class="console" id="console"></pre></div>
     <div class="toolbar"><b>Steps</b><label><input type="checkbox" id="showReads" onchange="$('#events').classList.toggle('hideReads',!this.checked)"> show page reads</label><label><input type="checkbox" id="follow" checked> follow live</label></div><div id="events" class="hideReads"><div class="empty">No steps yet.</div></div>
   </div>
-  <div id="cases" class="pane"></div><div id="know" class="pane"></div>
+  <div id="cases" class="pane"></div><div id="know" class="pane"></div><div id="mem" class="pane"></div>
   <div id="shots" class="pane"></div>
   <div id="log" class="pane"></div>
   <div id="report" class="pane"></div>
@@ -76,7 +81,11 @@ let cur=null, job=null, traceNext=0, outLen=0, lastDetail=null;
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{document.querySelectorAll('.tab,.pane').forEach(x=>x.classList.remove('on'));t.classList.add('on');$('#'+t.dataset.p).classList.add('on')});
 async function api(p,b){const r=await fetch(p,b?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}:{});const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j}
 function pills(c){return Object.entries(c||{}).map(([k,v])=>`<span class="pill ${k.split(' ')[0]}">${v} ${esc(k)}</span>`).join('')}
-async function loadRuns(){try{const rs=await api('/api/runs');$('#runs').innerHTML=rs.map(r=>`<div class="run ${r.id==cur?'sel':''}" onclick="openRun('${r.id}')"><div class="t">#${esc(r.task)} <span class="pill ${r.status}">${esc(r.status)}</span></div><div class="mute">${esc(r.env||'')} · ${r.done}/${r.cases} cases · ${esc((r.started||'').replace('T',' '))}</div><div>${pills(r.counts)}</div></div>`).join('')||'<div class="empty">No runs yet.</div>'}catch(e){}}
+let sel=new Set();
+async function loadRuns(){try{const rs=await api('/api/runs');const ids=new Set(rs.map(r=>r.id));sel=new Set([...sel].filter(x=>ids.has(x)));
+ const bar=`<div class="runbar"><label class="mute"><input type="checkbox" ${rs.length&&sel.size==rs.length?'checked':''} onchange="selAll(this.checked)"> select all</label><span style="flex:1"></span>${sel.size?`<button class="dan sm" onclick="delSel()">Delete ${sel.size}</button>`:''}</div>`;
+ window._runs=rs;
+ $('#runs').innerHTML=(rs.length?bar:'')+rs.map(r=>`<div class="run ${r.id==cur?'sel':''}" onclick="openRun('${r.id}')"><div class="t"><input type="checkbox" class="rsel" ${sel.has(r.id)?'checked':''} onclick="event.stopPropagation();togSel('${r.id}',this.checked)"> #${esc(r.task)} <span class="pill ${r.status}">${esc(r.status)}</span><span class="racts"><button class="sm" title="Rename" onclick="event.stopPropagation();renameRun('${r.id}')">✎</button><button class="sm dan" title="Delete" onclick="event.stopPropagation();delRun('${r.id}')">✕</button></span></div>${r.label?`<div class="lbl">${esc(r.label)}</div>`:''}<div class="mute">${esc(r.env||'')} · ${r.done}/${r.cases} cases · ${esc((r.started||'').replace('T',' '))}</div><div>${pills(r.counts)}</div></div>`).join('')||'<div class="empty">No runs yet.</div>'}catch(e){}}
 function openRun(id){if(cur!==id){cur=id;traceNext=0;blocks=[];openBlock=null;$('#events').innerHTML='';}loadRuns();refresh()}
 async function start(dry){$('#startErr').textContent='';try{job=await api('/api/start',{task:$('#task').value,env:$('#env').value,cases:$("#caseIds").value,dry_run:dry});outLen=0;$('#console').textContent='';cur=null;$('#events').innerHTML='';$('#title').textContent='Starting #'+$('#task').value+'…';pollJob()}catch(e){$('#startErr').textContent=e.message}}
 async function resume(){try{job=await api('/api/start',{resume:cur});outLen=0;$('#console').textContent='';pollJob()}catch(e){alert(e.message)}}
@@ -140,7 +149,7 @@ function render(d){const res=d.results||{};d.shots=d.shots||[];d.reports=d.repor
  <ol>${(c.steps||[]).map(st=>typeof st=='string'?`<li>${esc(st)}</li>`:`<li>[${esc(st.app)}] ${esc(st.text)} ${st.inferred?'<span class="inf">inferred</span>':''} ${st.changes_data?'<span class="chg">changes data</span>':''}</li>`).join('')}</ol>
  <div><b>Expected:</b> ${esc(c.expected)}</div>${r.actual?`<div><b>Actual:</b> ${esc(r.actual)}</div>`:''}${r.note?`<div><b>Notes:</b> ${esc(r.note)}</div>`:''}
  ${r.values&&Object.keys(r.values).length?`<div><b>Values:</b> ${Object.entries(r.values).map(([k,v])=>`${esc(k)}=<code>${esc(typeof v=='object'?v.value??JSON.stringify(v):v)}</code>`).join(' ')}</div>`:''}</div>`}).join('')||'<div class="empty">No plan yet.</div>';
- $('#shots').innerHTML=d.shots.length?`<div class="shots">${d.shots.slice().reverse().map(n=>`<div><img loading="lazy" src="/api/runs/${cur}/file?path=shots/${encodeURIComponent(n)}" onclick="zoom(this.src)"><div class="mute">${esc(n)}</div></div>`).join('')}</div>`:'<div class="empty">No screenshots yet.</div>';
+ $('#shots').innerHTML=d.shots.length?`<div class="shots">${d.shots.slice().reverse().map(n=>`<div class="shotbox"><img loading="lazy" src="/api/runs/${cur}/file?path=shots/${encodeURIComponent(n)}" onclick="zoom(this.src)"><button class="x sm dan" title="Delete screenshot" onclick="delShot('${esc(n)}')">✕</button><div class="mute">${esc(n)}</div></div>`).join('')}</div>`:'<div class="empty">No screenshots yet.</div>';
  $('#log').innerHTML=(d.action_log||[]).length?`<table><tr><th>#</th><th>Case</th><th>App</th><th>Action</th><th>Step</th><th>Approval</th><th>Outcome</th></tr>${d.action_log.slice().reverse().map(a=>`<tr><td>${a.seq}</td><td>${esc(a.case_id)}</td><td>${esc(a.app)}</td><td><code>${esc(a.tool)}</code> ${a.inferred?'<span class="inf">inferred</span>':''}<div class="mute">${esc(JSON.stringify(a.args||{}).slice(0,140))}</div></td><td>${esc(a.plan_step??'')}</td><td>${esc(a.approval)}</td><td>${esc(a.outcome)}${a.deviation?`<div class="mute">${esc(a.deviation)}</div>`:''}</td></tr>`).join('')}</table>`:'<div class="empty">No actions yet.</div>';
  const rep=d.reports.find(n=>n=='report.html');
  $('#report').innerHTML=(d.reports.length?`<div class="row" style="margin-bottom:10px;flex-wrap:wrap">${d.reports.map(n=>`<a href="/api/runs/${cur}/file?path=${encodeURIComponent(n)}" target="_blank"><button>${esc(n)}</button></a>`).join('')}</div>`:'')+(rep?`<iframe src="/api/runs/${cur}/file?path=report.html"></iframe>`:'<div class="empty">The report appears here when the run finishes.</div>')}
@@ -161,5 +170,29 @@ function drawKnow(){const today=new Date().toISOString().slice(0,10);
   return `<div class="kn">${head}${body}<details><summary class="mute">Hand-written facts (facts.md, read-only)</summary><pre style="white-space:pre-wrap">${esc(k.facts)}</pre></details></div>`}).join('<hr>')||'<div class="mute">No packs found.</div>'}
 async function saveKnow(i){try{await api('/api/knowledge',{pack:know[i].pack,learned:$('#knowText').value});knowEdit=null;await loadKnow()}catch(e){alert('Save failed: '+(e.message||e))}}
 document.querySelectorAll('.tab').forEach(t=>{if(t.dataset.p==='know')t.addEventListener('click',loadKnow)});
+function togSel(id,on){on?sel.add(id):sel.delete(id);loadRuns()}
+function selAll(on){sel=on?new Set((window._runs||[]).map(r=>r.id)):new Set();loadRuns()}
+async function delSel(){if(!confirm(`Delete ${sel.size} run(s) with their screenshots and reports? This can't be undone.`))return;
+ try{const r=await api('/api/runs/delete_many',{ids:[...sel]});if(r.skipped.length)alert('Skipped (still running): '+r.skipped.join(', '));if(r.deleted.includes(cur))cur=null;sel.clear();loadRuns()}catch(e){alert(e.message||e)}}
+async function delRun(id){if(!confirm(`Delete run ${id} with its screenshots and reports? This can't be undone.`))return;
+ try{await api(`/api/runs/${id}/delete`,{});if(cur==id){cur=null;location.hash='';location.reload()}else loadRuns()}catch(e){alert(e.message||e)}}
+async function renameRun(id){const r=(window._runs||[]).find(x=>x.id==id)||{};const v=prompt('Label for this run (blank to clear):',r.label||'');if(v===null)return;
+ try{await api(`/api/runs/${id}/label`,{label:v});loadRuns()}catch(e){alert(e.message||e)}}
+async function delShot(n){if(!confirm('Delete screenshot '+n+'?'))return;try{await api(`/api/runs/${cur}/delete_shot`,{name:n});lastDetail=null;refresh()}catch(e){alert(e.message||e)}}
+let mems=[],memEdit=null,memFilter='all';
+async function loadMem(){try{mems=await api('/api/memory')}catch(e){$('#mem').innerHTML='<div class="mute">Could not load memory: '+esc(e.message||e)+'</div>';return}drawMem()}
+function drawMem(){const st=['all','proposed','active','needs_recheck','retired'];
+ const list=mems.filter(m=>memFilter=='all'||m.status==memFilter);
+ $('#mem').innerHTML=`<div class="mfil">${st.map(s=>`<button class="sm ${memFilter==s?'pri':''}" onclick="memFilter='${s}';drawMem()">${s.replace('_',' ')} (${s=='all'?mems.length:mems.filter(m=>m.status==s).length})</button>`).join('')}</div>`+
+ (list.map(m=>`<div class="mem"><div><span class="pill">${esc(m.kind)}</span> <span class="pill ${m.status=='active'?'PASS':m.status=='proposed'?'running':m.status=='retired'?'':'FAIL'}">${esc(m.status)}</span> <span class="mute">#${m.id}${m.area?' · '+esc(m.area):''} · ${esc(m.scope)} · used ok ${m.success_count}, failed ${m.failure_count}</span></div>
+  ${memEdit===m.id?`<textarea id="memText">${esc(m.text)}</textarea>`:`<div style="margin-top:4px">${esc(m.text)}</div>`}
+  <div class="acts">${memEdit===m.id?`<button class="sm pri" onclick="memDo(${m.id},'edit')">Save</button><button class="sm" onclick="memEdit=null;drawMem()">Cancel</button>`:
+   `${m.status=='proposed'?`<button class="sm pri" onclick="memDo(${m.id},'approve')">Approve</button><button class="sm" onclick="memDo(${m.id},'reject')">Reject</button>`:''}
+    ${m.status=='active'||m.status=='needs_recheck'?`<button class="sm" onclick="memDo(${m.id},'retire')">Retire</button>`:''}
+    ${m.status=='retired'?`<button class="sm" onclick="memDo(${m.id},'restore')">Restore</button>`:''}
+    <button class="sm" onclick="memEdit=${m.id};drawMem()">Edit</button><button class="sm dan" onclick="memDo(${m.id},'delete')">Delete</button>`}</div></div>`).join('')||'<div class="empty">Nothing here.</div>')}
+async function memDo(id,a){if(a=='delete'&&!confirm('Delete memory #'+id+' for good?'))return;
+ try{await api(`/api/memory/${id}/${a}`,a=='edit'?{text:$('#memText').value}:{});memEdit=null;await loadMem()}catch(e){alert(e.message||e)}}
+document.querySelectorAll('.tab').forEach(t=>{if(t.dataset.p==='mem')t.addEventListener('click',loadMem)});
 setTimeout(()=>{const m=location.hash.match(/run=([\w-]+)/);if(m)openRun(m[1]);const t=location.hash.match(/tab=(\w+)/);if(t){const b=[...document.querySelectorAll('.tab')].find(x=>x.dataset.p==t[1]);if(b)b.click()}},300);
 </script></body></html>

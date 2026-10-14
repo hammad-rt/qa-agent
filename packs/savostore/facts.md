@@ -82,3 +82,12 @@ Rewritten 2026-10-06 after the original file was lost. Sources: QA runs on #1809
 ## Test history
 - #165177 / #165348 on staging: #165348 13 of 17 pass; #165177 5 pass, 9 fail, 3 partial, 1 not verified, 1 skipped. Report PDF: `qa/rewards/report/savo-rewards-qa-report-2026-09-28.pdf` (original; the later 97-page version with notes is in the user's 1:1 chat).
 - #180966 on staging (25 Sep): portal cases run against the existing threshold; admin threshold cases blocked because the CRM account was not admin then. Production testing waits on accounts and approvals.
+
+## Shipment Protection behaviour (confirmed on staging 2026-10-14)
+- CRM Shipment Protection threshold rejects 12.5, 200.5, 0, -5, abc and blank silently: the form shows the typed value again with no message, and reopening the page shows the old value. Whole numbers like 200 save. Check the result by reloading, not by looking for a message.
+- The rate accepts decimals (e.g. 2.5); the minimum accepts 0.
+- Rounding is intended: the CRM protection cost shows whole dollars (4.02 shows as 4.00) while the USD field keeps cents.
+- A client exemption always overrides the threshold. Declining protection means no charge anywhere.
+- Portal Parcel Value drops decimals (200.50 becomes 200, pasting 25.50 gives 25) and 1,000 becomes 1000. 0 shows "Enter a value greater than zero"; typing "-" shows the "Whole dollars only" hint.
+- Buy & Ship orders have no protection step.
+- Fixing old orders (TC7 of #182941) is a repair script run on production; it can't be tested on staging.

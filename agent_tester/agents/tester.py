@@ -33,7 +33,15 @@ BLOCKED_BROWSER = {"browser_evaluate", "browser_run_code", "browser_install", "b
 # Calls that only read or record (they don't move the browser) don't use up the action budget.
 FREE_TOOLS = {"browser_snapshot", "browser_take_screenshot", "browser_wait_for", "browser_find",
               "browser_console_messages", "browser_network_requests", "mark_step", "record_value", "evidence_name",
-              "finish", "needs_manual_login", "recall_lessons", "propose_memory", "get_secret"}
+              "finish", "needs_manual_login", "recall_lessons", "propose_memory", "get_secret",
+              "note_behaviour", "lookup_docs", "browser_tabs"}
+_SAVE = re.compile(r"\b(save|submit|update|apply|confirm)\b", re.I)
+RELOAD_HINT = ("You already saved/searched here and the expected message did not appear. Do not save or search "
+               "again. Check the real result: reload the page (browser_navigate to the same address, or reopen it by "
+               "its route), read the stored value with browser_snapshot and record_value it, then mark_step. "
+               "\"No message and the old value is back after a reload\" is a valid result (silent rejection); "
+               "call note_behaviour with it and continue. If the action opened another tab, use browser_tabs to "
+               "list and select it, read it, then select the first tab again.")
 ACTIONS_PER_STEP = int(os.environ.get("TESTER_ACTIONS_PER_STEP", "30"))   # actions allowed without step progress
 LOOP_WARN, LOOP_STOP = 3, 5          # same call repeated this often without progress: warn, then stop
 
@@ -394,6 +402,26 @@ class TesterSession:
                                plan_step=getattr(s, "current_step", None), inferred=False, deviation=None)
             return {"answer": ans} if ans else {"answer": "", "note": "no answer; decide from the page and say so in notes"}
 
+        def note_behaviour(text: str) -> dict:
+            """Save how the app behaves so later cases and runs know it, e.g. "Threshold Save with 12.5 shows no
+            message; after a reload the old value is back (silent reject)" or "Print opens in a new tab".
+            Only what you saw on the page. No record ids, names or passwords."""
+            from .. import learned
+            line = learned.record_behaviour(s.state.data.get("pack_root"), s.brief.get("area"), s.app,
+                                            redact(text), s.case_id)
+            s.state.log_action(case_id=s.case_id, app=s.app, tool="note_behaviour", args={"text": redact(text)[:300]},
+                               plan_step=s.current_step)
+            return {"saved": bool(line)} if line else {"saved": False, "note": "already known or too short"}
+
+        def lookup_docs(question: str) -> dict:
+            """Search this app's stack documentation (listed in the pack, e.g. SuiteCRM or Next.js) when you do not
+            know how a screen or workflow works. Answers are cached for later runs. Still check the page itself."""
+            from .. import docs
+            out = docs.lookup(s.pack, s.app, question)
+            s.state.log_action(case_id=s.case_id, app=s.app, tool="lookup_docs", args={"question": question[:200]},
+                               plan_step=s.current_step, outcome="ok" if out.get("results") else str(out)[:120])
+            return out
+
         def recall_lessons(query: str) -> dict:
             """Search saved lessons, recipes and known bugs for this project, e.g. "rewards apply button"."""
             if s.memory is None:
@@ -463,7 +491,7 @@ class TesterSession:
             return out
 
         tools = [record_value, calculate, request_approval, mark_step, evidence_name, get_secret, finish, recall_lessons,
-                 needs_manual_login, ask_user]
+                 needs_manual_login, ask_user, note_behaviour, lookup_docs]
         if s.helpers and s.toolset is not None:
             tools.append(run_helper)
         # Discovery is read-only for data writes but may propose recipes; ledger only on real cases.
@@ -502,8 +530,13 @@ class TesterSession:
         elif name == "record_value" and last_act and last_act > last_snap:
             return {"error": "The page changed after your last read and may still be updating. "
                              "Take a fresh browser_snapshot (it waits for the page to settle), then record the value again."}
+        if name == "browser_find":
+            self.misses = getattr(self, "misses", 0) + 1
+            if self.misses == 3:
+                self.misses = 0
+                return {"error": RELOAD_HINT}
         if name == "mark_step" and args.get("n") not in self.result.steps_done:
-            self.since_progress, self._sigs = 0, {}          # real progress: fresh per-step allowance
+            self.since_progress, self._sigs, self.saves, self.misses = 0, {}, 0, 0          # real progress: fresh per-step allowance
         limit = self._budget_check(name, args)
         if limit:
             return limit
@@ -512,7 +545,9 @@ class TesterSession:
         if isinstance(args.get("ref"), str) and args["ref"].startswith("ref="):
             args["ref"] = args["ref"][4:]
         if name in BLOCKED_BROWSER:
-            return self._deny(name, args, "this browser tool is not allowed")
+            return self._deny(name, args, "this browser tool is not allowed. Read the page with browser_snapshot or "
+                                          "browser_find; if the result you expected is not there, that is your result: "
+                                          "reload, read the stored value, record_value it and move on")
         if name in ("browser_navigate", "browser_click") and _LOGOUT.search(str(args.get("url") or args.get("element") or "")) \
                 and not _LOGOUT.search(json.dumps(self.brief.get("steps") or [])):
             return self._deny(name, args, "logging out is not allowed: the browser login is shared by later runs "
@@ -575,6 +610,10 @@ class TesterSession:
             if intent:
                 self._sigs[intent] = self._sigs.get(intent, 0) + 1
             n = max(self._sigs[sig], self._sigs.get(intent, 0) if intent else 0)
+            if name == "browser_click" and _SAVE.search(str(args.get("element") or "")):
+                self.saves = getattr(self, "saves", 0) + 1
+                if self.saves == 2:
+                    return {"error": RELOAD_HINT}
             clicky = name in ("browser_click", "browser_run_code_unsafe", "browser_evaluate")
             warn_at, stop_at = (2, 4) if clicky else (LOOP_WARN, LOOP_STOP)   # a page click that did nothing: rethink at once
             if n >= stop_at:

@@ -384,6 +384,7 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
                           note=f"the judge could not decide: {type(e).__name__}: {str(e)[:300]}")
     if memory is not None and result.verdict in ("PASS", "PARTIAL"):
         _propose_success_recipe(memory, case, state)
+    _learn_outcome(case, result, state)
     return result
 
 
@@ -398,6 +399,23 @@ def _learn_route(case, app, state, log_mark) -> None:
                 discovery_key(case.area, app), {"source": "run", "recipes": [], "notes": ""})
             entry.setdefault("recipes", []).insert(0, line)
             state.data.setdefault("notes", []).append(f"saved route for {case.area or app} from {case.id}")
+            state.save()
+    except Exception:  # noqa: BLE001  learning must never fail a case
+        pass
+
+
+def _learn_outcome(case, result, state) -> None:
+    """Fixed code keeps what the app actually did for a decided case (PASS/FAIL), so later runs expect it."""
+    from . import learned
+    try:
+        if result.verdict not in ("PASS", "FAIL") or not (result.actual or "").strip():
+            return
+        apps = [s.app for s in case.steps if s.app not in ("none", "redmine")]
+        if not apps:
+            return
+        text = f"{case.title}: {result.actual}"
+        if learned.record_behaviour(state.data.get("pack_root"), case.area, apps[-1], text, case.id):
+            state.data.setdefault("notes", []).append(f"saved behaviour for {case.area or apps[-1]} from {case.id}")
             state.save()
     except Exception:  # noqa: BLE001  learning must never fail a case
         pass

@@ -169,3 +169,8 @@ data_prep:
       Earn rewards: take a QA-AGENT TEST shipping-only order of {client}, pay it on the portal with the Stripe test
       card from the Payments facts (staging only), then move it to "Order Delivered" in the CRM so 5% is earned.
       Repeat until Current Rewards is enough, then record_value('wallet_ready', '<Current Rewards>').
+
+# Each app's stack: testers call lookup_docs for these when a screen or workflow is unfamiliar (cached in docs/).
+stack:
+  crm: {name: "SuiteCRM 7", docs: ["https://docs.suitecrm.com"]}
+  portal: {name: "Next.js", docs: ["https://nextjs.org/docs"]}

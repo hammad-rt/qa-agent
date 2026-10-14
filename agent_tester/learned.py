@@ -111,3 +111,16 @@ def record_route(pack_root, area, app, case_id, verdict, actions) -> str | None:
         return None
     line = "Route: " + " -> ".join(hops) + f" ({date.today().isoformat()}, {case_id} {verdict})"
     return line if add(pack_root, area, app, line) else None
+
+
+BEHAVIOUR_PREFIX = "Behaviour: "
+
+
+def record_behaviour(pack_root, area, app, text: str, case_id: str) -> str | None:
+    """How the app reacts (silent rejects, new tabs, values that need a reload). Written next to the routes so
+    later cases read it before they start. Record ids are stripped like routes."""
+    body = scrub(text)[:300]
+    if len(body) < 12:
+        return None
+    line = f"{BEHAVIOUR_PREFIX}{body} ({date.today().isoformat()}, {case_id})"
+    return line if add(pack_root, area, app, line) else None

@@ -10,6 +10,7 @@ import re
 from . import raw_calls
 from urllib.parse import urlparse
 import os
+import sys
 import time
 import logging
 log = logging.getLogger(__name__)
@@ -522,6 +523,62 @@ class TesterSession:
                 return {"error": str(e)}
             return {"restored_ok": r["verified"], "original": r["original"]}
 
+        def create_tool(name: str, purpose: str, script: str, params_json: str = "{}", changes_data: bool = False,
+                        action_type: str = "") -> dict:
+            """Ask for a new tool when no existing tool can do what a step needs (e.g. drag and drop a file, read a
+            canvas value, press a key combination on one field). script is ONE Playwright function:
+            async (page, args) => { ...; return JSON.stringify({...}); }  using page.locator('aria-ref=e15') for
+            elements from browser_snapshot and args for inputs. params_json describes the inputs, e.g.
+            '{"target": "element ref", "text": "value to enter"}'. Code checks it and the person running the test
+            approves it; once approved, call run_helper(name, params_json) to use it (later runs have it too).
+            No secrets, cookies, network calls, page navigation or logout. At most 2 per case."""
+            from .. import gen_tools
+            from ..auto import ask_line, is_auto
+            s.drafted = getattr(s, "drafted", 0) + 1
+            if s.drafted > 2:
+                return {"error": "tool request limit reached for this case; carry on without it or finish(stuck=True)"}
+            try:
+                params = json.loads(params_json or "{}")
+                assert isinstance(params, dict)
+            except Exception:  # noqa: BLE001
+                return {"error": "params_json must be a JSON object"}
+            problems = gen_tools.check(name, script, set(s.helpers))
+            if changes_data and not action_type:
+                problems.append("a tool that changes data needs an action_type for the approval gate")
+            if problems:
+                return {"error": "tool rejected by checks: " + "; ".join(problems) + ". Fix the script and ask again."}
+            src = gen_tools.render(name, redact(purpose), params, script, changes_data, action_type, s.case_id)
+            root = s.state.data.get("pack_root") or (str(s.pack.root) if s.pack else None)
+            if not root:
+                return {"error": "no pack to save tools in"}
+            ans = ""
+            if not (is_auto() and os.environ.get("QA_WEB") != "1" and not (sys.stdin and sys.stdin.isatty())):
+                try:
+                    ans = ask_line(f"\n[{s.case_id}] The tester asks for a new tool '{name}': {redact(purpose)}\n"
+                                   f"  Inputs: {json.dumps(params)}" + (f"\n  Changes data: yes ({action_type})" if changes_data else "")
+                                   + f"\n----- script -----\n{script}\n------------------\n"
+                                   "  Approve this tool? [y/N]: ").strip().lower()
+                except EOFError:
+                    ans = ""
+            approved = ans in ("y", "yes")
+            path = gen_tools.save(root, name, src, approved)
+            s.state.log_action(case_id=s.case_id, app=s.app, tool="create_tool",
+                               args={"name": name, "purpose": redact(purpose)[:200]}, plan_step=s.current_step,
+                               approval="approved" if approved else "rejected", outcome=str(path))
+            s.state.data.setdefault("tool_requests", []).append(
+                {"case_id": s.case_id, "name": name, "purpose": redact(purpose)[:200], "approved": approved, "path": str(path)})
+            s.state.save()
+            if not approved:
+                return {"approved": False, "note": "not approved (saved for review). Carry on another way or finish(stuck=True) "
+                                                   "saying which tool was missing"}
+            try:
+                from ..helpers import HelperInfo, _load_module
+                mod = _load_module(path, "helper_gen")
+                s.helpers[mod.HELPER["name"]] = HelperInfo(mod.HELPER["name"], mod, "pack", True)
+            except Exception as e:  # noqa: BLE001
+                return {"error": f"approved but could not load: {e}"}
+            return {"approved": True, "next": f"call run_helper(\"{name}\", params_json) to use it, then read the page back"}
+
         async def run_helper(name: str, params_json: str, tool_context) -> dict:
             """Run a tested helper instead of clicking through a routine step yourself, e.g.
             run_helper("login_form", '{"account": "admin"}'). Returns the values it read and its screenshots."""
@@ -554,7 +611,9 @@ class TesterSession:
                  needs_manual_login, ask_user, note_behaviour, lookup_docs]
         if s.toolset is not None:
             tools.append(paste_text)
-        if s.helpers and s.toolset is not None:
+            if not s.brief.get("discovery"):
+                tools.append(create_tool)
+        if s.toolset is not None:
             tools.append(run_helper)
         # Discovery is read-only for data writes but may propose recipes; ledger only on real cases.
         if s.brief.get("discovery") or not s.brief.get("read_only"):
@@ -617,7 +676,8 @@ class TesterSession:
         if name in BLOCKED_BROWSER:
             return self._deny(name, args, "this browser tool is not allowed. Read the page with browser_snapshot or "
                                           "browser_find; if the result you expected is not there, that is your result: "
-                                          "reload, read the stored value, record_value it and move on")
+                                          "reload, read the stored value, record_value it and move on. If you truly need "
+                                          "page scripting for a step, ask for a tool with create_tool")
         if name in ("browser_navigate", "browser_click") and _LOGOUT.search(str(args.get("url") or args.get("element") or "")) \
                 and not _LOGOUT.search(json.dumps(self.brief.get("steps") or [])):
             return self._deny(name, args, "logging out is not allowed: the browser login is shared by later runs "
@@ -697,7 +757,8 @@ class TesterSession:
                 return {"error": f"Blocked: you already did this {name} and the page did not move the step forward; "
                                  "repeating it will not help. Take a fresh browser_snapshot, re-read the page and look "
                                  "for another control or URL that reaches this step's goal (e.g. a different button with "
-                                 "the same purpose). When the other route works, call propose_memory with it as a recipe "
+                                 "the same purpose). If no available tool can do what the step needs, ask for one with "
+                                 "create_tool. When the other route works, call propose_memory with it as a recipe "
                                  "so the next run goes straight there. If no route exists, finish(stuck=True)."}
             if self.since_progress > int(self.brief.get("actions_per_step") or ACTIONS_PER_STEP) or self.actions > self.max_calls:
                 over_time = True

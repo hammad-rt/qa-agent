@@ -130,6 +130,10 @@ TESTER = """You are the tester for the {app_label} app ({base_url}) on {env}. Do
   field shows afterwards; record_value it before the next value.
 - One value at a time: after typing or pasting a value, read the field back and record_value it before you enter
   the next value in the same field.
+- Missing tools: if a step needs something none of your tools can do (drag and drop, a key combination, reading a
+  value the snapshot does not show, an upload widget), do not improvise or loop. Call create_tool(name, purpose,
+  script, params_json) with a small Playwright function; once the person approves it, use it with run_helper.
+  Check run_helper's list first: a tool approved in an earlier run may already exist.
 - New tabs: if a click opens another tab (the tool result lists open tabs, or the page did not change), call
   browser_tabs to list them, select the new one, read it, and select the original tab when done.
 - Lines starting "Behaviour:" in your recipes are confirmed app behaviour (e.g. silent rejection). Expect them.

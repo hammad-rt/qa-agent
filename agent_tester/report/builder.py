@@ -61,6 +61,7 @@ th{background:#f5f5f5;text-align:left}h2{border-bottom:2px solid #eee;padding-bo
 
 {% if learned %}<h2>Learned this run</h2><p>Approved: {{ learned.approved | length }}, rejected: {{ learned.rejected | length }},
 promoted to core: {{ learned.promoted | length }}, new open bugs saved: {{ learned.open_bugs_saved | length }}</p>{% endif %}
+{% if tool_requests %}<h2>Tools the agent asked for</h2><ul>{% for t in tool_requests %}<li><b>{{ t.name }}</b> ({{ t.case_id }}): {{ t.purpose }} — {{ "approved" if t.approved else "not approved, saved for review" }} <code>{{ t.path }}</code></li>{% endfor %}</ul>{% endif %}
 {% if notes %}<h2>Run notes</h2><ul>{% for n in notes %}<li>{{ n }}</li>{% endfor %}</ul>{% endif %}
 </body></html>"""
 
@@ -111,7 +112,7 @@ def build_report(state, pack=None, pdf: bool | None = None) -> Path:
         not_done=[r for r in results.values() if r.verdict in ("BLOCKED", "NOT VERIFIED", "AGENT INCOMPLETE")],
         baseline=base, final=fin, snap_keys=list(dict.fromkeys([*base, *fin])),
         ledger=state.data.get("ledger", []), unrestored=[u for u in state.data.get("settings", {}).values() if not u["verified"]],
-        learned=state.data.get("learned"), model=state.data.get("model"), notes=state.data.get("notes", []),
+        learned=state.data.get("learned"), model=state.data.get("model"), notes=state.data.get("notes", []), tool_requests=state.data.get("tool_requests", []),
         evidence_items=evidence_items)
     out = state.dir / "report.html"
     page = redact(html)

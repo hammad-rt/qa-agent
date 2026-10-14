@@ -4,6 +4,7 @@
   test <task_id> [--cases TC1,TC3] [--retest-bug N] [--env staging] [--dry-run] [--email] [--email-progress]
   rerun <task_id> --cases TC2,TC4     rerun chosen cases from the latest approved plan (no new planning)
   resume <run_dir>
+  web [--port 8765]                  web UI: start runs, answer questions, watch steps, reports
   report <run_dir>                    rebuild report.html / report.pdf and bug drafts
   bugs <run_dir> [--post]             list bug drafts; --post asks before posting each one to Redmine
   correct <run_dir> <case_id> <VERDICT> "<why>" [--general]   save a lesson now and fix the result
@@ -783,6 +784,9 @@ def _main(argv=None) -> int:
     rr.add_argument("task_id", type=int)
     rr.add_argument("--cases", required=True)
     rr.add_argument("--headed", action="store_true", help="show the testers' browser windows")
+    wp = sub.add_parser("web", help="open the web UI (runs, live steps, reports)")
+    wp.add_argument("--port", type=int, default=8765)
+    wp.add_argument("--host", default="127.0.0.1")
     rp = sub.add_parser("report")
     rp.add_argument("run_dir", type=Path)
     rp.add_argument("--project")
@@ -852,6 +856,9 @@ def _main(argv=None) -> int:
         return cmd_test(settings, a.task_id, a.case, a.env, a.dry_run, a.retest_bug, a.email, a.email_progress)
     if a.cmd == "rerun":
         return cmd_rerun(settings, a.task_id, a.cases)
+    if a.cmd == "web":
+        from .web.server import serve
+        return serve(a.host, a.port)
     if a.cmd == "report":
         return cmd_report(settings, a.run_dir, a.project)
     if a.cmd == "bugs":

@@ -659,11 +659,26 @@ class TesterSession:
             self.unread_input = ref or None
         elif name in ("browser_snapshot", "browser_find", "record_value"):
             self.unread_input = None
+        entered = self.state.data.setdefault("entered_values", {}).setdefault(self.case_id, {})
+        if name in ("browser_type", "paste_text") and args.get("text") is not None:
+            key = f"{re.sub(r'[^a-z0-9 ]', '', str(args.get('element') or '').lower()).strip()}={args.get('text')}"
+            if entered.get(key) == "saved":
+                return {"error": f"You already entered {args.get('text')!r} in this field and saved it. Do not enter it "
+                                 "again. Reopen the page by its route, READ the field with browser_snapshot, "
+                                 "record_value what it shows (that is the stored value), then mark_step and go to the "
+                                 "next value."}
+            entered[key] = "typed"
+        if name == "browser_click" and _SAVE.search(str(args.get("element") or "")):
+            for k, v in list(entered.items()):
+                if v == "typed":
+                    entered[k] = "saved"
         if name == "browser_find":
             self.misses = getattr(self, "misses", 0) + 1
             if self.misses == 3:
                 self.misses = 0
                 return {"error": RELOAD_HINT}
+        if name == "record_value" and not (last_act and last_act > last_snap):
+            self.since_progress, self._sigs = 0, {}          # a value read back is progress too
         if name == "mark_step" and args.get("n") not in self.result.steps_done:
             self.since_progress, self._sigs, self.saves, self.misses = 0, {}, 0, 0          # real progress: fresh per-step allowance
         limit = self._budget_check(name, args)
@@ -741,8 +756,10 @@ class TesterSession:
                 self._sigs[intent] = self._sigs.get(intent, 0) + 1
             n = max(self._sigs[sig], self._sigs.get(intent, 0) if intent else 0)
             if name == "browser_click" and _SAVE.search(str(args.get("element") or "")):
+                cnt = self.state.data.setdefault("save_clicks", {})
+                cnt[self.case_id] = cnt.get(self.case_id, 0) + 1
                 self.saves = getattr(self, "saves", 0) + 1
-                if self.saves == 2:
+                if self.saves == 2 or cnt[self.case_id] == 2:
                     return {"error": RELOAD_HINT}
             clicky = name in ("browser_click", "browser_run_code_unsafe", "browser_evaluate")
             warn_at, stop_at = (2, 4) if clicky else (LOOP_WARN, LOOP_STOP)   # a page click that did nothing: rethink at once

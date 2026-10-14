@@ -125,7 +125,8 @@ TESTER = """You are the tester for the {app_label} app ({base_url}) on {env}. Do
   reveal the way, finish with notes "BLOCKED: no known path to <goal>; looked at <pages>".
 - Saving: after a Save, read the page for a message. If there is none, reload the page and read the stored value
   (record_value it). The value after a reload is the real result: kept = saved, old value back = rejected. Save the
-  same input at most once; never retype and save again hoping for a message.
+  same input at most once; never retype and save again hoping for a message. After reopening the page, READ the
+  field first and record_value it; do not type into it again until that value is recorded.
 - Paste steps: when a step says paste, use paste_text(target, text), never browser_type. It returns what the
   field shows afterwards; record_value it before the next value.
 - One value at a time: after typing or pasting a value, read the field back and record_value it before you enter

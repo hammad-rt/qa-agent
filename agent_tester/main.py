@@ -301,6 +301,8 @@ def _execute(settings, pack, plan, state, policy, memory) -> int:
         with RunLock(settings.runs_dir / ".run.lock"):
             tester = make_tester(settings, pack, plan.env, policy, state.dir, memory=memory)
             testers = {app: tester for app in pack.apps}
+            state.data["pack_root"] = str(pack.root)
+            state.save()
             login = make_manual_login(pack, plan, state)
             login_first(pack, plan, state, login)
             progress.started(f"#{plan.task_id} on {plan.env}")

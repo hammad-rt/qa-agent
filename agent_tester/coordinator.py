@@ -6,6 +6,9 @@ Testers and the judge are injected callables so this file has no LLM dependency:
 """
 from __future__ import annotations
 
+import re
+from datetime import date
+
 from typing import Callable
 
 from .models import CaseResult, PlannedCase, StepResult, TestPlan
@@ -99,6 +102,11 @@ def recipes_covering(memory, area: str | None, app: str) -> list[str]:
     return [r["text"] for r in memory.recall(q, k=5) if r.get("kind") == "recipe" and r.get("text")]
 
 
+DISCOVERY_TRIES = 2
+_NO_PROGRESS = re.compile(r"maximum repeated|did not respond|no screens were mapped|unable to|could not reach|stuck",
+                          re.I)
+
+
 def ensure_discovery(plan, case, app: str, state, testers: dict, memory) -> dict:
     """If memory has no recipe for this area/app, run a bounded discovery pass once per area:app this run.
     Returns {source, recipes, notes} stored under state.data['discovery'][key]."""
@@ -106,14 +114,16 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory) -> dict
     store = state.data.setdefault("discovery", {})
     if key in store:
         return store[key]
-    if memory is None:
+    from . import learned
+    pack_routes = learned.read(state.data.get("pack_root"), case.area, app, case.title or "")
+    recipes = pack_routes + recipes_covering(memory, case.area, app)
+    if memory is None and not recipes:
         entry = {"source": "no_memory", "recipes": [], "notes": ""}
         store[key] = entry
         state.save()
         return entry
-    recipes = recipes_covering(memory, case.area, app)
     if recipes:
-        entry = {"source": "memory", "recipes": recipes, "notes": ""}
+        entry = {"source": "pack" if pack_routes else "memory", "recipes": recipes, "notes": ""}
         store[key] = entry
         state.save()
         state.checkpoint(f"discovery skipped for {key}: memory has {len(recipes)} recipe(s)")
@@ -159,7 +169,20 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory) -> dict
         except Exception:  # noqa: BLE001
             pass
     entry = {"source": "discovery", "recipes": proposed, "notes": notes, "blocked": blocked}
-    store[key] = entry
+    useful = bool(proposed) or bool(notes and not blocked and not notes.startswith("discovery failed")
+                                    and not _NO_PROGRESS.search(notes))
+    tries = state.data.setdefault("discovery_tries", {})
+    tries[key] = tries.get(key, 0) + 1
+    if useful:
+        store[key] = entry
+        if notes:
+            learned.add(state.data.get("pack_root"), case.area, app,
+                        f"Discovery: {learned.scrub(notes)[:500]} ({date.today().isoformat()})")
+    elif tries[key] >= DISCOVERY_TRIES:
+        state.save()
+        raise RunPaused(f"Discovery for {key} found no way to the screen after {tries[key]} tries "
+                        f"({notes[:300] or 'no notes'}). Sort out the login, or add a route under '## {key}' in "
+                        f"the pack's learned.md, then resume.")
     state.save()
     ddir = state.dir / "discovery"
     ddir.mkdir(parents=True, exist_ok=True)
@@ -335,6 +358,8 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
                                   evidence=[s for r in results for s in r.screenshots],
                                   note=f"login on {app} needs a person (CAPTCHA or robot check): {sr.needs_login}")
         results.append(sr)
+        if sr.steps_done and not (sr.stuck or sr.limit_hit or sr.needs_login):
+            _learn_route(case, app, state, log_mark)
         if (sr.notes or "").strip().upper().startswith("BLOCKED:"):
             return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,
                               values={k: v for r in results for k, v in r.values.items()},
@@ -360,6 +385,22 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
     if memory is not None and result.verdict in ("PASS", "PARTIAL"):
         _propose_success_recipe(memory, case, state)
     return result
+
+
+def _learn_route(case, app, state, log_mark) -> None:
+    """Fixed code writes the route this tester used into the pack's learned.md and this run's discovery entry."""
+    from . import learned
+    try:
+        acts = [a for a in state.data["action_log"][log_mark:] if a.get("case_id") == case.id]
+        line = learned.record_route(state.data.get("pack_root"), case.area, app, case.id, "reached", acts)
+        if line:
+            entry = state.data.setdefault("discovery", {}).setdefault(
+                discovery_key(case.area, app), {"source": "run", "recipes": [], "notes": ""})
+            entry.setdefault("recipes", []).insert(0, line)
+            state.data.setdefault("notes", []).append(f"saved route for {case.area or app} from {case.id}")
+            state.save()
+    except Exception:  # noqa: BLE001  learning must never fail a case
+        pass
 
 
 def _propose_success_recipe(memory, case, state) -> None:

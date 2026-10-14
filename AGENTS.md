@@ -2,6 +2,8 @@
 
 **Stack for decisions:** always-on Cursor rules `stack`, `qa-agent-core`, `live-run-gaps`, `root-cause-first`, plus skill [`qa-stack`](.cursor/skills/qa-stack/SKILL.md). Detailed prose: [`docs/stack/`](docs/stack/), status/gaps: [`docs/HANDOVER.md`](docs/HANDOVER.md).
 
+**Web console work:** follow skill [`web-ui-ux`](.cursor/skills/web-ui-ux/SKILL.md) (no jumping on live updates, ASK prompts, headless check).
+
 | Need | Open |
 |---|---|
 | Choose ADK vs fixed code vs helper vs pack | rule `stack`, skill `qa-stack` |

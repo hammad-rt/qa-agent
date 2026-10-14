@@ -76,6 +76,14 @@ iframe{width:100%;height:78vh;border:1px solid var(--line);border-radius:8px;bac
 </main>
 <div id="zoom" onclick="this.style.display='none'"><img></div>
 <script>
+function nearBottom(el){return el.scrollHeight-el.scrollTop-el.clientHeight<40}
+function setHTML(el,html){if(typeof el=='string')el=$(el);if(!el||el._h===html)return;
+ if(el.contains(document.activeElement)&&document.activeElement!==document.body&&/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)&&!/checkbox|radio|button/.test(document.activeElement.type))return;
+ const open=[...el.querySelectorAll('details[open]')].map(d=>d.dataset.k||d.querySelector('summary')?.textContent);
+ const st=el.scrollTop,ws=window.scrollY;el.innerHTML=html;el._h=html;
+ el.querySelectorAll('details').forEach(d=>{if(open.includes(d.dataset.k||d.querySelector('summary')?.textContent))d.open=true});
+ el.scrollTop=st;if(window.scrollY!==ws)window.scrollTo(0,ws)}
+
 const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 let cur=null, job=null, traceNext=0, outLen=0, lastDetail=null;
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{document.querySelectorAll('.tab,.pane').forEach(x=>x.classList.remove('on'));t.classList.add('on');$('#'+t.dataset.p).classList.add('on')});
@@ -85,15 +93,15 @@ let sel=new Set();
 async function loadRuns(){try{const rs=await api('/api/runs');const ids=new Set(rs.map(r=>r.id));sel=new Set([...sel].filter(x=>ids.has(x)));
  const bar=`<div class="runbar"><label class="mute"><input type="checkbox" ${rs.length&&sel.size==rs.length?'checked':''} onchange="selAll(this.checked)"> select all</label><span style="flex:1"></span>${sel.size?`<button class="dan sm" onclick="delSel()">Delete ${sel.size}</button>`:''}</div>`;
  window._runs=rs;
- $('#runs').innerHTML=(rs.length?bar:'')+rs.map(r=>`<div class="run ${r.id==cur?'sel':''}" onclick="openRun('${r.id}')"><div class="t"><input type="checkbox" class="rsel" ${sel.has(r.id)?'checked':''} onclick="event.stopPropagation();togSel('${r.id}',this.checked)"> #${esc(r.task)} <span class="pill ${r.status}">${esc(r.status)}</span><span class="racts"><button class="sm" title="Rename" onclick="event.stopPropagation();renameRun('${r.id}')">✎</button><button class="sm dan" title="Delete" onclick="event.stopPropagation();delRun('${r.id}')">✕</button></span></div>${r.label?`<div class="lbl">${esc(r.label)}</div>`:''}<div class="mute">${esc(r.env||'')} · ${r.done}/${r.cases} cases · ${esc((r.started||'').replace('T',' '))}</div><div>${pills(r.counts)}</div></div>`).join('')||'<div class="empty">No runs yet.</div>'}catch(e){}}
+ setHTML('#runs',(rs.length?bar:'')+rs.map(r=>`<div class="run ${r.id==cur?'sel':''}" onclick="openRun('${r.id}')"><div class="t"><input type="checkbox" class="rsel" ${sel.has(r.id)?'checked':''} onclick="event.stopPropagation();togSel('${r.id}',this.checked)"> #${esc(r.task)} <span class="pill ${r.status}">${esc(r.status)}</span><span class="racts"><button class="sm" title="Rename" onclick="event.stopPropagation();renameRun('${r.id}')">✎</button><button class="sm dan" title="Delete" onclick="event.stopPropagation();delRun('${r.id}')">✕</button></span></div>${r.label?`<div class="lbl">${esc(r.label)}</div>`:''}<div class="mute">${esc(r.env||'')} · ${r.done}/${r.cases} cases · ${esc((r.started||'').replace('T',' '))}</div><div>${pills(r.counts)}</div></div>`).join('')||'<div class="empty">No runs yet.</div>')}catch(e){}}
 function openRun(id){if(cur!==id){cur=id;traceNext=0;blocks=[];openBlock=null;$('#events').innerHTML='';}loadRuns();refresh()}
 async function start(dry){$('#startErr').textContent='';try{job=await api('/api/start',{task:$('#task').value,env:$('#env').value,cases:$("#caseIds").value,dry_run:dry});outLen=0;$('#console').textContent='';cur=null;$('#events').innerHTML='';$('#title').textContent='Starting #'+$('#task').value+'…';pollJob()}catch(e){$('#startErr').textContent=e.message}}
 async function resume(){try{job=await api('/api/start',{resume:cur});outLen=0;$('#console').textContent='';pollJob()}catch(e){alert(e.message)}}
 async function stopJob(){if(job&&confirm('Stop this run? It pauses and can be resumed.'))job=await api(`/api/jobs/${job.id}/stop`,{})}
 async function answer(){const i=$('#ans');await api(`/api/jobs/${job.id}/input`,{text:i.value});$('#askBox').innerHTML='';$('#askBox').dataset.p=''}
-async function pollJob(){if(!job)return;try{const j=await api(`/api/jobs/${job.id}/out?since=${outLen}`);outLen=j.len;job=j;$('#consoleWrap').style.display='';const c=$('#console');c.textContent+=j.out;c.scrollTop=c.scrollHeight;
+async function pollJob(){if(!job)return;try{const j=await api(`/api/jobs/${job.id}/out?since=${outLen}`);outLen=j.len;job=j;$('#consoleWrap').style.display='';const c=$('#console');const stick=nearBottom(c);c.textContent+=j.out;if(stick)c.scrollTop=c.scrollHeight;
  if(j.run_dir&&cur!==j.run_dir){cur=j.run_dir;traceNext=0;$('#events').innerHTML='';loadRuns()}
- if(j.waiting){if(!$('#ans')||$('#askBox').dataset.p!==j.prompt)$('#askBox').dataset.p=j.prompt,$('#askBox').innerHTML=`<div class="ask"><span style="flex:0 1 50%;white-space:pre-wrap">${esc(j.prompt)}</span><input id="ans" type="${j.secret?'password':'text'}" autocomplete="off" placeholder="Type an answer, or leave empty for the default" onkeydown="if(event.key=='Enter')answer()"><button class="pri" onclick="answer()">Send</button></div>`,$('#ans').focus()}else $('#askBox').innerHTML='';
+ if(j.waiting){if(!$('#ans')||$('#askBox').dataset.p!==j.prompt)$('#askBox').dataset.p=j.prompt,$('#askBox').innerHTML=`<div class="ask"><span style="flex:0 1 50%;white-space:pre-wrap">${esc(j.prompt)}</span><input id="ans" type="${j.secret?'password':'text'}" autocomplete="off" placeholder="Type an answer, or leave empty for the default" onkeydown="if(event.key=='Enter')answer()"><button class="pri" onclick="answer()">Send</button></div>`,(document.activeElement===document.body)&&$('#ans').focus({preventScroll:true})}else $('#askBox').innerHTML='';
  $('#stopBtn').style.display=j.running?'':'none';if(!j.running){$('#askBox').innerHTML='';loadRuns()}}catch(e){}}
 const clean=t=>String(t??'').replace(/<\|[^|]*\|>/g,' ').replace(/^\s*(thought|analysis|final)\b\s*/i,'').replace(/\s+\n/g,'\n').trim();
 function tryJson(t){const m=String(t).match(/\{[\s\S]*\}/);if(!m)return null;try{return JSON.parse(m[0])}catch(e){return null}}
@@ -133,29 +141,29 @@ let picked=null;
 function nextCaseId(){const done=new Set(blocks.map(b=>b.id));const c=((lastPlan||{}).cases||[]).find(x=>!done.has(x.id)&&(!picked||picked.includes(x.id)));return c?c.id:'case '+(blocks.length)}
 function ensure(id,title){if(openBlock&&openBlock.id==id&&!openBlock.closed)return;let b=blocks.find(x=>x.id==id&&!x.closed);if(!b){b={id,title:title||caseTitle(id),html:'',verdict:null,closed:false};blocks.push(b)}openBlock=b}
 function drawBlocks(){const box=$('#events');const open=new Set([...box.querySelectorAll('details[open]')].map(d=>d.dataset.id));
-  box.innerHTML=blocks.map((b,i)=>{const isLast=i==blocks.length-1;const o=open.has(b.id)||isLast;
-   return `<details class="blk" data-id="${esc(b.id)}" ${o?'open':''}><summary><b>${esc(b.id)}</b> <span>${esc(b.title)}</span> ${b.verdict?`<span class="pill ${b.verdict.split(' ')[0]}">${esc(b.verdict)}</span>`:(isLast&&!b.closed?'<span class="pill running">in progress</span>':'')}</summary><div class="body">${b.html}</div></details>`}).join('')||'<div class="empty">No steps yet.</div>';
-  if($('#follow').checked){const p=$('#live');p.scrollTop=p.scrollHeight}}
+  setHTML(box,blocks.map((b,i)=>{const isLast=i==blocks.length-1;const o=open.has(b.id)||isLast;
+   return `<details class="blk" data-id="${esc(b.id)}" ${o?'open':''}><summary><b>${esc(b.id)}</b> <span>${esc(b.title)}</span> ${b.verdict?`<span class="pill ${b.verdict.split(' ')[0]}">${esc(b.verdict)}</span>`:(isLast&&!b.closed?'<span class="pill running">in progress</span>':'')}</summary><div class="body">${b.html}</div></details>`}).join('')||'<div class="empty">No steps yet.</div>');
+  {const p=$('#live');if($('#follow').checked&&p._stick!==false)p.scrollTop=p.scrollHeight}}
 async function refresh(){if(!cur)return;let d;
  try{d=await api(`/api/runs/${cur}`)}catch(e){return}
  lastPlan=d.plan;picked=(d.mode||{}).cases||null;
- try{const s=d.summary;$('#title').innerHTML=`#${esc(s.task)} on ${esc(s.env||'')} <span class="pill ${s.status}">${esc(s.status)}</span>`;
-  $('#sub').innerHTML=`${s.done}/${s.cases} cases ${pills(s.counts)} · ${esc(s.last||'')}`;$('#resumeBtn').style.display=(s.status=='paused'&&!(job&&job.running))?'':'none'}catch(e){console.error(e)}
+ try{const s=d.summary;setHTML('#title',`#${esc(s.task)} on ${esc(s.env||'')} <span class="pill ${s.status}">${esc(s.status)}</span>`);
+  setHTML('#sub',`${s.done}/${s.cases} cases ${pills(s.counts)} · ${esc(s.last||'')}`);$('#resumeBtn').style.display=(s.status=='paused'&&!(job&&job.running))?'':'none'}catch(e){console.error(e)}
  const key=JSON.stringify(d);if(key!==lastDetail){lastDetail=key;try{render(d)}catch(e){console.error('render',e)}}
  try{const t=await api(`/api/runs/${cur}/trace?since=${traceNext}`);if(!traceNext){blocks=[];openBlock=null}
   if(t.lines.length){for(const ln of t.lines){try{addEvent(ln)}catch(e){console.error('event',e,ln)}}traceNext=t.next;drawBlocks()}}catch(e){console.error('trace',e)}}
 function render(d){const res=d.results||{};d.shots=d.shots||[];d.reports=d.reports||[];d.action_log=d.action_log||[];
- $('#cases').innerHTML=((d.plan||{}).cases||[]).map(c=>{const r=res[c.id]||{};return `<div class="case"><h2>${esc(c.id)} · ${esc(c.title)} ${r.verdict?`<span class="pill ${r.verdict.split(' ')[0]}">${esc(r.verdict)}</span>`:'<span class="pill">pending</span>'}</h2>
+ setHTML('#cases',((d.plan||{}).cases||[]).map(c=>{const r=res[c.id]||{};return `<div class="case"><h2>${esc(c.id)} · ${esc(c.title)} ${r.verdict?`<span class="pill ${r.verdict.split(' ')[0]}">${esc(r.verdict)}</span>`:'<span class="pill">pending</span>'}</h2>
  <ol>${(c.steps||[]).map(st=>typeof st=='string'?`<li>${esc(st)}</li>`:`<li>[${esc(st.app)}] ${esc(st.text)} ${st.inferred?'<span class="inf">inferred</span>':''} ${st.changes_data?'<span class="chg">changes data</span>':''}</li>`).join('')}</ol>
  <div><b>Expected:</b> ${esc(c.expected)}</div>${r.actual?`<div><b>Actual:</b> ${esc(r.actual)}</div>`:''}${r.note?`<div><b>Notes:</b> ${esc(r.note)}</div>`:''}
- ${r.values&&Object.keys(r.values).length?`<div><b>Values:</b> ${Object.entries(r.values).map(([k,v])=>`${esc(k)}=<code>${esc(typeof v=='object'?v.value??JSON.stringify(v):v)}</code>`).join(' ')}</div>`:''}</div>`}).join('')||'<div class="empty">No plan yet.</div>';
- $('#shots').innerHTML=d.shots.length?`<div class="shots">${d.shots.slice().reverse().map(n=>`<div class="shotbox"><img loading="lazy" src="/api/runs/${cur}/file?path=shots/${encodeURIComponent(n)}" onclick="zoom(this.src)"><button class="x sm dan" title="Delete screenshot" onclick="delShot('${esc(n)}')">✕</button><div class="mute">${esc(n)}</div></div>`).join('')}</div>`:'<div class="empty">No screenshots yet.</div>';
- $('#log').innerHTML=(d.action_log||[]).length?`<table><tr><th>#</th><th>Case</th><th>App</th><th>Action</th><th>Step</th><th>Approval</th><th>Outcome</th></tr>${d.action_log.slice().reverse().map(a=>`<tr><td>${a.seq}</td><td>${esc(a.case_id)}</td><td>${esc(a.app)}</td><td><code>${esc(a.tool)}</code> ${a.inferred?'<span class="inf">inferred</span>':''}<div class="mute">${esc(JSON.stringify(a.args||{}).slice(0,140))}</div></td><td>${esc(a.plan_step??'')}</td><td>${esc(a.approval)}</td><td>${esc(a.outcome)}${a.deviation?`<div class="mute">${esc(a.deviation)}</div>`:''}</td></tr>`).join('')}</table>`:'<div class="empty">No actions yet.</div>';
+ ${r.values&&Object.keys(r.values).length?`<div><b>Values:</b> ${Object.entries(r.values).map(([k,v])=>`${esc(k)}=<code>${esc(typeof v=='object'?v.value??JSON.stringify(v):v)}</code>`).join(' ')}</div>`:''}</div>`}).join('')||'<div class="empty">No plan yet.</div>');
+ setHTML('#shots',d.shots.length?`<div class="shots">${d.shots.slice().reverse().map(n=>`<div class="shotbox"><img loading="lazy" src="/api/runs/${cur}/file?path=shots/${encodeURIComponent(n)}" onclick="zoom(this.src)"><button class="x sm dan" title="Delete screenshot" onclick="delShot('${esc(n)}')">✕</button><div class="mute">${esc(n)}</div></div>`).join('')}</div>`:'<div class="empty">No screenshots yet.</div>');
+ setHTML('#log',(d.action_log||[]).length?`<table><tr><th>#</th><th>Case</th><th>App</th><th>Action</th><th>Step</th><th>Approval</th><th>Outcome</th></tr>${d.action_log.slice().reverse().map(a=>`<tr><td>${a.seq}</td><td>${esc(a.case_id)}</td><td>${esc(a.app)}</td><td><code>${esc(a.tool)}</code> ${a.inferred?'<span class="inf">inferred</span>':''}<div class="mute">${esc(JSON.stringify(a.args||{}).slice(0,140))}</div></td><td>${esc(a.plan_step??'')}</td><td>${esc(a.approval)}</td><td>${esc(a.outcome)}${a.deviation?`<div class="mute">${esc(a.deviation)}</div>`:''}</td></tr>`).join('')}</table>`:'<div class="empty">No actions yet.</div>');
  const rep=d.reports.find(n=>n=='report.html');
- $('#report').innerHTML=(d.reports.length?`<div class="row" style="margin-bottom:10px;flex-wrap:wrap">${d.reports.map(n=>`<a href="/api/runs/${cur}/file?path=${encodeURIComponent(n)}" target="_blank"><button>${esc(n)}</button></a>`).join('')}</div>`:'')+(rep?`<iframe src="/api/runs/${cur}/file?path=report.html"></iframe>`:'<div class="empty">The report appears here when the run finishes.</div>')}
+ setHTML('#report',(d.reports.length?`<div class="row" style="margin-bottom:10px;flex-wrap:wrap">${d.reports.map(n=>`<a href="/api/runs/${cur}/file?path=${encodeURIComponent(n)}" target="_blank"><button>${esc(n)}</button></a>`).join('')}</div>`:'')+(rep?`<iframe src="/api/runs/${cur}/file?path=report.html"></iframe>`:'<div class="empty">The report appears here when the run finishes.</div>'))}
 function zoom(src){$('#zoom img').src=src;$('#zoom').style.display='flex'}
 (async()=>{const js=await api('/api/jobs');job=js.find(j=>j.running)||null;if(job)pollJob();loadRuns()})();
-setInterval(pollJob,1000);setInterval(refresh,2000);setInterval(loadRuns,5000);
+$('#live').addEventListener('scroll',e=>e.target._stick=nearBottom(e.target));setInterval(pollJob,1000);setInterval(refresh,2000);setInterval(loadRuns,5000);
 
 let know=[],knowEdit=null;
 async function loadKnow(){try{know=await api('/api/knowledge')}catch(e){$('#know').innerHTML='<div class="mute">Could not load: '+esc(e.message||e)+'</div>';return}drawKnow()}

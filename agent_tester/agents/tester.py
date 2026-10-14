@@ -206,6 +206,19 @@ def wait_profile_free(profile: Path, timeout: float = 20.0) -> bool:
     return False
 
 
+def mark_clean_exit(profile: Path) -> None:
+    """Stop Chrome's "didn't shut down correctly / Restore pages?" bubble on the shared profile."""
+    prefs = profile / "Default" / "Preferences"
+    try:
+        data = json.loads(prefs.read_text())
+        prof = data.setdefault("profile", {})
+        if prof.get("exit_type") != "Normal" or prof.get("exited_cleanly") is not True:
+            prof["exit_type"], prof["exited_cleanly"] = "Normal", True
+            prefs.write_text(json.dumps(data))
+    except (OSError, ValueError):
+        pass
+
+
 def release_profile(profile: Path, timeout: float = 20.0) -> bool:
     """Wait for Chrome to exit and clear stale Singleton locks. Never SIGTERM/SIGKILL — that drops in-memory cookies."""
     profile.mkdir(parents=True, exist_ok=True)
@@ -783,6 +796,7 @@ def manual_login(run_dir: Path, app: str, url: str, username: str | None, input_
     storage = storage_state_path(run_dir, app)
     storage.parent.mkdir(parents=True, exist_ok=True)
     clear_stale_profile_locks(profile)
+    mark_clean_exit(profile)
     # --caps=storage only here: needed for browser_storage_state. Testers load via --storage-state, no storage caps.
     args = ["-y", "@playwright/mcp@latest", "--user-data-dir", str(profile), "--output-dir", str(shots),
             "--viewport-size", "1366,900", "--caps=storage"]

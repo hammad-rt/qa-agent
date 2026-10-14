@@ -2,6 +2,8 @@
 
 **Stack for decisions:** always-on Cursor rules `stack`, `qa-agent-core`, `live-run-gaps`, `root-cause-first`, plus skill [`qa-stack`](.cursor/skills/qa-stack/SKILL.md). Detailed prose: [`docs/stack/`](docs/stack/), status/gaps: [`docs/HANDOVER.md`](docs/HANDOVER.md).
 
+**Prompt rules (`agent_tester/agents/prompts.py`):** add a rule as a whole new `- ` line after a complete one, never inside another rule; continuation lines are indented two spaces. `tests/test_prompt_lint.py` fails on spliced, orphaned or duplicate rules.
+
 **Web console work:** follow skill [`web-ui-ux`](.cursor/skills/web-ui-ux/SKILL.md) (no jumping on live updates, ASK prompts, headless check).
 
 | Need | Open |

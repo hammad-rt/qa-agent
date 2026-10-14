@@ -179,10 +179,19 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
             hint = bug["text"] if bug else f"Redmine issue #{retest_bug}"
             print(f"No earlier run links cases to bug {retest_bug}; the planner will pick cases related to it.")
             task_text += f"\n\nRETEST MODE: plan only the cases that check this fixed bug: {hint}"
+    from .modes import drafted_plan
+    draft, draft_src, draft_state = (None, None, {}) if (dry_run or retest_bug) else \
+        drafted_plan(settings.runs_dir, task_id, skip=state.dir)
+    if draft is not None and getattr(draft, "env", env) != env:
+        draft = None                                  # drafted for another environment: plan again
     lessons_mem = open_memory(settings, pack)
     from .agents.llm import LLMOutputError
     try:
-        plan = asyncio.run(plan_task(settings, pack, task_text, task_id, env, only_case=",".join(only) or None,
+        if draft is not None:
+            print(f"Continuing from the plan drafted in {draft_src.name} (plan only); no new planning.")
+            plan = draft
+        else:
+          plan = asyncio.run(plan_task(settings, pack, task_text, task_id, env, only_case=",".join(only) or None,
                                      lessons=lessons_mem.as_prompt(lessons_mem.preload()), trace_path=state.dir / "trace.jsonl", generate=generate,
                                      preapprovable=list(pack.config.get("preapprovable_actions", []))))
     except LLMOutputError as e:
@@ -215,7 +224,7 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
     gate.ask_batch(plan.requirements, ctx)
     user_answers = {r.key: r.value for r in plan.requirements
                     if r.kind not in ("url", "account") and r.source == "user" and r.value}
-    if user_answers:
+    if user_answers and draft is None:
         print("\nUpdating the plan with your answers...")
         try:
             new = asyncio.run(plan_task(settings, pack, task_text, task_id, env, only_case=",".join(only) or None,
@@ -244,7 +253,9 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
                 issues += casegen.check_generated(plan, casegen.task_sources(bundle, pack.facts))
             gate.show_plan(plan, issues)
             gate.ask_batch(plan.requirements, ctx)
-    if generate:
+    if generate and draft is not None:
+        state.data["case_answers"] = draft_state.get("case_answers")
+    elif generate:
         state.data["case_answers"] = casegen.ask_case_questions(plan)
         plan = casegen.edit_cases(plan)
         (state.dir / "generated_cases.textile").write_text(casegen.to_textile(plan, bundle.issue.get("subject", "")))
@@ -265,7 +276,7 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
         return 2
     if dry_run:
         state.checkpoint("dry run: stopped after plan gate", status="dry_run")
-        print(f"\nDry run done. Plan saved in {state.path}")
+        print(f"\nPlan only: done. Plan saved in {state.path}. Start a normal run of this task to continue from it.")
         return 0
     sites = run_sites(policy, plan)
     print("\nThe browser will stay on: " + (", ".join(sites) or "no sites yet")

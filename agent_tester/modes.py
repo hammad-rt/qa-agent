@@ -56,3 +56,16 @@ def latest_plan(runs_dir: Path, task_id: int) -> tuple[TestPlan | None, Path | N
         if state.get("plan") and state.get("approved"):
             return TestPlan.model_validate(state["plan"]), run
     return None, None
+
+
+def drafted_plan(runs_dir: Path, task_id: int, skip: Path | None = None) -> tuple[TestPlan | None, Path | None, dict]:
+    """The plan from a plan-only run, when that is the latest run of this task: a normal run continues from it
+    (same cases, same answers) instead of planning again."""
+    for run in past_runs(runs_dir, task_id):
+        if skip is not None and run.resolve() == Path(skip).resolve():
+            continue
+        state = json.loads((run / "state.json").read_text())
+        if state.get("status") == "dry_run" and state.get("plan"):
+            return TestPlan.model_validate(state["plan"]), run, state
+        return None, None, {}
+    return None, None, {}

@@ -55,7 +55,7 @@ iframe{width:100%;height:78vh;border:1px solid var(--line);border-radius:8px;bac
   <div class="new">
     <div class="row" style="display:flex;gap:8px"><input id="task" style="flex:1" placeholder="Redmine task #"><select id="env"><option>staging</option><option>pre-prod</option><option>production</option></select></div>
     <input id="caseIds" placeholder="Cases (optional), e.g. TC1,TC2">
-    <div class="row"><button class="pri" onclick="start(false)">Start run</button><button onclick="start(true)">Plan only</button></div>
+    <div class="row"><button class="pri" onclick="start(false)">Start run</button><button onclick="start(true)" title="Draft the plan and answer its questions without testing. The next Start run of the same task and environment continues from this plan.">Plan only</button></div>
     <div id="startErr" class="mute"></div>
   </div>
   <div id="runs"></div>

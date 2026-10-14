@@ -134,7 +134,7 @@ class Job:
                         q = json.loads(line[len(ASK_MARK):])
                     except ValueError:
                         q = {"prompt": line[len(ASK_MARK):], "secret": False}
-                    q["secret"] = bool(q.get("secret")) or any(w in str(q.get("prompt", "")).lower() for w in SECRET_WORDS)
+                    q["secret"] = bool(q.get("secret"))      # the CLI knows which questions are secret; trust it
                     self.pending = q
                     if self.out and not self.out.endswith("\n"):
                         self.out += "\n"

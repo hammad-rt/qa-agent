@@ -35,6 +35,34 @@ FREE_TOOLS = {"browser_snapshot", "browser_take_screenshot", "browser_wait_for",
               "browser_console_messages", "browser_network_requests", "mark_step", "record_value", "evidence_name",
               "finish", "needs_manual_login", "recall_lessons", "propose_memory", "get_secret",
               "note_behaviour", "lookup_docs", "browser_tabs"}
+# Real paste: clipboard + Ctrl+V when the browser allows it, else a paste event with the text (both run the
+# page's paste handler; typing does not). Reads the field back after the page reacts.
+PASTE_JS = r"""async (page) => {
+  const el = page.locator('aria-ref=' + __REF__);
+  const text = __TEXT__;
+  await el.click();
+  await el.fill('');
+  let how = 'clipboard';
+  try {
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+    await page.evaluate(t => navigator.clipboard.writeText(t), text);
+    await el.press('ControlOrMeta+V');
+    await page.waitForTimeout(300);
+    if ((await el.inputValue()) === '' && text !== '') throw new Error('empty after paste');
+  } catch (e) {
+    how = 'paste-event';
+    await el.fill('');
+    await el.evaluate((node, t) => {
+      const dt = new DataTransfer(); dt.setData('text/plain', t);
+      const ev = new ClipboardEvent('paste', {clipboardData: dt, bubbles: true, cancelable: true});
+      if (node.dispatchEvent(ev)) {           // page did not handle it: insert like the browser would
+        node.focus(); document.execCommand('insertText', false, t);
+      }
+    }, text);
+  }
+  await page.waitForTimeout(400);
+  return JSON.stringify({value: await el.inputValue(), how});
+}"""
 _SAVE = re.compile(r"\b(save|submit|update|apply|confirm)\b", re.I)
 RELOAD_HINT = ("You already saved/searched here and the expected message did not appear. Do not save or search "
                "again. Check the real result: reload the page (browser_navigate to the same address, or reopen it by "
@@ -372,6 +400,38 @@ class TesterSession:
             s.result.notes, s.result.stuck, s.finished = f"needs a manual login: {s.result.needs_login}", True, True
             return {"ok": True, "next": "stop now; a person will log in and the case will be retried"}
 
+        async def paste_text(target: str, text: str, tool_context, element: str = "") -> dict:
+            """Paste text into a field the way a person does (clipboard paste, Ctrl+V), not typing. Use it whenever
+            a step says paste: sites often clean pasted text in a separate paste handler that typing never runs.
+            target is the element ref from browser_snapshot (e.g. "e15"). The field is cleared first, and the value
+            the field shows afterwards is read back and returned; record_value it before pasting the next value."""
+            from ..helpers import adk_caller
+            ref = str(target or "").removeprefix("ref=").strip()
+            if not re.fullmatch(r"[a-z]?\d*e\d+", ref):
+                return {"error": "target must be an element ref from browser_snapshot, e.g. e15"}
+            if s.toolset is None or tool_context is None:
+                return {"error": "browser not available"}
+            if getattr(s, "unread_input", None) == ref:
+                return {"error": "you have not read back the last value in this field; browser_snapshot and "
+                                 "record_value it first, then paste the next one"}
+            code = PASTE_JS.replace("__REF__", json.dumps(ref)).replace("__TEXT__", json.dumps(str(text)))
+            try:
+                out = str(await adk_caller(s.toolset, tool_context)("browser_run_code_unsafe", {"code": code}) or "")
+            except Exception as e:  # noqa: BLE001
+                return {"error": f"paste failed: {str(e)[:300]}"}
+            m = re.search(r"\{.*\}", out.replace('\\"', '"'), re.S)
+            try:
+                res = json.loads(m.group(0)) if m else {}
+            except ValueError:
+                res = {}
+            s.state.log_action(case_id=s.case_id, app=s.app, tool="paste_text",
+                               args={"element": element, "target": ref, "text": redact(str(text))},
+                               plan_step=s.current_step, outcome="ok" if "value" in res else out[:150])
+            if "value" not in res:
+                return {"error": f"paste did not run: {out[:300]}"}
+            return {"pasted": str(text), "field_now_shows": res["value"], "how": res.get("how"),
+                    "next": "record_value what field_now_shows says, then continue"}
+
         async def finish(notes: str, tool_context, stuck: bool = False) -> dict:
             """Call when your steps are done, or when you are stuck and cannot continue.
             A final proof screenshot is taken automatically."""
@@ -492,6 +552,8 @@ class TesterSession:
 
         tools = [record_value, calculate, request_approval, mark_step, evidence_name, get_secret, finish, recall_lessons,
                  needs_manual_login, ask_user, note_behaviour, lookup_docs]
+        if s.toolset is not None:
+            tools.append(paste_text)
         if s.helpers and s.toolset is not None:
             tools.append(run_helper)
         # Discovery is read-only for data writes but may propose recipes; ledger only on real cases.
@@ -530,6 +592,14 @@ class TesterSession:
         elif name == "record_value" and last_act and last_act > last_snap:
             return {"error": "The page changed after your last read and may still be updating. "
                              "Take a fresh browser_snapshot (it waits for the page to settle), then record the value again."}
+        if name in ("browser_type", "browser_fill_form"):
+            ref = str(args.get("target") or args.get("ref") or "").removeprefix("ref=")
+            if ref and getattr(self, "unread_input", None) == ref:
+                return {"error": "you typed into this field and never read the result back. browser_snapshot, "
+                                 "record_value what it shows, then enter the next value"}
+            self.unread_input = ref or None
+        elif name in ("browser_snapshot", "browser_find", "record_value"):
+            self.unread_input = None
         if name == "browser_find":
             self.misses = getattr(self, "misses", 0) + 1
             if self.misses == 3:

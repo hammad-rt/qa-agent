@@ -14,6 +14,7 @@ Rewritten 2026-10-06 after the original file was lost. Sources: QA runs on #1809
 | CRM (SuiteCRM) | https://staging5.rolustech.com:4220/ | https://savo.store/ |
 
 ## Accounts (passwords never stored here)
+- All Redmine posts (notes, time entries, bugs) go through Hammad Iqbal's account, never Sidney's.
 - Staging CRM: `maria.tariq`. Was not an admin on 25 Sep, became admin by 28 Sep. Check the role each run.
 - Staging portal: `sidney@savostore.com`. Check the account currency (USD or KES) each run.
 - Production: no accounts known yet. Ask.
@@ -21,7 +22,15 @@ Rewritten 2026-10-06 after the original file was lost. Sources: QA runs on #1809
 ## Payments
 - Stripe test card on staging: 4242 4242 4242 4242, expiry 12/34, CVC 123.
 - Buy & Ship (B&S) orders on staging offer only M-Pesa, so card payment is blocked for them.
+- Classic Buy & Ship is paid by bank transfer. Stripe (card) tests for non-Express orders use Shipping Only orders instead: pay an EXISTING unpaid Shipping Only order with the 4242 card; don't create new orders for this (confirmed by Hammad 2026-10-15).
 - M-Pesa: skip unless the user says otherwise.
+
+## Modules (portal)
+- Shipping Only is its own module with its own menu in the portal, separate from Buy & Ship (confirmed 2026-10-15). In the CRM, Shipping Only orders are `AOS_Invoices`; Buy & Ship are `AOS_Quotes`.
+- Savo Express: the order is created only after payment. Other order types (Shipping Only, Buy & Ship) still get an order ID up front.
+- Adding to the cart opens an "Added to cart" prompt with Checkout and Continue shopping.
+- Savo Express prices are shown as they are, with no "est." or "estimated" label (#182698 won't do). Don't flag a missing "estimated" label.
+- Intercom on the portal stays as it is. Don't flag it or suggest changing it.
 
 ## Business rules
 - Rewards earn rate: 5% of each order. Earned when the order is paid and moved to "Order Delivered" in the CRM.

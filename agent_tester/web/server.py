@@ -25,6 +25,14 @@ MEM_FIELDS = ("id", "kind", "scope", "area", "text", "status", "source", "eviden
               "created_at", "last_confirmed_at", "success_count", "failure_count")
 
 
+def run_sort_key(d) -> str:
+    """Newest first by the start time in the folder name (<task>-YYYYMMDD-HHMMSS); folder mtimes change
+    whenever a file inside is touched, which reshuffled the list."""
+    import re as _re
+    m = _re.search(r"(\d{8})-(\d{6})$", d.name)
+    return m.group(1) + m.group(2) if m else "0"
+
+
 def _mem_db():
     """Open the memory DB without loading the embedder. value_or_ref and secrets are never sent to the browser."""
     import os
@@ -280,7 +288,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, STATIC.read_bytes(), "text/html; charset=utf-8")
             if parts == ["api", "runs"]:
                 ds = sorted((d for d in RUNS.iterdir() if d.is_dir() and not d.name.startswith(".")),
-                            key=lambda d: d.stat().st_mtime, reverse=True) if RUNS.exists() else []
+                            key=run_sort_key, reverse=True) if RUNS.exists() else []
                 return self._send(200, [run_summary(d) for d in ds[:100]])
             if parts == ["api", "jobs"]:
                 return self._send(200, [j.info(len(j.out)) for j in JOBS.values()])

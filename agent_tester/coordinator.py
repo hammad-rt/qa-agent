@@ -6,6 +6,8 @@ Testers and the judge are injected callables so this file has no LLM dependency:
 """
 from __future__ import annotations
 
+from .reliability import is_retryable, wait_for_model
+
 import re
 from datetime import date
 
@@ -305,7 +307,7 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
             return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected, note=f"no tester for app '{app}'")
         disco = ensure_discovery(plan, case, app, state, testers, memory)
         brief = inject_discovery(brief_for(plan, case, steps, state), disco)
-        attempt = 0
+        attempt = outages = 0
         while True:
             log_mark = len(state.data["action_log"])
             try:
@@ -316,6 +318,13 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
             except Exception as e:                    # noqa: BLE001  model/browser hiccup
                 attempt += 1
                 changed = [a for a in state.data["action_log"][log_mark:] if a.get("approval") in ("approved", "pre_approved")]
+                outage = is_retryable(e) and not changed and outages < 3
+                if outage:                            # model server dropped: wait for it, then replay this turn
+                    outages += 1
+                    attempt -= 1
+                    state.checkpoint(f"{case.id} ({app}): model server unreachable, waiting for it to come back")
+                    if wait_for_model():
+                        continue
                 if changed or attempt > max_retries:  # never replay a turn that changed data; mark the case and go on
                     state.checkpoint(f"{case.id} ({app}) failed: {type(e).__name__}: {e}")
                     return CaseResult(case_id=case.id, verdict="AGENT INCOMPLETE", expected=case.expected,
@@ -376,7 +385,16 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
                               note=f"tester on {app} {why}: {sr.notes}".strip())
     full_brief = brief_for(plan, case, list(range(len(case.steps))), state)
     try:
-        result = judge(full_brief, state.actions_for(case.id), results, state)
+        for left in range(2, -1, -1):
+            try:
+                result = judge(full_brief, state.actions_for(case.id), results, state)
+                break
+            except Exception as e:                # noqa: BLE001
+                if left and is_retryable(e):      # model server dropped: wait for it and ask the judge again
+                    state.checkpoint(f"{case.id}: judge lost the model server, waiting for it to come back")
+                    if wait_for_model():
+                        continue
+                raise
     except Exception as e:                        # noqa: BLE001  judge output unusable; keep the run going
         return CaseResult(case_id=case.id, verdict="AGENT INCOMPLETE", expected=case.expected,
                           values={k: v for r in results for k, v in r.values.items()},

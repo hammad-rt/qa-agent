@@ -32,6 +32,32 @@ async def with_retries(fn, *, attempts: int = 4, base: float = 2.0, cap: float =
             await sleep(delay)
 
 
+def wait_for_model(max_wait: float | None = None, every: float = 10.0, sleep=time.sleep, probe=None) -> bool:
+    """After a connection error, wait until the model server answers again (LLM_OUTAGE_WAIT seconds, default 300).
+    Returns True once it answers, False if it stayed down."""
+    max_wait = float(os.environ.get("LLM_OUTAGE_WAIT", "300")) if max_wait is None else max_wait
+    if probe is None:
+        def probe():
+            import urllib.request
+            from .config import Settings
+            st = Settings.load()
+            req = urllib.request.Request(st.llm_base_url.rstrip("/") + "/models",
+                                         headers={"Authorization": f"Bearer {st.llm_api_key}"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status == 200
+    waited = 0.0
+    while True:
+        try:
+            if probe():
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        if waited >= max_wait:
+            return False
+        sleep(every)
+        waited += every
+
+
 class RunLocked(RuntimeError):
     pass
 

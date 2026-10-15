@@ -53,7 +53,23 @@ class RunState:
         return e
 
     def actions_for(self, case_id: str) -> list[dict]:
-        return [a for a in self.data["action_log"] if a["case_id"] == case_id]
+        floor = (self.data.get("attempt_floor") or {}).get(case_id, 0)   # a rerun in this run starts fresh
+        return [a for a in self.data["action_log"] if a["case_id"] == case_id and a.get("seq", 0) > floor]
+
+    def reopen_cases(self, case_ids: list[str]) -> None:
+        """Rerun cases inside this same run: their old results move to previous_attempts, their old actions stop
+        counting, and per-case counters reset. Passed cases stay as they are and are skipped."""
+        prev = self.data.setdefault("previous_attempts", {})
+        floors = self.data.setdefault("attempt_floor", {})
+        for cid in case_ids:
+            old = self.data["results"].pop(cid, None)
+            if old:
+                prev.setdefault(cid, []).append(old)
+            floors[cid] = len(self.data["action_log"])
+            for key in ("entered_values", "save_clicks"):
+                (self.data.get(key) or {}).pop(cid, None)
+        self.data["status"] = "running"
+        self.checkpoint(f"rerunning {', '.join(case_ids)} in this run")
 
     def checkpoint(self, label: str, status: str | None = None) -> None:
         if status:

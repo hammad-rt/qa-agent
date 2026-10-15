@@ -503,6 +503,8 @@ def cmd_rerun(settings: Settings, task_id: int, cases: str | None, src_run: str 
     except ValueError as e:
         print(e)
         return 1
+    if src_run and (failed or cases) and len(plan.cases) < len(old.cases):
+        return _rerun_in_place(settings, src, [c.id for c in plan.cases])
     pack = _pack_for_run(settings, plan)
     state = RunState.new(settings.runs_dir, task_id)
     print(f"Rerunning {', '.join(c.id for c in plan.cases)} from {src.name}. Run folder: {state.dir}")
@@ -530,6 +532,25 @@ def cmd_rerun(settings: Settings, task_id: int, cases: str | None, src_run: str 
     state.set_plan(plan)
     state.data.update(approved=True, preapproved=pre, model=model_fingerprint(settings),
                       mode={"rerun_of": src.name, "cases": [c.id for c in plan.cases]})
+    return _execute(settings, pack, plan, state, policy, open_memory(settings, pack))
+
+
+def _rerun_in_place(settings: Settings, run_dir: Path, case_ids: list[str]) -> int:
+    """"Rerun not passed" / one case: continue the same run folder, redo only these cases, keep the passes."""
+    from . import gate
+    from .run_state import RunState
+    from .tools.policy import from_pack
+    state = RunState(run_dir)
+    plan = state.plan
+    if not plan or not state.data.get("approved"):
+        print("This run has no approved plan; start it again with `test`.")
+        return 1
+    print(f"Rerunning {', '.join(case_ids)} in the same run; passed cases are kept. Run folder: {run_dir}")
+    state.reopen_cases(case_ids)
+    pack = _pack_for_run(settings, plan)
+    policy = from_pack(pack, plan.env, approver=gate.console_approver())
+    policy.preapprove(state.data.get("preapproved", []))
+    run_sites(policy, plan)
     return _execute(settings, pack, plan, state, policy, open_memory(settings, pack))
 
 

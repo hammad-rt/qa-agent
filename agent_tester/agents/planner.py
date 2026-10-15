@@ -14,12 +14,12 @@ def build_planner(settings: Settings, pack, env: str):
     instr = prompts.PLANNER.format(
         apps=", ".join(pack.apps), action_types=", ".join(pack.config.get("preapprovable_actions", []) + pack.config.get("always_ask_actions", [])),
         env=env, facts=pack.facts, core=core)
-    return LlmAgent(name="planner", model=model(settings, json_mode=True), instruction=_static(instr))
+    return LlmAgent(name="planner", model=model(settings, json_mode=True, job="planner"), instruction=_static(instr))
 
 
 def build_reviewer(settings: Settings, task_text: str):
     from google.adk.agents import LlmAgent
-    return LlmAgent(name="reviewer", model=model(settings, json_mode=True), instruction=_static(prompts.REVIEWER.format(task=task_text)))
+    return LlmAgent(name="reviewer", model=model(settings, json_mode=True, job="planner"), instruction=_static(prompts.REVIEWER.format(task=task_text)))
 
 
 def _static(s: str):

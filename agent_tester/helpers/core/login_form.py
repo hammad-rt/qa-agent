@@ -145,6 +145,10 @@ async def _attempt(browser, ctx, account: str, path: str = ""):
     await browser._do("browser_type", {"element": pass_el.name or _fdesc(form["password"]), "target": pass_el.ref,
                                        "text": password, "_secret": True})
     cap = await solve_checkbox(browser)
+    if cap.get("present") and not cap.get("passed") and cap.get("challenge"):
+        from agent_tester.captcha import solve as solve_images   # vision model picks the tiles; staging/pre-prod only
+        if await solve_images(browser, getattr(ctx, "env", "staging")):
+            cap["passed"] = True
     if cap.get("present") and not cap.get("passed"):
         why = "showed a picture puzzle" if cap.get("challenge") else "did not tick when clicked"
         raise CaptchaNeedsPerson(f"the reCAPTCHA {why}; a person has to solve it. Call needs_manual_login.")

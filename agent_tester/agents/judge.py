@@ -56,7 +56,7 @@ def make_judge(settings: Settings, pack, memory=None):
 
     def judge(brief: dict, actions: list[dict], step_results: list, state) -> CaseResult:
         from google.adk.agents import LlmAgent
-        agent = LlmAgent(name="judge", model=model(settings, json_mode=True), instruction=lambda _c: instr)
+        agent = LlmAgent(name="judge", model=model(settings, json_mode=True, job="judge"), instruction=lambda _c: instr)
         from ..ledger import Ledger
         unrestored = Ledger(state).unrestored(brief["case_id"])
         failure_text = brief.get("title", "") + " " + brief.get("expected", "") + " " + json.dumps(

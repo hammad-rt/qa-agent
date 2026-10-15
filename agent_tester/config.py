@@ -66,3 +66,17 @@ class Settings:
             run_retention=int(e("RUN_RETENTION", "5")),
             min_free_gb=float(e("MIN_FREE_GB", "5")),
         )
+
+
+JOBS = ("planner", "tester", "judge", "vision")
+
+
+def job_model(settings: "Settings", job: str) -> tuple[str, str, str]:
+    """Route a job to its own model. LLM_<JOB>_MODEL / LLM_<JOB>_BASE_URL / LLM_<JOB>_API_KEY override the main
+    LLM_* settings, e.g. LLM_VISION_MODEL=qwen2.5vl:3b LLM_VISION_BASE_URL=http://localhost:11434/v1 for a local
+    Ollama model. Unset means the main model (gemma4)."""
+    j = job.upper()
+    e = os.environ.get
+    return (e(f"LLM_{j}_BASE_URL") or settings.llm_base_url,
+            e(f"LLM_{j}_MODEL") or settings.llm_model,
+            e(f"LLM_{j}_API_KEY") or settings.llm_api_key)

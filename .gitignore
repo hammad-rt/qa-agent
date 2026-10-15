@@ -12,3 +12,4 @@ __pycache__/
 .cursor/hooks/state
 packs/*/learned_logins.json
 agent_error.log
+models/

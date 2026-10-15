@@ -25,6 +25,25 @@ class FakeBrowser:
 
 
 class T(unittest.TestCase):
+    def setUp(self):
+        p = mock.patch.dict(os.environ, {"CAPTCHA_TILE_MODEL_OFF": "1"})
+        p.start(); self.addCleanup(p.stop)
+
+    def test_target_words(self):
+        from agent_tester.tile_model import target
+        self.assertEqual(target("Select all images with fire hydrants"), "Hydrant")
+        self.assertEqual(target("Select all squares with traffic lights"), "Traffic Light")
+        self.assertEqual(target("Select all images with buses"), "Bus")
+        self.assertIsNone(target("Select all images with boats"))
+
+    def test_local_model_answer_skips_llm(self):
+        async def ask(img, q):
+            raise AssertionError("LLM should not be asked")
+        with mock.patch("agent_tester.tile_model.classify", return_value=[3]):
+            b = FakeBrowser()
+            self.assertTrue(asyncio.run(captcha.solve(b, "staging", ask=ask)))
+            self.assertTrue(any("[3]" in c for c in b.calls))
+
     def test_tile_numbers(self):
         self.assertEqual(vision.tile_numbers("Tiles: [2, 5, 5, 12]", 9), [2, 5])
         self.assertEqual(vision.tile_numbers("1 and 3", 9), [1, 3])

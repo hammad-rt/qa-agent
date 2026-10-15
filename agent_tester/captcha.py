@@ -66,6 +66,7 @@ async def solve(browser, env: str = "staging", ask=None, rounds: int | None = No
         from agent_tester import vision
         ask = lambda img, q: asyncio.to_thread(vision.ask, img, q)  # noqa: E731
     from agent_tester.vision import tile_numbers
+    from agent_tester import tile_model
     rounds = rounds or int(os.environ.get("CAPTCHA_ROUNDS", "3"))
     for _ in range(rounds):
         try:
@@ -74,7 +75,9 @@ async def solve(browser, env: str = "staging", ask=None, rounds: int | None = No
                 return False
             # "click until there are none left": tiles are replaced, so look again after each pass (max 4 passes)
             for _pass in range(4):
-                picks = tile_numbers(await ask(ch["image"], question(ch["desc"], ch["tiles"])), ch["tiles"])
+                picks = await asyncio.to_thread(tile_model.classify, ch["image"], ch["tiles"], ch["desc"])
+                if picks is None:                     # local model can't answer: ask the vision LLM
+                    picks = tile_numbers(await ask(ch["image"], question(ch["desc"], ch["tiles"])), ch["tiles"])
                 if picks:
                     await _js(browser, CLICK_JS.replace("__PICKS__", json.dumps(picks)))
                 if not picks or "none left" not in ch["desc"].lower():

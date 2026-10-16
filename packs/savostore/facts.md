@@ -32,6 +32,19 @@ Rewritten 2026-10-06 after the original file was lost. Sources: QA runs on #1809
 - Savo Express prices are shown as they are, with no "est." or "estimated" label (#182698 won't do). Don't flag a missing "estimated" label.
 - Intercom on the portal stays as it is. Don't flag it or suggest changing it.
 
+## Routes (staging, verified 2026-10-16; order numbers and record ids below are placeholders, look them up each run)
+Portal base https://staging5.rolustech.com:4225
+- Home `/home`. Account: `/rewards`, `/profile`, `/change-password`, `/warehouse-addresses`, `/delivery-addresses`.
+- Shipping Only: list `/shipping-only`, create `/shipping-only/create`, open an order `/shipping-only?editedOrder=<A-number>`, invoice/payment `/shipping-only/invoice/<crm record id>`.
+- Buy & Ship: list `/buy-and-ship`, purchase-quote form `/buy-and-ship/create`, open an order `/buy-and-ship?editedOrder=<B-number>`, edit `/buy-and-ship/edit/<record id>?orderNumber=<B-number>`, invoice/payment `/buy-and-ship/invoice/<record id>`.
+- Savo Express: `/savo-express`, cart `/savo-express/cart`. Express orders appear in the Buy & Ship list as BX numbers.
+- Orders have no detail page: `editedOrder` opens the order's card expanded in the list.
+
+CRM base https://staging5.rolustech.com:4220/index.php
+- Shipping Only orders `module=AOS_Invoices`; Buy & Ship (incl. BX) `module=AOS_Quotes`; Payments `module=sav_payments`; Clients `module=Contacts`; Rewards Redeemed `module=sav_rewards_redeemed`; Loyalty Rewards `module=sav_rewards`.
+- Record page `?module=<M>&action=DetailView&record=<id>`. The CRM record id is the same id the portal invoice/edit URLs use.
+- Admin settings (open from Administration `action=index`; a direct URL gives an XSRF error): `saveRewardsPanel` (Savo Rewards), `saveShipmentProtection`, `saveExpressCategoryWeightDefaults`, `saveExpressPricingSettings`.
+
 ## Business rules
 - Rewards earn rate: 5% of each order. Earned when the order is paid and moved to "Order Delivered" in the CRM.
 - Redemption cap: rewards cover at most 10% of the shipping price, not the order total.

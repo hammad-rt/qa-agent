@@ -55,9 +55,8 @@ async def plan_task(settings: Settings, pack, task_text: str, task_id: int, env:
                                 raw_dir=raw_dir, trace_path=trace_path)
         from ..plan_checks import autofix, check_plan
         plan = autofix(plan, preapprovable)
-        if generate:                           # no Test Cases task: SuiteCRM/SugarCRM projects start with QRR
-            from ..casegen import add_repair_case
-            plan = add_repair_case(plan, pack)
+        from ..casegen import add_repair_case  # SuiteCRM/SugarCRM projects always start with QRR
+        plan = add_repair_case(plan, pack)
         fixed_issues = [i for i in check_plan(plan) if not i.startswith("requirement ")]
         problems = ([] if review.get("ok") else list(review.get("problems", []))) + fixed_issues
         if not problems:

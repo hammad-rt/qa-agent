@@ -43,6 +43,16 @@ class RepairCase(unittest.TestCase):
         self.assertEqual(len(add_repair_case(once, pack).cases), 3)
         self.assertEqual(len(add_repair_case(_plan(), _pack({"portal": "Next.js"})).cases), 2)
 
+    def test_task_cases_keep_ids_and_get_tc0(self):
+        plan = _plan().model_copy(update={"cases_source": "task"})
+        p = add_repair_case(plan, _pack({"crm": {"name": "SuiteCRM 7"}}))
+        self.assertEqual([c.id for c in p.cases], ["TC0", "TC1", "TC2"])
+        self.assertFalse(p.cases[0].generated)
+        self.assertTrue(all(st.inferred and st.inferred_reason for st in p.cases[0].steps))
+        self.assertEqual(p.cases[2].depends_on, ["TC0", "TC1"])
+        self.assertEqual(len(add_repair_case(p, _pack({"crm": {"name": "SuiteCRM 7"}})).cases), 3)
+        self.assertFalse([i for i in check_plan(p) if "TC0" in i and "requirement" not in i], check_plan(p))
+
 
 if __name__ == "__main__":
     unittest.main()

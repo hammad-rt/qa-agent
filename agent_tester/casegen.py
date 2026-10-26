@@ -190,20 +190,23 @@ def _renumber(cid: str, shift: dict) -> str:
 def add_repair_case(plan: TestPlan, pack, extensions_changed: bool = False) -> TestPlan:
     """Generated cases on a SuiteCRM/SugarCRM project always start with Admin -> Repair -> Quick Repair and
     Rebuild (same rule as redmine-task-authoring), so stale Extension/layout/vardef caches don't fail the run.
-    Existing cases are renumbered TC2.. and depend on TC1. Idempotent."""
+    Generated cases are renumbered TC2.. and depend on TC1. Cases from a Redmine Test Cases task keep their ids;
+    the repair is added as TC0 with inferred (labelled) steps and every case depends on it. Idempotent."""
     app = crm_app(pack)
     if not app or not plan.cases or any(_QRR.search(c.title + " " + " ".join(x.text for x in c.steps)) for c in plan.cases):
         return plan
+    from_task = plan.cases_source == "task"    # a Redmine Test Cases child: keep its ids, add TC0 in front
+    rid = "TC0" if from_task else REPAIR_ID
     shift = {}
-    for i, c in enumerate(plan.cases, 2):
+    for i, c in enumerate([] if from_task else plan.cases, 2):
         m = re.fullmatch(r"TC(\d+)", c.id)
         if m:
             shift[c.id] = f"TC{int(m.group(1)) + 1}"
     rest = []
     for c in plan.cases:
         deps = [_renumber(d, shift) for d in c.depends_on]
-        if REPAIR_ID not in deps:
-            deps = [REPAIR_ID] + deps
+        if rid not in deps:
+            deps = [rid] + deps
         pre = list(c.preconditions)
         if HARD_RELOAD not in pre:
             pre = [HARD_RELOAD] + pre
@@ -222,4 +225,10 @@ def add_repair_case(plan: TestPlan, pack, extensions_changed: bool = False) -> T
         expected="The repair completes without errors; every later case assumes this passed",
         expected_source="user: redmine-task-authoring rule, Quick Repair and Rebuild is always TC1",
         values_to_record=["repair_result"])
+    if from_task:                               # not in the task's cases: label it as added by the agent
+        why = "the Test Cases task has no Quick Repair and Rebuild step; SuiteCRM/SugarCRM caches go stale after a deploy"
+        repair = repair.model_copy(update={
+            "id": rid, "generated": False,
+            "steps": [st.model_copy(update={"inferred": True, "inferred_reason": why,
+                                            "inferred_source": "redmine-task-authoring rule"}) for st in repair.steps]})
     return plan.model_copy(update={"cases": [repair] + rest})

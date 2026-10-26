@@ -165,3 +165,61 @@ def post_cases(state, rm, policy, project_id: int, subject: str) -> int | None:
     state.data["cases_posted"] = new_id
     state.save()
     return new_id
+
+
+# ---- Quick Repair and Rebuild first (SuiteCRM / SugarCRM) --------------------------------------------
+_CRM_STACK = re.compile(r"suite\s*crm|sugar\s*crm", re.I)
+_QRR = re.compile(r"quick\s*repair", re.I)
+REPAIR_ID = "TC1"
+HARD_RELOAD = "Hard-reload each page (bypass the cache) before testing it, after TC1's repair"
+
+
+def crm_app(pack) -> str | None:
+    """The pack app that runs on SuiteCRM/SugarCRM (pack.yaml `stack:`), if any."""
+    for app, st in (((getattr(pack, "config", None) or {}).get("stack")) or {}).items():
+        name = st.get("name", "") if isinstance(st, dict) else str(st)
+        if _CRM_STACK.search(name or ""):
+            return app
+    return None
+
+
+def _renumber(cid: str, shift: dict) -> str:
+    return shift.get(cid, cid)
+
+
+def add_repair_case(plan: TestPlan, pack, extensions_changed: bool = False) -> TestPlan:
+    """Generated cases on a SuiteCRM/SugarCRM project always start with Admin -> Repair -> Quick Repair and
+    Rebuild (same rule as redmine-task-authoring), so stale Extension/layout/vardef caches don't fail the run.
+    Existing cases are renumbered TC2.. and depend on TC1. Idempotent."""
+    app = crm_app(pack)
+    if not app or not plan.cases or any(_QRR.search(c.title + " " + " ".join(x.text for x in c.steps)) for c in plan.cases):
+        return plan
+    shift = {}
+    for i, c in enumerate(plan.cases, 2):
+        m = re.fullmatch(r"TC(\d+)", c.id)
+        if m:
+            shift[c.id] = f"TC{int(m.group(1)) + 1}"
+    rest = []
+    for c in plan.cases:
+        deps = [_renumber(d, shift) for d in c.depends_on]
+        if REPAIR_ID not in deps:
+            deps = [REPAIR_ID] + deps
+        pre = list(c.preconditions)
+        if HARD_RELOAD not in pre:
+            pre = [HARD_RELOAD] + pre
+        rest.append(c.model_copy(update={"id": _renumber(c.id, shift), "depends_on": deps, "preconditions": pre}))
+    what = "Quick Repair and Rebuild" + (" (and Rebuild Extensions)" if extensions_changed else "")
+    repair = PlannedCase(
+        id=REPAIR_ID, title=f"Run {what} on the target environment", area="admin", generated=True,
+        preconditions=["Logged in to the CRM as an admin user"],
+        steps=[Step(text="Open Admin from the user menu, then Repair (find the links on the page, don't type URLs)", app=app),
+               Step(text=f"Click {what} and wait until the page shows the repair finished", app=app,
+                    action_type="admin_repair", needs_approval=True),
+               Step(text="If the page lists database differences with an Execute button, stop and ask before "
+                         "clicking Execute; note the listed differences either way", app=app, needs_approval=True),
+               Step(text="Hard-reload the screens the later cases use (bypass the cache) so they load the rebuilt "
+                         "layouts and vardefs", app=app)],
+        expected="The repair completes without errors; every later case assumes this passed",
+        expected_source="user: redmine-task-authoring rule, Quick Repair and Rebuild is always TC1",
+        values_to_record=["repair_result"])
+    return plan.model_copy(update={"cases": [repair] + rest})

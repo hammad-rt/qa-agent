@@ -113,3 +113,7 @@ CRM base https://staging5.rolustech.com:4220/index.php
 - Portal Parcel Value drops decimals (200.50 becomes 200, pasting 25.50 gives 25) and 1,000 becomes 1000. 0 shows "Enter a value greater than zero"; typing "-" shows the "Whole dollars only" hint.
 - Buy & Ship orders have no protection step.
 - Fixing old orders (TC7 of #182941) is a repair script run on production; it can't be tested on staging.
+
+## CRM repair before testing (verified on #183498, 2026-10-26)
+- After a deploy, run Admin → Repair → Quick Repair and Rebuild before the first test, then hard-reload each EditView/DetailView. Clearing browser cache and cookies alone did not apply the change (Shipment Value only became read-only after QRR plus a hard reload).
+- Never click Execute on SQL the repair proposes without approval.

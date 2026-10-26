@@ -44,3 +44,10 @@ Edit or delete freely; wrong lines are worse than none.
 - Savo Express: the order only exists after payment; other order types show an order ID before paying.
 - Add to cart opens an 'Added to cart' prompt: Checkout or Continue shopping.
 - Shipping Only has its own menu, separate from Buy & Ship; Stripe tests pay an existing unpaid Shipping Only order (4242 card), never a new order.
+
+## crm:crm
+- Behaviour: Line item save still works: The agent changed the parcel status of order <a record> to 'Received', saved it, and verified it persisted upon reload. (2026-10-26, TC4)
+- Behaviour: Declined / no protection stays zero: The agent changed the parcel value to 3000.00 and verified that the protection cost remained 0.00 (as the order had protection set to 'No'). (2026-10-26, TC3)
+- Behaviour: Parcel drives value and cost: Initial values (Parcel Sum 1001.0, Protection Cost 20.02) were updated to (Parcel Sum 2000.0, Protection Cost 40.02). After save and reload, the final values persisted as Parcel Sum 2000.0 and Protection Cost 40.0 (rounded as per project facts). (2026-10-26, TC2)
+- Behaviour: Shipment Value and Shipment Value USD are read-only after Quick Repair and Rebuild plus a hard reload; before the repair they looked editable from stale cache (2026-10-26, #183498 TC1).
+- Route: click 'Orders' -> click 'Shipping Only Orders' -> click 'EditView for <a record>' -> click 'Edit link for order <a record>' -> click 'Shipment Value field' (2026-10-26, TC1 reached)

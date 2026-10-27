@@ -393,6 +393,16 @@ class Handler(BaseHTTPRequestHandler):
                     except (OSError, ValueError):
                         pass
                     args = ["test", d.name.split("-")[0], "--env", env, "--fresh-plan"]
+                elif b.get("execute"):                # run the plan of a plan-only run
+                    d = self._run(str(b["execute"]))
+                    if not d:
+                        return self._send(404, {"error": "no such run"})
+                    st = _read_json(d / "state.json", {}) or {}
+                    plan = st.get("plan") or {}
+                    if st.get("status") != "dry_run" or not plan.get("cases"):
+                        return self._send(400, {"error": "this run has no plan-only draft to execute"})
+                    args = ["test", str(plan.get("task_id") or d.name.split("-")[0]), "--env", plan.get("env") or "staging",
+                            "--from-draft", d.name]
                 elif b.get("resume"):
                     d = self._run(str(b["resume"]))
                     if not d:

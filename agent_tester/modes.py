@@ -58,6 +58,18 @@ def latest_plan(runs_dir: Path, task_id: int) -> tuple[TestPlan | None, Path | N
     return None, None
 
 
+def draft_from(runs_dir: Path, run: str, task_id: int) -> tuple[TestPlan | None, Path | None, dict]:
+    """The plan of one chosen plan-only run (web: "Run this plan"), whatever ran after it."""
+    d = (Path(runs_dir) / Path(run).name).resolve()
+    if d.parent != Path(runs_dir).resolve() or not (d / "state.json").is_file():
+        return None, None, {}
+    state = json.loads((d / "state.json").read_text())
+    plan = state.get("plan")
+    if state.get("status") != "dry_run" or not plan or int(plan.get("task_id") or 0) != int(task_id):
+        return None, None, {}
+    return TestPlan.model_validate(plan), d, state
+
+
 def drafted_plan(runs_dir: Path, task_id: int, skip: Path | None = None) -> tuple[TestPlan | None, Path | None, dict]:
     """The plan from a plan-only run, when that is the latest run of this task: a normal run continues from it
     (same cases, same answers) instead of planning again."""

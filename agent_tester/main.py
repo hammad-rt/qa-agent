@@ -142,7 +142,7 @@ def parse_cases_early(case):
 
 def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_run: bool,
              retest_bug: int | None = None, email: bool = False, email_progress: bool = False,
-             fresh_plan: bool = False) -> int:
+             fresh_plan: bool = False, draft_run: str | None = None) -> int:
     from . import gate
     from .agents.planner import plan_task
     from .plan_checks import check_plan
@@ -188,9 +188,14 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
             hint = bug["text"] if bug else f"Redmine issue #{retest_bug}"
             print(f"No earlier run links cases to bug {retest_bug}; the planner will pick cases related to it.")
             task_text += f"\n\nRETEST MODE: plan only the cases that check this fixed bug: {hint}"
-    from .modes import drafted_plan
-    draft, draft_src, draft_state = (None, None, {}) if (dry_run or retest_bug or fresh_plan) else \
-        drafted_plan(settings.runs_dir, task_id, skip=state.dir)
+    from .modes import drafted_plan, draft_from
+    if draft_run and not (dry_run or retest_bug or fresh_plan):
+        draft, draft_src, draft_state = draft_from(settings.runs_dir, draft_run, task_id)
+        if draft is None:
+            print(f"{draft_run} is not a plan-only run of #{task_id}; planning again.")
+    else:
+        draft, draft_src, draft_state = (None, None, {}) if (dry_run or retest_bug or fresh_plan) else \
+            drafted_plan(settings.runs_dir, task_id, skip=state.dir)
     if draft is not None and getattr(draft, "env", env) != env:
         draft = None                                  # drafted for another environment: plan again
     lessons_mem = open_memory(settings, pack)
@@ -845,6 +850,7 @@ def _main(argv=None) -> int:
     t.add_argument("--headed", action="store_true", help="show the testers' browser windows (debugging)")
     t.add_argument("--dry-run", action="store_true", help="plan and questions only")
     t.add_argument("--fresh-plan", action="store_true", help="plan again even if a plan-only draft exists")
+    t.add_argument("--from-draft", dest="draft_run", default=None, help="run folder of a plan-only run to execute")
     t.add_argument("--email", action="store_true", help="email the report to REPORT_EMAIL_TO")
     t.add_argument("--email-progress", action="store_true", help="also email start, halfway, pause and finish")
     rr = sub.add_parser("rerun")
@@ -923,7 +929,7 @@ def _main(argv=None) -> int:
                     return 2
             a.env = env
         return cmd_test(settings, a.task_id, a.case, a.env, a.dry_run, a.retest_bug, a.email, a.email_progress,
-                        fresh_plan=a.fresh_plan)
+                        fresh_plan=a.fresh_plan, draft_run=a.draft_run)
     if a.cmd == "rerun":
         return cmd_rerun(settings, a.task_id, a.cases, a.src_run, a.failed)
     if a.cmd == "web":

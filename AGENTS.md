@@ -4,7 +4,7 @@
 
 **Prompt rules (`agent_tester/agents/prompts.py`):** add a rule as a whole new `- ` line after a complete one, never inside another rule; continuation lines are indented two spaces. `tests/test_prompt_lint.py` fails on spliced, orphaned or duplicate rules.
 
-**Web console work:** follow skill [`web-ui-ux`](.cursor/skills/web-ui-ux/SKILL.md) (no jumping on live updates, ASK prompts, headless check).
+**Web console work:** follow skill [`web-ui-ux`](.cursor/skills/web-ui-ux/SKILL.md) (no jumping on live updates, ASK prompts, headless check) and use [`ui-ux-pro-max`](.cursor/skills/ui-ux-pro-max/SKILL.md) for visual and UX decisions (tokens, contrast, focus, icons); search it with `python3 .cursor/skills/ui-ux-pro-max/scripts/search.py "<query>" --domain ux`.
 
 | Need | Open |
 |---|---|

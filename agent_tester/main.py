@@ -503,12 +503,20 @@ def cmd_rerun(settings: Settings, task_id: int, cases: str | None, src_run: str 
     if old is None:
         print(f"No approved plan for #{task_id} yet; use `test {task_id}` first.")
         return 1
+    # Plans made before the CRM repair rule have no Quick Repair and Rebuild case; add it so reruns
+    # don't test against a stale cache (#183498 TC1 false fail, 2026-10-28).
+    from .casegen import add_repair_case
+    n_before = len(old.cases)
+    old = add_repair_case(old, _pack_for_run(settings, old))
+    repair_added = len(old.cases) > n_before
+    if repair_added:
+        print("Added the Quick Repair and Rebuild case this older plan was missing; every case depends on it.")
     try:
         plan = filter_plan(old, parse_cases(cases))
     except ValueError as e:
         print(e)
         return 1
-    if src_run and (failed or cases) and len(plan.cases) < len(old.cases):
+    if src_run and (failed or cases) and len(plan.cases) < len(old.cases) and not repair_added:
         return _rerun_in_place(settings, src, [c.id for c in plan.cases])
     pack = _pack_for_run(settings, plan)
     state = RunState.new(settings.runs_dir, task_id)

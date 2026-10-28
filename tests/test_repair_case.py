@@ -56,3 +56,13 @@ class RepairCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RerunAddsRepair(unittest.TestCase):
+    def test_old_plan_gets_repair_and_filter_keeps_it(self):
+        from agent_tester.modes import filter_plan
+        plan, pack = _plan().model_copy(update={'cases_source': 'task'}), _pack({'crm': {'name': 'SuiteCRM 7'}})
+        new = add_repair_case(plan, pack)
+        self.assertEqual(new.cases[0].id, "TC0")
+        kept = filter_plan(new, [new.cases[-1].id])
+        self.assertIn(new.cases[0].id, [c.id for c in kept.cases])

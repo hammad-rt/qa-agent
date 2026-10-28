@@ -130,6 +130,12 @@ async def _attempt(browser, ctx, account: str, path: str = ""):
     await browser.navigate(ctx.url(path or cfg.get("path", "")))
     form = await analyze(browser)
     if not form.get("has_password"):
+        vals = getattr(getattr(ctx, "state", None), "values", None) or {}
+        prev = vals.get("login_form.logged_in") or {}
+        if isinstance(prev, dict) and prev.get("value") == "yes" and str(prev.get("source", "")).endswith(f"/{ctx.app}"):
+            # an earlier case already logged in on this app; the browser session is shared, so this is not an error
+            return {"values": {"logged_in": "yes"}, "screenshots": [],
+                    "notes": f"Already logged in on {ctx.app} (shared session); no login needed"}
         raise HelperError("no login form on this page (no visible password field); if you are already logged in, "
                           "skip the login step")
     if not form.get("user"):

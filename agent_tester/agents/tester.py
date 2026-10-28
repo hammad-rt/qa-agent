@@ -304,6 +304,20 @@ def _page_body(snap: str) -> str:
     return re.sub(r"\[ref=[^\]]*\]", "", snap or "")
 
 
+_ERR = re.compile(r"(?m)^(?:### Error\s*\n)?\s*((?:\w+\.)*\w*(?:Error|Exception)\b[:\s].*)$")
+
+
+def _tool_error(text: str | None) -> str | None:
+    """First error line of a Playwright MCP result, or None when the call worked."""
+    if not text:
+        return None
+    if "### Error" not in text and not re.search(r"(?m)^\s*(?:\w+\.)*\w*(?:Timeout)?Error\b", text):
+        return None
+    m = _ERR.search(text)
+    line = (m.group(1) if m else text.split("### Error", 1)[-1].strip().splitlines()[0] if "### Error" in text else "")
+    return line.strip()[:300] or "the tool reported an error"
+
+
 class TesterSession:
     """Holds the per-turn bookkeeping that the callbacks and tool functions share."""
 
@@ -745,8 +759,8 @@ class TesterSession:
                                          details={"tool": name, "args": _safe_args(args)})
             except PolicyViolation as e:
                 return self._deny(name, args, str(e))
-            self.state.log_action(case_id=self.case_id, app=self.app, tool=name, args=_safe_args(args),
-                                  plan_step=self.current_step)
+            self._pending_seq = self.state.log_action(case_id=self.case_id, app=self.app, tool=name,
+                                                      args=_safe_args(args), plan_step=self.current_step).seq
         return None
 
     def _budget_check(self, name: str, args: dict):
@@ -865,6 +879,13 @@ class TesterSession:
                     self.result.screenshots.append(name)
         if tool.name.startswith("browser_"):
             text = _text_of(tool_response)
+            err = _tool_error(text)
+            seq = getattr(self, "_pending_seq", None)
+            if err and seq:
+                # the action log is written before the call; record the real result so the judge doesn't read
+                # "ok" for a call that failed (#183498 TC1: a type into a read-only field timed out)
+                self.state.set_outcome(seq, f"error: {err}")
+            self._pending_seq = None
             blocked = self._check_page_site(tool.name, text)
             if blocked:
                 return {"error": blocked}

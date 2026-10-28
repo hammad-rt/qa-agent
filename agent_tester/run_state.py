@@ -52,6 +52,13 @@ class RunState:
         self.save()
         return e
 
+    def set_outcome(self, seq: int, outcome: str) -> None:
+        for a in reversed(self.data["action_log"]):
+            if a.get("seq") == seq:
+                a["outcome"] = outcome
+                self.save()
+                return
+
     def actions_for(self, case_id: str) -> list[dict]:
         floor = (self.data.get("attempt_floor") or {}).get(case_id, 0)   # a rerun in this run starts fresh
         return [a for a in self.data["action_log"] if a["case_id"] == case_id and a.get("seq", 0) > floor]

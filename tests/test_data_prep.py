@@ -64,13 +64,16 @@ class DataPrep(unittest.TestCase):
         p = Policy(allow_hosts=[], risky_patterns=[], preapprovable=[], always_ask=[], env="prod")
         yes = [("browser_click", "Save"), ("browser_click", "Delete record"), ("browser_select_option", "Status"),
                ("browser_click", "Mass Update"), ("browser_click", "Quick Repair and Rebuild")]
-        no = [("browser_click", "Orders"), ("browser_click", "Edit"), ("browser_type", "Search orders"),
+        yes += [("browser_type", "Shipment Value"), ("browser_click", "Door delivery switch"),
+                ("browser_click", "Shipment Protection checkbox")]
+        no = [("browser_click", "Orders"), ("browser_click", "Edit"),
               ("browser_click", "Detail View tab")]
         for t, l in yes:
             self.assertTrue(p.prod_change(t, l), (t, l))
         for t, l in no:
             self.assertFalse(p.prod_change(t, l), (t, l))
         self.assertTrue(p.prod_change("browser_press_key", "", {"key": "Enter"}))
+        self.assertTrue(p.prod_change("browser_click", "Status cell", {"doubleClick": True}))
         self.assertTrue(p.prod_change("browser_type", "Name", {"submit": True}))
         stg = Policy(allow_hosts=[], risky_patterns=[], preapprovable=[], always_ask=[], env="staging")
         self.assertFalse(stg.prod_change("browser_click", "Save"))

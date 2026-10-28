@@ -13,7 +13,10 @@ class PolicyViolation(PermissionError):
 
 # Production: actions that can change a stored value. Each one asks the user, every time (no auto, no batching).
 # Plain navigation (links, menus, tabs, Edit buttons that only open a form) and reads never ask.
-PROD_WRITE_TOOLS = {"browser_select_option", "browser_drag", "browser_file_upload"}
+# Typing asks too: SuiteCRM inline edit saves on blur/Enter without any Save button.
+PROD_WRITE_TOOLS = {"browser_select_option", "browser_drag", "browser_file_upload", "browser_type", "browser_fill_form"}
+# Controls that save on click (portal pick-up/door switch shows "Updating..."; checkboxes, radios, toggles).
+PROD_INSTANT = re.compile(r"(?i)\b(checkbox|check box|radio|switch|toggle|pick-?up|door delivery|delivery type)\b")
 PROD_WRITE_LABEL = re.compile(
     r"(?i)\b(save|update|apply|submit|confirm|ok|yes|delete|remove|trash|archive|create|add|insert|new record|"
     r"approve|reject|cancel order|void|refund|send|post|publish|import|merge|mass update|execute|repair|rebuild|"
@@ -68,8 +71,10 @@ class Policy:
             return True
         if tool == "browser_press_key":
             return str(args.get("key", "")).lower() in ("enter", "numpadenter")
-        if tool in ("browser_click", "browser_type", "browser_fill_form"):
-            return bool(PROD_WRITE_LABEL.search(label or ""))
+        if tool == "browser_click":
+            return bool(PROD_WRITE_LABEL.search(label or "") or PROD_INSTANT.search(label or "")
+                        or args.get("doubleClick"))      # double-click opens SuiteCRM inline edit
+        return False
         return False
 
     def is_risky(self, label: str) -> bool:

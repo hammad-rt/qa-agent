@@ -162,7 +162,9 @@ function approvalCard(p){if(!/\[y\/N\]:?\s*$/i.test(p||''))return '';
 async function decide(v){await api(`/api/jobs/${job.id}/input`,{text:v});$('#askBox').innerHTML='';$('#askBox').dataset.p=''}
 async function answer(){const i=$('#ans');await api(`/api/jobs/${job.id}/input`,{text:i.value});$('#askBox').innerHTML='';$('#askBox').dataset.p=''}
 async function pollJob(){if(!job)return;try{const j=await api(`/api/jobs/${job.id}/out?since=${outLen}`);outLen=j.len;job=j;$('#consoleWrap').style.display='';const c=$('#console');const stick=nearBottom(c);c.textContent+=j.out;if(stick)c.scrollTop=c.scrollHeight;
- if(j.run_dir&&followed!==j.run_dir){followed=j.run_dir;if(cur!==j.run_dir){cur=j.run_dir;traceNext=0;$('#events').innerHTML='';loadRuns()}}  // jump to a new job's run once; after that the user's pick stays
+ // Never pull the user off the run they are looking at. Show the job's run only when nothing is open yet
+ // (just started), or when the run is waiting for the user's answer or approval.
+ if(j.run_dir&&cur!==j.run_dir&&(cur===null||(j.waiting&&followed!==j.prompt))){if(j.waiting)followed=j.prompt;cur=j.run_dir;traceNext=0;blocks=[];openBlock=null;$('#events').innerHTML='';loadRuns()}
  if(j.waiting){if(!$('#ans')||$('#askBox').dataset.p!==j.prompt)$('#askBox').dataset.p=j.prompt,$('#askBox').innerHTML=approvalCard(j.prompt)||`<div class="ask"><span style="flex:0 1 50%;white-space:pre-wrap">${esc(j.prompt)}</span><input id="ans" type="${j.secret?'password':'text'}" autocomplete="off" placeholder="Type an answer, or leave empty for the default" onkeydown="if(event.key=='Enter')answer()"><button class="pri" onclick="answer()">Send</button></div>`,(document.activeElement===document.body)&&$('#ans').focus({preventScroll:true})}else $('#askBox').innerHTML='';
  $('#stopBtn').style.display=j.running?'':'none';if(!j.running){$('#askBox').innerHTML='';loadRuns()}}catch(e){}}
 const clean=t=>String(t??'').replace(/<\|[^|]*\|>/g,' ').replace(/^\s*(thought|analysis|final)\b\s*/i,'').replace(/\s+\n/g,'\n').trim();

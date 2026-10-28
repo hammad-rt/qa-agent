@@ -719,8 +719,19 @@ class TesterSession:
                 if name not in READ_ONLY_BROWSER and name != "browser_navigate":
                     risky = self.policy.is_risky(label) or bool(args.get("submit"))
                     action_type = self._step_action_type()
+                    if self.policy.prod_change(name, label, args) or (self.policy.env == "prod" and risky):
+                        # production: every action that may change a value asks, each time
+                        how = self.policy.gate(f"{name}: {label}", f"{self.case_id} on {self.app}",
+                                               action_type=action_type or "prod_write", risky=True,
+                                               details={"tool": name, "args": _safe_args(args)})
+                        self.state.log_action(case_id=self.case_id, app=self.app, tool="request_approval",
+                                              args={"action_type": action_type or "prod_write",
+                                                    "description": f"{name}: {label}", "how": how, "via": "prod_gate"},
+                                              plan_step=self.current_step, approval=how)
                     # Close the hole where Save on a change_settings step skipped the console gate.
-                    if action_type and action_type not in self._action_gated:
+                    elif self.policy.env == "prod":
+                        pass                                 # reads/navigation on prod: no prompt
+                    elif action_type and action_type not in self._action_gated:
                         how = self.policy.gate(f"{name}: {label}", f"{self.case_id} on {self.app}",
                                                action_type=action_type, risky=risky,
                                                details={"tool": name, "args": _safe_args(args)})

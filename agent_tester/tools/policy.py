@@ -11,6 +11,17 @@ class PolicyViolation(PermissionError):
     pass
 
 
+# Production: actions that can change a stored value. Each one asks the user, every time (no auto, no batching).
+# Plain navigation (links, menus, tabs, Edit buttons that only open a form) and reads never ask.
+PROD_WRITE_TOOLS = {"browser_select_option", "browser_drag", "browser_file_upload"}
+PROD_WRITE_LABEL = re.compile(
+    r"(?i)\b(save|update|apply|submit|confirm|ok|yes|delete|remove|trash|archive|create|add|insert|new record|"
+    r"approve|reject|cancel order|void|refund|send|post|publish|import|merge|mass update|execute|repair|rebuild|"
+    r"reset|restore|enable|disable|activate|deactivate|assign|convert|duplicate|upload|pay|place order|checkout|"
+    r"redeem|transfer|move|mark as|change status|set status)\b")
+_PAY = re.compile(r"(?i)\bpay|stripe|card|checkout|place order")
+
+
 @dataclass
 class Policy:
     allow_hosts: list[str]
@@ -48,6 +59,19 @@ class Policy:
         if not any(host == h or host.endswith("." + h) for h in self.allow_hosts):
             raise PolicyViolation(f"domain not allowed: {host}")
 
+    def prod_change(self, tool: str, label: str, args: dict | None = None) -> bool:
+        """True on production when this browser action may change a stored value."""
+        if self.env != "prod":
+            return False
+        args = args or {}
+        if tool in PROD_WRITE_TOOLS or args.get("submit"):
+            return True
+        if tool == "browser_press_key":
+            return str(args.get("key", "")).lower() in ("enter", "numpadenter")
+        if tool in ("browser_click", "browser_type", "browser_fill_form"):
+            return bool(PROD_WRITE_LABEL.search(label or ""))
+        return False
+
     def is_risky(self, label: str) -> bool:
         return any(re.search(p, label or "") for p in self.risky_patterns)
 
@@ -63,14 +87,19 @@ class Policy:
         if self.read_only:
             self.log.append({"action": action, "type": action_type, "approval": "denied", "why": "read-only"})
             raise PolicyViolation(f"read-only step, not allowed: {action}")
-        if self.auto and action_type not in ("redmine_post", "send_email"):
-            pay = re.search(r"(?i)\bpay|stripe|card|checkout", f"{action} {action_type or ''}")
-            if self.env == "prod" and not pay:
-                self.log.append({"action": action, "type": action_type, "approval": "auto", "why": "prod (no payment)"})
-                return "approved"
-            if self.env == "prod":
-                self.log.append({"action": action, "type": action_type, "approval": "denied", "why": "prod payment skipped (automatic mode)"})
+        if self.env == "prod":
+            if _PAY.search(f"{action} {action_type or ''}"):
+                self.log.append({"action": action, "type": action_type, "approval": "denied", "why": "prod payment"})
                 raise PolicyViolation(f"production: payments are never made by the agent; step skipped: {action}")
+            if self.approver is None:      # prod changes always need a person, automatic mode included
+                self.log.append({"action": action, "type": action_type, "approval": "denied", "why": "prod, no approver"})
+                raise PolicyViolation(f"production change needs your approval and nobody to ask: {action}")
+            ok = self.approver(f"[PRODUCTION] {action}", reason, details)
+            self.log.append({"action": action, "type": action_type, "approval": "approved" if ok else "denied"})
+            if not ok:
+                raise PolicyViolation(f"denied by user: {action}")
+            return "approved"
+        if self.auto and action_type not in ("redmine_post", "send_email"):
             self.log.append({"action": action, "type": action_type, "approval": "auto"})
             return "approved"
         if action_type and action_type in self.preapproved and self.can_preapprove(action_type):

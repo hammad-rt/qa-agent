@@ -40,13 +40,40 @@ class DataPrep(unittest.TestCase):
         r = data_prep.ensure_data(SimpleNamespace(env="prod", requirements=[]), case("a"), State(), {}, [rule])
         self.assertEqual((r.verdict, "top up by hand" in r.note), ("BLOCKED", True))
 
-    def test_prod_auto_except_payment(self):
-        p = Policy(allow_hosts=[], risky_patterns=[], preapprovable=[], always_ask=[], env="prod", auto=True)
+    def test_prod_changes_ask_even_in_auto(self):
+        asked = []
+        p = Policy(allow_hosts=[], risky_patterns=[], preapprovable=[], always_ask=[], env="prod", auto=True,
+                   approver=lambda a, r, d: asked.append(a) or True)
         self.assertEqual(p.gate("Save order", "r", risky=True), "approved")
+        self.assertEqual(asked, ["[PRODUCTION] Save order"])
         for a in ("Pay by Card", "checkout.stripe.com"):
             with self.assertRaises(PolicyViolation):
                 p.gate(a, "r", risky=True)
+        self.assertEqual(len(asked), 1)                 # payments are refused, never asked
 
+    def test_prod_denied_or_no_approver(self):
+        p = Policy(allow_hosts=[], risky_patterns=[], preapprovable=[], always_ask=[], env="prod", auto=True,
+                   approver=lambda a, r, d: False)
+        with self.assertRaises(PolicyViolation):
+            p.gate("Save order", "r", risky=True)
+        p = Policy(allow_hosts=[], risky_patterns=[], preapprovable=[], always_ask=[], env="prod", auto=True)
+        with self.assertRaises(PolicyViolation):
+            p.gate("Update status", "r", action_type="change_status")
+
+    def test_prod_change_detection(self):
+        p = Policy(allow_hosts=[], risky_patterns=[], preapprovable=[], always_ask=[], env="prod")
+        yes = [("browser_click", "Save"), ("browser_click", "Delete record"), ("browser_select_option", "Status"),
+               ("browser_click", "Mass Update"), ("browser_click", "Quick Repair and Rebuild")]
+        no = [("browser_click", "Orders"), ("browser_click", "Edit"), ("browser_type", "Search orders"),
+              ("browser_click", "Detail View tab")]
+        for t, l in yes:
+            self.assertTrue(p.prod_change(t, l), (t, l))
+        for t, l in no:
+            self.assertFalse(p.prod_change(t, l), (t, l))
+        self.assertTrue(p.prod_change("browser_press_key", "", {"key": "Enter"}))
+        self.assertTrue(p.prod_change("browser_type", "Name", {"submit": True}))
+        stg = Policy(allow_hosts=[], risky_patterns=[], preapprovable=[], always_ask=[], env="staging")
+        self.assertFalse(stg.prod_change("browser_click", "Save"))
 
 if __name__ == "__main__":
     unittest.main()

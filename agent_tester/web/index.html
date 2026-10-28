@@ -134,7 +134,7 @@ function setHTML(el,html){if(typeof el=='string')el=$(el);if(!el||el._h===html)r
  el.scrollTop=st;if(window.scrollY!==ws)window.scrollTo(0,ws)}
 
 const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-let cur=null, job=null, traceNext=0, outLen=0, lastDetail=null;
+let cur=null, followed=null, job=null, traceNext=0, outLen=0, lastDetail=null;
 document.querySelectorAll('.tab').forEach(t=>{t.insertAdjacentHTML('afterbegin',ic(t.dataset.i));t.onkeydown=e=>{if(e.key=='Enter'||e.key==' '){e.preventDefault();t.click()}}});document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{document.querySelectorAll('.tab,.pane').forEach(x=>x.classList.remove('on'));t.classList.add('on');document.querySelectorAll('.tab').forEach(x=>x.setAttribute('aria-selected',x===t));$('#'+t.dataset.p).classList.add('on')});
 async function api(p,b){const r=await fetch(p,b?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}:{});const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j}
 function pills(c){return Object.entries(c||{}).map(([k,v])=>`<span class="pill ${k.split(' ')[0]}">${v} ${esc(k)}</span>`).join('')}
@@ -162,7 +162,7 @@ function approvalCard(p){if(!/\[y\/N\]:?\s*$/i.test(p||''))return '';
 async function decide(v){await api(`/api/jobs/${job.id}/input`,{text:v});$('#askBox').innerHTML='';$('#askBox').dataset.p=''}
 async function answer(){const i=$('#ans');await api(`/api/jobs/${job.id}/input`,{text:i.value});$('#askBox').innerHTML='';$('#askBox').dataset.p=''}
 async function pollJob(){if(!job)return;try{const j=await api(`/api/jobs/${job.id}/out?since=${outLen}`);outLen=j.len;job=j;$('#consoleWrap').style.display='';const c=$('#console');const stick=nearBottom(c);c.textContent+=j.out;if(stick)c.scrollTop=c.scrollHeight;
- if(j.run_dir&&cur!==j.run_dir){cur=j.run_dir;traceNext=0;$('#events').innerHTML='';loadRuns()}
+ if(j.run_dir&&followed!==j.run_dir){followed=j.run_dir;if(cur!==j.run_dir){cur=j.run_dir;traceNext=0;$('#events').innerHTML='';loadRuns()}}  // jump to a new job's run once; after that the user's pick stays
  if(j.waiting){if(!$('#ans')||$('#askBox').dataset.p!==j.prompt)$('#askBox').dataset.p=j.prompt,$('#askBox').innerHTML=approvalCard(j.prompt)||`<div class="ask"><span style="flex:0 1 50%;white-space:pre-wrap">${esc(j.prompt)}</span><input id="ans" type="${j.secret?'password':'text'}" autocomplete="off" placeholder="Type an answer, or leave empty for the default" onkeydown="if(event.key=='Enter')answer()"><button class="pri" onclick="answer()">Send</button></div>`,(document.activeElement===document.body)&&$('#ans').focus({preventScroll:true})}else $('#askBox').innerHTML='';
  $('#stopBtn').style.display=j.running?'':'none';if(!j.running){$('#askBox').innerHTML='';loadRuns()}}catch(e){}}
 const clean=t=>String(t??'').replace(/<\|[^|]*\|>/g,' ').replace(/^\s*(thought|analysis|final)\b\s*/i,'').replace(/\s+\n/g,'\n').trim();

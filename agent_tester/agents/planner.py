@@ -29,7 +29,8 @@ def _static(s: str):
 
 async def plan_task(settings: Settings, pack, task_text: str, task_id: int, env: str, only_case: str | None = None,
                     max_rounds: int = 3, lessons: str = "", trace_path=None, generate: bool = False,
-                    answers: dict | None = None, preapprovable: list[str] | None = None) -> TestPlan:
+                    answers: dict | None = None, preapprovable: list[str] | None = None,
+                    repair: bool = True) -> TestPlan:
     task_text = redact(task_text)
     planner = build_planner(settings, pack, env)
     reviewer = build_reviewer(settings, task_text)
@@ -56,7 +57,8 @@ async def plan_task(settings: Settings, pack, task_text: str, task_id: int, env:
         from ..plan_checks import autofix, check_plan
         plan = autofix(plan, preapprovable)
         from ..casegen import add_repair_case  # SuiteCRM/SugarCRM projects always start with QRR
-        plan = add_repair_case(plan, pack)
+        if repair:                             # feature mode adds it once for the merged plan instead
+            plan = add_repair_case(plan, pack)
         fixed_issues = [i for i in check_plan(plan) if not i.startswith("requirement ")]
         problems = ([] if review.get("ok") else list(review.get("problems", []))) + fixed_issues
         if not problems:

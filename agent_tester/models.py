@@ -64,6 +64,8 @@ class PlannedCase(BaseModel):
     generated: bool = False           # written by the planner from the task text, not taken from a Test Cases task
     expected_source: str | None = None  # where the expected result comes from: 'description: "..."', 'comment 2: "..."', 'facts.md: "..."', 'user'
     open_question: str | None = None  # asked at the plan gate when the task does not say what should happen
+    source_task: int | None = None    # feature mode: the subtask this case came from
+    covers: list[int] = Field(default_factory=list)   # feature mode: every subtask this (deduplicated) case checks
 
 
 class TestPlan(BaseModel):

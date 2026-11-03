@@ -140,9 +140,20 @@ def parse_cases_early(case):
     return parse_cases(case)
 
 
+def _feature_checks(feature, plan, pack) -> list[str]:
+    """Feature mode: check each subtask's generated cases against that subtask's own text."""
+    from . import casegen
+    issues = []
+    for b in feature or []:
+        mine = [c for c in plan.cases if c.source_task == b.issue["id"] and c.generated]
+        if mine:
+            issues += casegen.check_generated(plan.model_copy(update={"cases": mine}), casegen.task_sources(b, pack.facts))
+    return issues
+
+
 def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_run: bool,
              retest_bug: int | None = None, email: bool = False, email_progress: bool = False,
-             fresh_plan: bool = False, draft_run: str | None = None) -> int:
+             fresh_plan: bool = False, draft_run: str | None = None, subtasks: bool = True) -> int:
     from . import gate
     from .agents.planner import plan_task
     from .plan_checks import check_plan
@@ -161,9 +172,19 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
         if env is None:
             print("Stopped: production not confirmed.")
             return 2
-    bundle = rm.fetch_task(task_id, pack.config["redmine"].get("test_case_subject_prefix", "Test Cases - "))
+    tc_prefix = pack.config["redmine"].get("test_case_subject_prefix", "Test Cases - ")
+    bundle = rm.fetch_task(task_id, tc_prefix)
     from . import casegen
-    generate = casegen.needs_generation(bundle, pack.config["redmine"].get("test_case_subject_prefix", "Test Cases - "))
+    from . import feature as F
+    feature = rm.feature_tasks(task_id, tc_prefix) if subtasks and not retest_bug else []
+    if not F.is_feature(feature, task_id):
+        feature = []
+    generate = not feature and casegen.needs_generation(bundle, tc_prefix)
+    if feature:
+        print(f"Feature mode: #{task_id} has subtasks/related tickets; testing these together:")
+        for b in feature:
+            print(f"  #{b.issue['id']} ({b.via}) {b.issue.get('subject', '')[:80]}"
+                  + ("  [no Test Cases: I'll write them]" if casegen.needs_generation(b, tc_prefix) else ""))
     if generate:
         print("No 'Test Cases - ...' task found; I'll write the cases from the task description for you to review.")
     state = RunState.new(settings.runs_dir, task_id)
@@ -177,7 +198,7 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
         print(f"Warning: less than {settings.min_free_gb:g} GB free disk.")
     from .modes import cases_for_bug, parse_cases
     only = parse_cases(case)
-    task_text = bundle.all_text()
+    task_text = "\n\n".join(f"#{b.issue['id']}:\n{b.all_text()}" for b in feature) if feature else bundle.all_text()
     if retest_bug:
         linked, src = cases_for_bug(settings.runs_dir, task_id, retest_bug)
         if linked:
@@ -205,7 +226,15 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
             print(f"Continuing from the plan drafted in {draft_src.name} (plan only); no new planning.")
             plan = draft
         else:
-          plan = asyncio.run(plan_task(settings, pack, task_text, task_id, env, only_case=",".join(only) or None,
+          if feature:
+            plan = asyncio.run(F.plan_feature(settings, pack, feature, task_id, env, tc_prefix,
+                                              lessons=lessons_mem.as_prompt(lessons_mem.preload()),
+                                              trace_path=state.dir / "trace.jsonl",
+                                              preapprovable=list(pack.config.get("preapprovable_actions", []))))
+            for ln in F.summary(feature, plan):
+                print("  " + ln)
+          else:
+            plan = asyncio.run(plan_task(settings, pack, task_text, task_id, env, only_case=",".join(only) or None,
                                      lessons=lessons_mem.as_prompt(lessons_mem.preload()), trace_path=state.dir / "trace.jsonl", generate=generate,
                                      preapprovable=list(pack.config.get("preapprovable_actions", []))))
     except LLMOutputError as e:
@@ -224,13 +253,14 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
     if flagged:
         print(f"{len(flagged)} saved lesson(s)/bug(s) are linked to closed issues and will be re-verified.")
     policy = from_pack(pack, env, approver=gate.console_approver())
-    ctx = G.GapContext(pack=pack, env=env, memory=memory, wiki_texts=wiki, task_text=bundle.all_text(),
+    ctx = G.GapContext(pack=pack, env=env, memory=memory, wiki_texts=wiki, task_text=task_text,
                        url_checker=G.http_url_checker(), allow_hosts=policy.allow_hosts)
     G.ensure_account_requirements(plan, pack, env)
     G.resolve(plan.requirements, ctx)
     issues = check_plan(plan)
     if generate:
         issues += casegen.check_generated(plan, casegen.task_sources(bundle, pack.facts))
+    issues += _feature_checks(feature, plan, pack)
     gate.show_plan(plan, issues)
     if generate:
         for n in casegen.coverage_notes(plan, bundle.all_text()):
@@ -241,7 +271,13 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
     if user_answers and draft is None:
         print("\nUpdating the plan with your answers...")
         try:
-            new = asyncio.run(plan_task(settings, pack, task_text, task_id, env, only_case=",".join(only) or None,
+            if feature:
+                new = asyncio.run(F.plan_feature(settings, pack, feature, task_id, env, tc_prefix,
+                                                 lessons=memory.as_prompt(memory.preload()),
+                                                 trace_path=state.dir / "trace.jsonl", answers=user_answers,
+                                                 preapprovable=list(pack.config.get("preapprovable_actions", []))))
+            else:
+                new = asyncio.run(plan_task(settings, pack, task_text, task_id, env, only_case=",".join(only) or None,
                                         lessons=memory.as_prompt(memory.preload()), trace_path=state.dir / "trace.jsonl",
                                         generate=generate, answers=user_answers,
                                         preapprovable=list(pack.config.get("preapprovable_actions", []))))
@@ -265,10 +301,13 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
             issues = check_plan(plan)
             if generate:
                 issues += casegen.check_generated(plan, casegen.task_sources(bundle, pack.facts))
+            issues += _feature_checks(feature, plan, pack)
             gate.show_plan(plan, issues)
             gate.ask_batch(plan.requirements, ctx)
     if generate and draft is not None:
         state.data["case_answers"] = draft_state.get("case_answers")
+    elif feature and any(c.generated for c in plan.cases):
+        state.data["case_answers"] = casegen.ask_case_questions(plan)
     elif generate:
         state.data["case_answers"] = casegen.ask_case_questions(plan)
         plan = casegen.edit_cases(plan)
@@ -859,6 +898,8 @@ def _main(argv=None) -> int:
     t.add_argument("--dry-run", action="store_true", help="plan and questions only")
     t.add_argument("--fresh-plan", action="store_true", help="plan again even if a plan-only draft exists")
     t.add_argument("--from-draft", dest="draft_run", default=None, help="run folder of a plan-only run to execute")
+    t.add_argument("--no-subtasks", dest="subtasks", action="store_false",
+                   help="test only this ticket, not its subtasks and related tickets")
     t.add_argument("--email", action="store_true", help="email the report to REPORT_EMAIL_TO")
     t.add_argument("--email-progress", action="store_true", help="also email start, halfway, pause and finish")
     rr = sub.add_parser("rerun")
@@ -937,7 +978,7 @@ def _main(argv=None) -> int:
                     return 2
             a.env = env
         return cmd_test(settings, a.task_id, a.case, a.env, a.dry_run, a.retest_bug, a.email, a.email_progress,
-                        fresh_plan=a.fresh_plan, draft_run=a.draft_run)
+                        fresh_plan=a.fresh_plan, draft_run=a.draft_run, subtasks=a.subtasks)
     if a.cmd == "rerun":
         return cmd_rerun(settings, a.task_id, a.cases, a.src_run, a.failed)
     if a.cmd == "web":

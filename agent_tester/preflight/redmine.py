@@ -18,6 +18,7 @@ class TaskBundle:
     test_case_task: dict | None
     parent: dict | None = None
     comments: list[str] = field(default_factory=list)
+    via: str = "task"                 # feature mode: feature, subtask or related
 
     @property
     def project_ids(self) -> list[int]:
@@ -146,6 +147,37 @@ class Redmine:
             if src:
                 comments += [j["notes"] for j in src.get("journals", []) if j.get("notes")]
         return TaskBundle(issue=issue, test_case_task=tc if tc is not issue else None, parent=parent, comments=comments)
+
+
+    def feature_tasks(self, issue_id: int, test_case_prefix: str = "Test Cases - ", max_depth: int = 3,
+                      max_tasks: int = 30) -> list[TaskBundle]:
+        """Feature mode: every work item under a feature, each with its own Test Cases task (if any).
+        Walks subtasks (grandchildren included, up to max_depth) and "related to" tickets of the feature and its
+        subtasks (one hop). A subtask that only groups other subtasks and has no Test Cases of its own is not
+        planned itself; its children are. Test Cases tasks are never planned as work items."""
+        prefix = test_case_prefix.strip()
+        out, seen, queue = [], set(), [(issue_id, 0, "feature")]
+        while queue and len(out) < max_tasks:
+            iid, depth, why = queue.pop(0)
+            if iid in seen:
+                continue
+            seen.add(iid)
+            b = self.fetch_task(iid, test_case_prefix)
+            if b.issue.get("subject", "").startswith(prefix) and iid != issue_id:
+                continue
+            kids = [c for c in b.issue.get("children", []) if not c.get("subject", "").startswith(prefix)]
+            if depth < max_depth:
+                queue += [(c["id"], depth + 1, "subtask") for c in kids]
+            if depth <= 1:
+                for r in b.issue.get("relations", []) or []:
+                    if r.get("relation_type") == "relates":
+                        other = r["issue_to_id"] if r.get("issue_id") == iid else r.get("issue_id")
+                        if other:
+                            queue.append((other, max_depth, "related"))   # related: no walking further down
+            if b.test_case_task is not None or not kids:
+                b.via = why
+                out.append(b)
+        return out
 
 
 _URL = re.compile(r"https?://[^\s)\]|>\"']+")

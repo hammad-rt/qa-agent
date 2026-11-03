@@ -38,7 +38,8 @@ th{background:#f5f5f5;text-align:left}h2{border-bottom:2px solid #eee;padding-bo
 
 <h2>Cases</h2>
 {% for c in plan.cases %}{% set r = results.get(c.id) %}<div class="case">
-<h3>{{ c.id }}: {{ c.title }}{% if c.generated %} <small style="background:#e8f0fe;padding:1px 6px;border-radius:4px">generated</small>{% endif %} · <span class="{{ (r.verdict if r else 'NOT').split()[0] }}">{{ r.verdict if r else 'not run' }}</span>
+{% if c.source_task and c.source_task != (loop.previtem.source_task if loop.previtem else None) %}<h2 style="margin-top:18px">#{{ c.source_task }}</h2>{% endif %}
+<h3>{{ c.id }}: {{ c.title }}{% if c.covers and c.covers|length > 1 %} <small>(also covers {% for t in c.covers if t != c.source_task %}#{{ t }} {% endfor %})</small>{% endif %}{% if c.generated %} <small style="background:#e8f0fe;padding:1px 6px;border-radius:4px">generated</small>{% endif %} · <span class="{{ (r.verdict if r else 'NOT').split()[0] }}">{{ r.verdict if r else 'not run' }}</span>
 {% if r and r.known_bug %} <small>(still present: bug {{ r.known_bug }})</small>{% endif %}</h3>
 <ol>{% for s in c.steps %}<li>[{{ s.app }}] {{ s.text }}{% if s.inferred %} <i>(inferred: {{ s.inferred_reason }}; {{ s.inferred_source }})</i>{% endif %}
 {% if r and (loop.index|string) in done.get(c.id, []) %} ✓{% endif %}</li>{% endfor %}</ol>

@@ -116,15 +116,16 @@ def resolve_url(req: Requirement, app: str, ctx: GapContext) -> Requirement:
     return req
 
 
-ENVS = ("staging", "preprod", "prod")
+ENVS = ("staging", "preprod", "prod", "local")
 ENV_ALIASES = {"staging": "staging", "stage": "staging", "stg": "staging",
                "preprod": "preprod", "pre-prod": "preprod", "pre prod": "preprod", "pre-production": "preprod",
-               "uat": "preprod", "prod": "prod", "production": "prod", "live": "prod"}
+               "uat": "preprod", "prod": "prod", "production": "prod", "live": "prod",
+               "local": "local", "localhost": "local", "dev": "local", "development": "local"}
 
 
 def normalize_env(text: str | None) -> str | None:
     t = (text or "").strip().lower()
-    if t in ("1", "2", "3"):
+    if t in ("1", "2", "3", "4"):
         return ENVS[int(t) - 1]
     return ENV_ALIASES.get(t)
 

@@ -56,14 +56,14 @@ def choose_env(pack, input_fn=None, out=print) -> str | None:
     from .preflight.gap_resolver import normalize_env
     known = {e for a in pack.apps.values() for e in a.get("envs", {})}
     out("\nWhich environment should I test on?")
-    for n, (e, name) in enumerate([("staging", "staging"), ("preprod", "pre-prod"), ("prod", "production")], 1):
+    for n, (e, name) in enumerate([("staging", "staging"), ("preprod", "pre-prod"), ("prod", "production"), ("local", "local (your own computer)")], 1):
         out(f"  {n}. {name}" + ("" if e in known else "  (no URLs on record yet: I'll ask for them and save them)"))
     while True:
         raw = input_fn("  > [Enter = staging] ").strip()
         env = normalize_env(raw) if raw else "staging"
         if env:
             break
-        out("  Please answer 1, 2, 3, staging, pre-prod or production.")
+        out("  Please answer 1-4, staging, pre-prod, production or local.")
     if env == "prod" and not confirm_prod(input_fn, out):
         return None
     return env

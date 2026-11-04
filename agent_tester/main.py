@@ -967,7 +967,7 @@ def _main(argv=None) -> int:
     t.add_argument("task_id", type=int)
     t.add_argument("--cases", "--case", dest="case", help="comma-separated case ids, e.g. TC1,TC3")
     t.add_argument("--retest-bug", type=int, help="known bug number from facts.md, or a Redmine issue posted from a draft")
-    t.add_argument("--env", default=None, help="staging, pre-prod or production (asked if not given)")
+    t.add_argument("--env", default=None, help="staging, pre-prod, production or local (asked if not given)")
     t.add_argument("--headed", action="store_true", help="show the testers' browser windows (debugging)")
     t.add_argument("--dry-run", action="store_true", help="plan and questions only")
     t.add_argument("--cases-file", type=Path, default=None,
@@ -1046,7 +1046,7 @@ def _main(argv=None) -> int:
             from .preflight.gap_resolver import normalize_env
             env = normalize_env(a.env)
             if env is None:
-                print(f"Unknown environment {a.env!r}: use staging, pre-prod or production.")
+                print(f"Unknown environment {a.env!r}: use staging, pre-prod, production or local.")
                 return 2
             if env == "prod":
                 from .gate import confirm_prod

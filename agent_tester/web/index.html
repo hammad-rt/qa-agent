@@ -93,7 +93,7 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc);cursor:point
 <aside>
   <h1><span class="logo"><svg class="i" viewBox="0 0 24 24"><path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9"/></svg></span>QA Agent<small>localhost</small></h1>
   <div class="new">
-    <label class="fl" for="task">New run</label><div class="row"><input id="task" inputmode="numeric" aria-label="Redmine task number" placeholder="Redmine task #" onkeydown="if(event.key=='Enter')start(false)"><select id="env" aria-label="Environment"><option>staging</option><option>pre-prod</option><option>production</option></select></div>
+    <label class="fl" for="task">New run</label><div class="row"><input id="task" inputmode="numeric" aria-label="Redmine task number" placeholder="Redmine task #" onkeydown="if(event.key=='Enter')start(false)"><select id="env" aria-label="Environment"><option>staging</option><option>pre-prod</option><option>production</option><option value="local">local</option></select></div>
     <select id="scope" aria-label="What to test" title="A feature can be tested with all its subtasks and related tickets, or on its own"><option value="all">Feature + subtasks and related tickets</option><option value="only">Only this ticket</option></select>
     <input id="caseIds" aria-label="Cases to run" placeholder="Cases (optional), e.g. TC1,TC2">
     <input id="casesFile" aria-label="Test cases file" title="Use the cases in this file instead of the ticket's Redmine Test Cases task. Runs only this ticket." placeholder="Cases file (optional), e.g. /path/test-cases.md">

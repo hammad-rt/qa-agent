@@ -10,7 +10,8 @@ redmine:
 # Ask which portal/CRM user to use at the start of every run (Enter keeps the last one used).
 # The usernames below are only the first suggestion on staging. Set false to always use them.
 ask_accounts_each_run: true
-# Environments: staging, preprod, prod. Missing pre-prod URLs are asked once and saved with their source.
+# Environments: staging, preprod, prod, local. Missing pre-prod URLs are asked once and saved with their source.
+# local = your own laptop's copy (CRM in /var/www/html/savostorea, portal = `npm run dev` in /var/www/html/savostore).
 
 apps:
   portal:
@@ -19,6 +20,7 @@ apps:
       staging: https://staging5.rolustech.com:4225/
       preprod: https://westeros.rolustech.com:44310/   # Redmine wiki Pre_Prod_Cardentials
       prod: https://app.savostore.com/
+      local: http://localhost:3000/          # Next.js dev server of /var/www/html/savostore
     accounts:
       customer:
         username: sidney@savostore.com
@@ -29,6 +31,7 @@ apps:
       staging: https://staging5.rolustech.com:4220/
       preprod: https://staging5.rolustech.com:44360/   # Redmine wiki Pre_Prod_Cardentials
       prod: https://savo.store/
+      local: http://localhost/savostorea/    # SuiteCRM in /var/www/html/savostorea (portal's SUITECRM_INSTANCE_URL)
     accounts:
       admin:
         username: admin              # staging Administrator; maria.tariq is not an admin and cannot do data prep
@@ -44,6 +47,7 @@ allowlist:
   staging: [staging5.rolustech.com, checkout.stripe.com]
   preprod: [westeros.rolustech.com, staging5.rolustech.com, checkout.stripe.com]
   prod: [app.savostore.com, savo.store]
+  local: [localhost, checkout.stripe.com]
 
 # Action types the user may pre-approve for a whole run at the plan gate.
 # change_settings is staging/preprod only (Policy.can_preapprove blocks it on prod).
@@ -157,7 +161,7 @@ data_prep:
     when:
       areas: [rewards]
       any: ["max(imum)?", "full cap", "\\bcap\\b", "more than", "exceed"]
-    envs: [staging]                 # earning needs a payment, which never happens on pre-prod/production
+    envs: [staging, local]          # earning needs a payment, which never happens on pre-prod/production
     blocked_note: >-
       the case needs a rewards balance above the cap, and topping it up means paying an order, which the agent
       never does on pre-prod or production; top up the test client's wallet by hand and rerun

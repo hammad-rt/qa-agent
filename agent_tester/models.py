@@ -70,7 +70,7 @@ class PlannedCase(BaseModel):
 
 class TestPlan(BaseModel):
     task_id: int
-    env: Literal["staging", "preprod", "prod"] = "staging"
+    env: Literal["staging", "preprod", "prod", "local"] = "staging"
     cases_source: Literal["task", "generated"] = "task"
     cases: list[PlannedCase] = Field(default_factory=list)
     requirements: list[Requirement] = Field(default_factory=list)

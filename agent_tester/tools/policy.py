@@ -42,7 +42,7 @@ class Policy:
     def can_preapprove(self, action_type: str) -> bool:
         if self.env == "prod" or action_type in self.always_ask or action_type not in self.preapprovable:
             return False
-        return not ("staging" in action_type and self.env != "staging")
+        return not ("staging" in action_type and self.env not in ("staging", "local"))   # test-card payments: staging and your own local copy
 
     def preapprove(self, action_types: list[str]) -> None:
         bad = [a for a in action_types if not self.can_preapprove(a)]

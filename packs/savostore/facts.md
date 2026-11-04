@@ -8,10 +8,10 @@ Rewritten 2026-10-06 after the original file was lost. Sources: QA runs on #1809
 - Staging addresses are on the wiki page "Staging_Cardentials". The wiki has no production app logins. The wiki holds plaintext secrets; never copy them into reports or memory.
 
 ## Environments
-| | Staging | Production |
-|---|---|---|
-| Customer portal | https://staging5.rolustech.com:4225/ | https://app.savostore.com/ |
-| CRM (SuiteCRM) | https://staging5.rolustech.com:4220/ | https://savo.store/ |
+| | Staging | Production | Local (laptop) |
+|---|---|---|---|
+| Customer portal | https://staging5.rolustech.com:4225/ | https://app.savostore.com/ | http://localhost:3000/ |
+| CRM (SuiteCRM) | https://staging5.rolustech.com:4220/ | https://savo.store/ | http://localhost/savostorea/ |
 
 ## Accounts (passwords never stored here)
 - All Redmine posts (notes, time entries, bugs) go through Hammad Iqbal's account, never Sidney's.
@@ -20,10 +20,18 @@ Rewritten 2026-10-06 after the original file was lost. Sources: QA runs on #1809
 - Production: no accounts known yet. Ask.
 
 ## Payments
-- Stripe test card on staging: 4242 4242 4242 4242, expiry 12/34, CVC 123.
+- Stripe test card on staging and local: 4242 4242 4242 4242, expiry 12/34, CVC 123.
 - Buy & Ship (B&S) orders on staging offer only M-Pesa, so card payment is blocked for them.
 - Classic Buy & Ship is paid by bank transfer. Stripe (card) tests for non-Express orders use Shipping Only orders instead: pay an EXISTING unpaid Shipping Only order with the 4242 card; don't create new orders for this (confirmed by Hammad 2026-10-15).
-- M-Pesa: skip unless the user says otherwise.
+- M-Pesa: skip unless the user says otherwise. Never pay with M-Pesa in rewards cases (B18 is out of scope).
+
+## Local environment (laptop, set up 2026-11-04)
+- Local data is its own database: order numbers and record ids (A1148 etc.) are not the staging ones. Find or create orders each run.
+- Stripe works locally only while the Stripe CLI listener runs (it forwards checkout.session.completed to the CRM's
+  entry_point_stripe_webhook.php). Paying on Stripe returns to the portal's /payment/success page, but the order is
+  only marked paid when that callback arrives. If the invoice stays unpaid after a 4242 payment, the case is BLOCKED
+  ("Stripe callback did not arrive"), not FAIL.
+- The local portal login has no reCAPTCHA widget (no site key set), so email/password login submits without one.
 
 ## Modules (portal)
 - Shipping Only is its own module with its own menu in the portal, separate from Buy & Ship (confirmed 2026-10-15). In the CRM, Shipping Only orders are `AOS_Invoices`; Buy & Ship are `AOS_Quotes`.
@@ -69,6 +77,43 @@ CRM base https://staging5.rolustech.com:4220/index.php
 - Order fit check before any rewards case: invoice exists, balance > 0, unpaid shipping > 0, client matches. A paid order (e.g. A1148) is unusable; prepare a fresh shipping-only order with an invoice and unpaid shipping (needs approval).
 - Timing: apply/remove takes 3-5s; the rewards box shows a false "no rewards"/"up to $15.00" for 1-2s on load; CRM subpanels update ~8s late. Wait and recheck before any verdict.
 - Stripe path: Pay By Card > /shipping-only/stripe/<id>?appliedRewards=N > second "Pay by Card" > Stripe; choose USD; test card from the Payments section.
+
+## Savo Rewards: expected behaviour (#165177, #165348, #183737; from the rewards cases file, 2026-11-04)
+Notation: E% earn %, R% redeem cap %, FX USD to KES rate, W / L / U = the contact's Current / Total (lifetime) / Used
+rewards, cap(s) = R% x unpaid shipping s.
+- Applicable (portal "You can use up to" and CRM Applicable) = min(W in the order's currency, cap(unpaid shipping) -
+  rewards already redeemed on that tranche). Portal "up to" and CRM Applicable must be equal.
+- Rewards count as Used only after the Stripe payment succeeds. Before that a portal apply is a pending "against"
+  row with status Applied. Opening Stripe must not commit it; abandoning checkout leaves W and U unchanged, with no
+  Used row and no portal "Rewards Used" entry. A successful payment commits exactly once (W - x, U + x, one Used row);
+  reloads afterwards must not deduct again.
+- The portal session: a hard reload or navigating away (Orders list, /rewards) clears pending rewards and deletes the
+  CRM Applied row. Pressing browser Back from Stripe (soft back) keeps the pending amount, and replacing it is allowed
+  up to the full cap. Apply then X, repeated, must leave at most one Applied row (no stacking). After X, "up to"
+  returns to the cap and the "You have" line shows W, not W minus the removed amount.
+- Admin redemptions (CRM order > Rewards Redeemed > Create, name "Redeemed rewards by <admin> against <order>") are
+  "by" rows: on save the row is Used, W drops and U rises at once, the order's Savo Rewards shows the negative amount
+  on the portal too, and paying later must not deduct again. A portal apply must not remove an admin "by" row.
+- In that Create form, Total Shipping Cost is read-only and equals the order's shipping, not the Grand Total.
+- Over-limit messages: portal "Rewards amount cannot exceed <cap>"; over the wallet on KES "cannot exceed KES <FX x W>";
+  CRM admin "Redeemed rewards cannot exceed ...". A rejected amount creates no pending row and leaves "up to" as it was.
+- An invalid discount code shows an error and does not change "up to".
+- After a paid order gets a new package: balance = the new shipping only, "up to" = cap(new shipping) (not
+  cap(total) - redeemed), and no customer credit.
+- KES: the wallet is held in USD and shown as FX x W on KES orders, on both the portal and the CRM. The cap uses
+  shipping only: non-shipping charges (shipment protection, next-day delivery, misc) are never included.
+- Buy & Ship: same parity ("up to" = CRM Applicable = cap of its shipping); whole amounts only, so floor(cap) is
+  accepted; the total updates after apply; card payment should be offered (never use M-Pesa).
+- Invariants, always: W = L - U (gap 0), portal wallet = CRM Current, no order balance below 0, paid + rewards = total,
+  and no portal "against" Applied rows left on test orders at the end.
+- Build check: cases tied to the earlier report bugs (B1, B3, B6, B7, B8, B13, B15, B16, B19, A8, A14, C7) are expected
+  to fail on builds without the #183737 rework. A fail there means the rework is missing or broken; say which.
+- Order prerequisites: redemption cases need W >= cap of the order's shipping; if the wallet is short, run the earn
+  case first (pay with 4242, confirm Paid, then Order Delivered). The extra-package cases need the order fully paid first.
+- Not scriptable from the UI: an orphan Applied row (B17) and a Stripe webhook retry (A13). Report them as not verified.
+- Restoring data after a mutating case: delete the Rewards Redeemed rows the run created, restore the contact's W, L
+  and U to the baseline snapshot, restore or void the test orders, and take a screenshot. Editing wallet fields or
+  running SQL needs the data owner's approval.
 
 ## CRM login (SuiteCRM)
 - Login fields are `user_name` and `username_password`; the button is `#bigbutton` (Enter also submits).

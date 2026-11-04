@@ -92,6 +92,20 @@ def _job_on(run: str) -> bool:
     return any(j.info()["run_dir"] == run and j.proc.poll() is None for j in JOBS.values())
 
 
+def _cli_on(d: Path) -> bool:
+    """A run started in a terminal (python -m agent_tester test ...) writes run.pid while it goes."""
+    try:
+        pid = int((d / "run.pid").read_text().strip())
+        cmd = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except (OSError, ValueError):
+        return False
+    return b"agent_tester" in cmd
+
+
+def _live(d: Path) -> bool:
+    return _job_on(d.name) or _cli_on(d)
+
+
 def knowledge() -> list[dict]:
     """Each pack's self-built knowledge base (learned.md) plus its hand-written facts.md, read-only facts."""
     out = []
@@ -256,7 +270,7 @@ def run_summary(d: Path) -> dict:
         if v:
             counts[v] = counts.get(v, 0) + 1
     cps = st.get("checkpoints") or []
-    live = any(j.info()["run_dir"] == d.name and j.proc.poll() is None for j in JOBS.values())
+    live = _live(d)
     return {"id": d.name, "task": plan.get("task_id") or d.name.split("-")[0], "env": plan.get("env"),
             "status": "running" if live else st.get("status", "unknown"), "cases": len(plan.get("cases") or []),
             "done": len(results), "counts": counts,
@@ -385,13 +399,13 @@ class Handler(BaseHTTPRequestHandler):
                     text = scrub_secrets(redact(str(b.get("text", "")).strip()))[:2000]
                     if not text:
                         return self._send(400, {"error": "write something for the agent first"})
-                    if not _job_on(d.name):
+                    if not _live(d):
                         return self._send(409, {"error": "this run isn't going, so nothing would read it"})
                     from datetime import datetime
                     with open(d / "guidance.jsonl", "a") as f:
                         f.write(json.dumps({"at": datetime.now().isoformat(timespec="seconds"), "text": text}) + "\n")
                     return self._send(200, {"ok": True})
-                if _job_on(d.name):
+                if _live(d):
                     return self._send(409, {"error": "this run is still going; stop it first"})
                 if parts[3] == "delete":
                     import shutil
@@ -424,7 +438,7 @@ class Handler(BaseHTTPRequestHandler):
                 import shutil
                 for name in b.get("ids") or []:
                     d = self._run(str(name))
-                    if d and not _job_on(d.name):
+                    if d and not _live(d):
                         shutil.rmtree(d); done.append(d.name)
                     else:
                         skipped.append(str(name))

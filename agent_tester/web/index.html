@@ -189,7 +189,7 @@ async function pollJob(){try{
  // (just started), or when the run is waiting for the user's answer or approval.
  if(j.run_dir&&cur!==j.run_dir&&(cur===null||(j.waiting&&followed!==j.prompt))){if(j.waiting)followed=j.prompt;cur=j.run_dir;traceNext=0;blocks=[];openBlock=null;$('#events').innerHTML='';loadRuns()}
  if(j.waiting){if(!$('#ans')||$('#askBox').dataset.p!==j.prompt)$('#askBox').dataset.p=j.prompt,$('#askBox').innerHTML=approvalCard(j.prompt)||`<div class="ask"><span style="flex:0 1 50%;white-space:pre-wrap">${esc(j.prompt)}</span><input id="ans" type="${j.secret?'password':'text'}" autocomplete="off" placeholder="Type an answer, or leave empty for the default" onkeydown="if(event.key=='Enter')answer()"><button class="pri" onclick="answer()">Send</button></div>`,(document.activeElement===document.body)&&$('#ans').focus({preventScroll:true})}else $('#askBox').innerHTML='';
- $('#stopBtn').style.display=j.running?'':'none';$('#guideRow').style.display=j.running?'':'none';if(!j.running&&$('#askBox').innerHTML){$('#askBox').innerHTML='';$('#askBox').dataset.p='';loadRuns()}showConsole()}catch(e){}}
+ $('#stopBtn').style.display=j.running?'':'none';guideShow();if(!j.running&&$('#askBox').innerHTML){$('#askBox').innerHTML='';$('#askBox').dataset.p='';loadRuns()}showConsole()}catch(e){}}
 const clean=t=>String(t??'').replace(/<\|[^|]*\|>/g,' ').replace(/^\s*(thought|analysis|final)\b\s*/i,'').replace(/\s+\n/g,'\n').trim();
 function tryJson(t){const m=String(t).match(/\{[\s\S]*\}/);if(!m)return null;try{return JSON.parse(m[0])}catch(e){return null}}
 function name(a){return esc(a.element||a.name||'a field')}
@@ -230,6 +230,7 @@ function addEvent(e){const who=`<span class="who">${esc((e.at||'').slice(11,19))
   else if(!openBlock||openBlock.closed||openBlock.id=='plan'){ensure(nextCaseId())}
   if(e.calls)openBlock.html+=e.calls.map(c=>callHtml(c,who)).join('');
   else if(e.text){const t=clean(e.text);if(t)openBlock.html+=`<div class="say">${t.length>700?`${esc(t.slice(0,700))}<details class="more"><summary>show the rest</summary>${esc(t.slice(700))}</details>`:esc(t)}</div>`}}
+let curLive=false;function guideShow(){$('#guideRow').style.display=(curLive||(job&&job.running&&job.run_dir===cur))?'':'none'}
 async function sendGuide(){const t=$('#guideIn').value.trim();if(!t||!cur)return;
   try{const r=await fetch(`/api/runs/${cur}/guide`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:t})});const j=await r.json().catch(()=>({}));
     if(!r.ok){$('#guideMsg').textContent=j.error||'not sent';if(r.status==404)checkStale(true);return}
@@ -246,7 +247,7 @@ function drawBlocks(){const box=$('#events');const open=new Set([...box.querySel
 async function refresh(){if(!cur)return;let d;
  try{d=await api(`/api/runs/${cur}`)}catch(e){return}
  lastPlan=d.plan;picked=(d.mode||{}).cases||null;lastResults=d.results||{};
- try{const s=d.summary;setHTML('#title',`#${esc(s.task)} on ${esc(s.env||'')} <span class="pill ${s.status}">${esc(stLabel(s.status))}</span>`);
+ try{const s=d.summary;curLive=s.status=='running';guideShow();setHTML('#title',`#${esc(s.task)} on ${esc(s.env||'')} <span class="pill ${s.status}">${esc(stLabel(s.status))}</span>`);
   setHTML('#sub',`${progress(s.counts,s.cases)}<div class="stats"><span class="stat"><b>${s.done}/${s.cases}</b>cases done</span>${pills(s.counts)}<span class="mute">${esc(s.last||'')}</span></div>${caseStrip(d.plan,lastResults,s.status)}`);$('#resumeBtn').style.display=(s.status=='paused'&&!(job&&job.running))?'':'none';$('#execBtn').style.display=(s.status=='dry_run'&&s.cases&&!(job&&job.running))?'':'none';$('#rerunBtns').style.display=(s.status!='running'&&!(job&&job.running))?'':'none';{const hp=!!((d.plan||{}).cases||[]).length;$('#rerunAll').innerHTML=ic('redo')+(hp?'Rerun all':'Start again');$('#rerunAll').dataset.mode=hp?'':'start';$('#rerunAll').style.display=s.status=='dry_run'?'none':'';$('#rerunAll').title=hp?'Run every case again from the start, same plan':'This run stopped before it had a plan: start the same task again';$('#rerunFailed').style.display=hp&&s.done?'':'none'}}catch(e){console.error(e)}
  const key=JSON.stringify(d);if(key!==lastDetail){lastDetail=key;try{render(d)}catch(e){console.error('render',e)}}
  if(!(job&&job.running&&job.run_dir===cur)){try{const k=await api(`/api/runs/${cur}/console`);savedCon[cur]=k.text||''}catch(e){}}showConsole();

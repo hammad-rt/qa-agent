@@ -263,7 +263,26 @@ def restore_pass(plan: TestPlan, state: RunState, testers: dict[str, Tester], un
     return Ledger(state).unrestored()
 
 
-def run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge: Judge,
+def run_plan(plan: TestPlan, state: RunState, *args, **kwargs) -> dict[str, CaseResult]:
+    """Runs the plan with run.pid in the run folder, so the web UI can tell a terminal run is live
+    (and offer its guide box)."""
+    import os
+    pidf = state.dir / "run.pid"
+    try:
+        pidf.write_text(f"{os.getpid()}\n")
+    except OSError:
+        pass
+    try:
+        return _run_plan(plan, state, *args, **kwargs)
+    finally:
+        try:
+            if pidf.read_text().strip() == str(os.getpid()):
+                pidf.unlink()
+        except OSError:
+            pass
+
+
+def _run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge: Judge,
              on_case_done: Callable[[CaseResult], None] | None = None, max_retries: int = 1,
              manual_login: Callable[[str, str], bool] | None = None,
              manual_login_apps: list[str] | None = None, memory=None,

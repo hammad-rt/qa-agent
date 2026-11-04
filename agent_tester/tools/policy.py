@@ -104,7 +104,7 @@ class Policy:
             if not ok:
                 raise PolicyViolation(f"denied by user: {action}")
             return "approved"
-        if self.auto and action_type not in ("redmine_post", "send_email"):
+        if self.auto and action_type not in ("redmine_post", "send_email", "repair_sql_destructive"):
             self.log.append({"action": action, "type": action_type, "approval": "auto"})
             return "approved"
         if action_type and action_type in self.preapproved and self.can_preapprove(action_type):

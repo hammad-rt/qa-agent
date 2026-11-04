@@ -318,6 +318,9 @@ def _tool_error(text: str | None) -> str | None:
     return line.strip()[:300] or "the tool reported an error"
 
 
+EXECUTE_LABEL = re.compile(r"(?i)\bexecute\b")
+
+
 class TesterSession:
     """Holds the per-turn bookkeeping that the callbacks and tool functions share."""
 
@@ -342,6 +345,8 @@ class TesterSession:
         self._action_gated: set[str] = set()  # action_types already approved this turn (once per gated action)
         self._xsrf_urls: set[str] = set()     # path?query keys that returned an XSRF page this session
         self._last_nav_url: str | None = None # last browser_navigate URL (for XSRF attribution)
+        self._repair_kind: str | None = None  # check_repair_sql result for the SQL on the page
+        self._exec_ok = False                 # an Execute click was approved for that SQL (or explicitly)
 
     # ---- tools exposed to the model -------------------------------------------------
     def tools(self):
@@ -377,12 +382,29 @@ class TesterSession:
                 s.state.log_action(case_id=s.case_id, app=s.app, tool="request_approval",
                                    args={"action_type": action_type, "description": description},
                                    plan_step=s.current_step, approval=how)
+                if action_type == "execute_other" or (s._repair_kind and action_type == s._repair_kind):
+                    s._exec_ok = True
                 return {"approved": True, "how": how}
             except PolicyViolation as e:
                 s.state.log_action(case_id=s.case_id, app=s.app, tool="request_approval",
                                    args={"action_type": action_type, "description": description},
                                    plan_step=s.current_step, approval="denied", outcome=str(e))
                 return {"approved": False, "reason": str(e)}
+
+        def check_repair_sql(sql: str) -> dict:
+            """After Quick Repair and Rebuild lists database differences with an Execute button: pass the full SQL
+            exactly as the page shows it. Returns action_type for request_approval: 'execute_repair_sql' when it only
+            adds columns/tables/indexes for the new fields (may be pre-approved on staging), 'repair_sql_destructive'
+            when anything drops, changes or rewrites data (always asks). action_type null: nothing to execute."""
+            from ..repair_sql import classify
+            out = classify(sql)
+            s._repair_kind, s._exec_ok = out["action_type"], False
+            s.state.log_action(case_id=s.case_id, app=s.app, tool="check_repair_sql",
+                               args={"sql": sql[:4000]}, plan_step=s.current_step,
+                               outcome=f"{out['action_type']}: {len(out['additive'])} additive, {len(out['risky'])} risky")
+            s.state.data.setdefault("values", {})[f"{s.case_id}.repair_sql"] = {"value": sql[:4000], "app": s.app}
+            s.state.save()
+            return out
 
         async def mark_step(n: int, tool_context, deviation: str = "", inferred: bool = False,
                             reason: str = "") -> dict:
@@ -621,7 +643,7 @@ class TesterSession:
                     s.result.screenshots.append(bn)
             return out
 
-        tools = [record_value, calculate, request_approval, mark_step, evidence_name, get_secret, finish, recall_lessons,
+        tools = [record_value, calculate, request_approval, check_repair_sql, mark_step, evidence_name, get_secret, finish, recall_lessons,
                  needs_manual_login, ask_user, note_behaviour, lookup_docs]
         if s.toolset is not None:
             tools.append(paste_text)
@@ -730,6 +752,13 @@ class TesterSession:
                     self.policy.check_url(url)
                     self._last_nav_url = url
                 label = " ".join(str(args.get(k, "")) for k in ("element", "text", "values") if args.get(k))
+                if name == "browser_click" and EXECUTE_LABEL.search(label) and not self._exec_ok:
+                    return self._hold(name, args, (
+                        "Execute needs approval first. For Quick Repair and Rebuild SQL: read the full SQL from the "
+                        "page, call check_repair_sql with it, then request_approval with the action_type it returns. "
+                        "For any other Execute button: request_approval with action_type 'execute_other'.")
+                        if self._repair_kind is None else
+                        f"Execute needs request_approval with action_type '{self._repair_kind}' (from check_repair_sql) first.")
                 if name not in READ_ONLY_BROWSER and name != "browser_navigate":
                     risky = self.policy.is_risky(label) or bool(args.get("submit"))
                     action_type = self._step_action_type()
@@ -957,6 +986,13 @@ class TesterSession:
                               plan_step=self.current_step, outcome="xsrf")
         return ("XSRF / acceptable-referer page detected. Do not browser_navigate to this admin deep-link again. "
                 "Open the screen via the discovery menu/label path (Home or Administration menu), then continue.")
+
+    def _hold(self, name, args, why):
+        """Not yet: the click is allowed once the named approval is in place."""
+        self.state.log_action(case_id=self.case_id, app=self.app, tool=name, args=_safe_args(args),
+                              plan_step=self.current_step, approval="held", outcome=why)
+        return {"error": f"Not clicked yet: {why} Then click Execute again. If it is not approved, don't click it; "
+                         "note the listed SQL and continue."}
 
     def _deny(self, name, args, why):
         self.state.log_action(case_id=self.case_id, app=self.app, tool=name, args=_safe_args(args),

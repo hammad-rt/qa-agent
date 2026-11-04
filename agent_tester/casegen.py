@@ -218,13 +218,17 @@ def add_repair_case(plan: TestPlan, pack, extensions_changed: bool = False) -> T
         steps=[Step(text="Open Admin from the user menu, then Repair (find the links on the page, don't type URLs)", app=app),
                Step(text=f"Click {what} and wait until the page shows the repair finished", app=app,
                     action_type="admin_repair", needs_approval=True),
-               Step(text="If the page lists database differences with an Execute button, stop and ask before "
-                         "clicking Execute; note the listed differences either way", app=app, needs_approval=True),
+               Step(text="If the page lists database differences (SQL) with an Execute button, these are the "
+                         "queries that add the new fields to the database: read the full SQL from the page, pass it "
+                         "to check_repair_sql, ask with request_approval using the action_type it returns, and click "
+                         "Execute only when approved. Then run Quick Repair and Rebuild again and confirm no "
+                         "differences are listed. If nothing is listed, note that and go on", app=app,
+                    needs_approval=True),
                Step(text="Hard-reload the screens the later cases use (bypass the cache) so they load the rebuilt "
                          "layouts and vardefs", app=app)],
         expected="The repair completes without errors; every later case assumes this passed",
         expected_source="user: redmine-task-authoring rule, Quick Repair and Rebuild is always TC1",
-        values_to_record=["repair_result"])
+        values_to_record=["repair_result", "repair_sql"])
     if from_task:                               # not in the task's cases: label it as added by the agent
         why = "the Test Cases task has no Quick Repair and Rebuild step; SuiteCRM/SugarCRM caches go stale after a deploy"
         repair = repair.model_copy(update={

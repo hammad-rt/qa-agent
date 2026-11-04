@@ -117,4 +117,4 @@ CRM base https://staging5.rolustech.com:4220/index.php
 
 ## CRM repair before testing (verified on #183498, 2026-10-26)
 - After a deploy, run Admin → Repair → Quick Repair and Rebuild before the first test, then hard-reload each EditView/DetailView. Clearing browser cache and cookies alone did not apply the change (Shipment Value only became read-only after QRR plus a hard reload).
-- Never click Execute on SQL the repair proposes without approval.
+- If Quick Repair and Rebuild ends with "Differences found between database and vardefs" and SQL with an Execute button, that SQL adds the new fields (columns, tables, indexes) the deploy needs, and the cases that test those fields fail until it runs. Read the full SQL from the page, pass it to check_repair_sql, ask with request_approval using the action_type it returns, click Execute only when approved, then run Quick Repair and Rebuild again and confirm no differences are listed. Additive SQL (execute_repair_sql) can be pre-approved for the run on staging; SQL that drops or changes anything (repair_sql_destructive) always asks. On production it always asks.

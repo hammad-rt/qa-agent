@@ -53,12 +53,14 @@ preapprovable_actions:
   - create_test_order
   - add_parcel
   - change_settings
+  - execute_repair_sql      # Quick Repair SQL that only adds new columns/tables/indexes (staging/preprod)
 
 # Never pre-approvable: always a one-off approval.
 always_ask_actions:
   - redmine_post
   - send_email
   - prod_write
+  - repair_sql_destructive  # Quick Repair SQL that drops, changes or rewrites anything
 
 risky_patterns:
   - "(?i)\\bpay( now)?\\b"

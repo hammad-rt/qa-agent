@@ -34,3 +34,13 @@ class ConsoleSaved(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Scope(unittest.TestCase):
+    def test_subtasks_recorded_default_on(self):
+        import json
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            self.assertTrue(W._subtasks_of(d))
+            (d / "state.json").write_text(json.dumps({"mode": {"subtasks": False}}))
+            self.assertFalse(W._subtasks_of(d))

@@ -217,6 +217,12 @@ class Job:
             os.killpg(self.proc.pid, signal.SIGINT)        # same as Ctrl+C: the run pauses and can be resumed
 
 
+def _subtasks_of(d: Path) -> bool:
+    """Whether a run was started with its subtasks (feature mode). Older runs didn't record it: default on."""
+    st = _read_json(d / "state.json", {}) or {}
+    return (st.get("mode") or {}).get("subtasks", True) is not False
+
+
 def _run_dir_from(text: str) -> str | None:
     for line in text.splitlines():
         if "Run folder:" in line:
@@ -424,6 +430,8 @@ class Handler(BaseHTTPRequestHandler):
                     except (OSError, ValueError):
                         pass
                     args = ["test", d.name.split("-")[0], "--env", env, "--fresh-plan"]
+                    if not _subtasks_of(d):
+                        args.append("--no-subtasks")
                 elif b.get("execute"):                # run the plan of a plan-only run
                     d = self._run(str(b["execute"]))
                     if not d:
@@ -434,6 +442,8 @@ class Handler(BaseHTTPRequestHandler):
                         return self._send(400, {"error": "this run has no plan-only draft to execute"})
                     args = ["test", str(plan.get("task_id") or d.name.split("-")[0]), "--env", plan.get("env") or "staging",
                             "--from-draft", d.name]
+                    if not _subtasks_of(d):
+                        args.append("--no-subtasks")
                 elif b.get("resume"):
                     d = self._run(str(b["resume"]))
                     if not d:
@@ -448,6 +458,8 @@ class Handler(BaseHTTPRequestHandler):
                         args += ["--cases", str(b["cases"]).replace(" ", "")]
                     if b.get("dry_run"):
                         args.append("--dry-run")
+                    if b.get("subtasks") is False:
+                        args.append("--no-subtasks")
                 j = Job(args)
                 JOBS[j.id] = j
                 return self._send(200, j.info())

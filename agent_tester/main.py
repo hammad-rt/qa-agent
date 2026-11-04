@@ -189,7 +189,7 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
         print("No 'Test Cases - ...' task found; I'll write the cases from the task description for you to review.")
     state = RunState.new(settings.runs_dir, task_id)
     state.data["env"] = env                       # known even if the run is stopped before planning
-    state.data["mode"] = {"cases": parse_cases_early(case)}
+    state.data["mode"] = {"cases": parse_cases_early(case), "subtasks": bool(subtasks)}
     state.save()
     print(f"Pack: {pack.slug}. Run folder: {state.dir}")
 
@@ -341,7 +341,8 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
     policy.preapprove(pre)
     state.data["approved"], state.data["preapproved"] = True, pre
     state.data["model"] = model_fingerprint(settings)
-    state.data["mode"] = {"retest_bug": retest_bug, "cases": only, "email": email, "email_progress": email_progress}
+    state.data["mode"] = {"retest_bug": retest_bug, "cases": only, "email": email, "email_progress": email_progress,
+                          "subtasks": bool(subtasks)}
     return _execute(settings, pack, plan, state, policy, memory)
 
 

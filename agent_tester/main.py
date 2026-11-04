@@ -163,9 +163,30 @@ def _state_for_run(runs_dir, task_id, draft, draft_src, draft_state, subtasks):
     return RunState.new(runs_dir, task_id), None
 
 
+CASES_FILE_MAX = 200_000
+
+
+def read_cases_file(path) -> str | None:
+    """A Markdown or text list of test cases to use instead of the ticket's Redmine Test Cases task."""
+    p = Path(path).expanduser()
+    if p.suffix.lower() not in (".md", ".txt", ".markdown") or not p.is_file() or p.stat().st_size > CASES_FILE_MAX:
+        return None
+    text = p.read_text(errors="replace").strip()
+    return text or None
+
+
+def with_cases_file(bundle, text: str, name: str, prefix: str = "Test Cases - "):
+    """The file stands in for the Test Cases child, so the planner keeps its ids and nothing is generated."""
+    from dataclasses import replace
+    tc = {"id": None, "subject": f"{prefix}{name} (cases file)", "description": text,
+          "project": bundle.issue.get("project"), "journals": []}
+    return replace(bundle, test_case_task=tc)
+
+
 def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_run: bool,
              retest_bug: int | None = None, email: bool = False, email_progress: bool = False,
-             fresh_plan: bool = False, draft_run: str | None = None, subtasks: bool = True) -> int:
+             fresh_plan: bool = False, draft_run: str | None = None, subtasks: bool = True,
+             cases_file: Path | None = None) -> int:
     from . import gate
     from .agents.planner import plan_task
     from .plan_checks import check_plan
@@ -186,6 +207,17 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
             return 2
     tc_prefix = pack.config["redmine"].get("test_case_subject_prefix", "Test Cases - ")
     bundle = rm.fetch_task(task_id, tc_prefix)
+    cases_text = None
+    if cases_file:
+        cases_text = read_cases_file(cases_file)
+        if cases_text is None:
+            print(f"Can't use the cases file {cases_file}: it must be an existing .md or .txt file under 200 KB.")
+            return 2
+        bundle = with_cases_file(bundle, cases_text, Path(cases_file).name, tc_prefix)
+        print(f"Using the test cases in {Path(cases_file).name} instead of Redmine's (only this ticket).")
+        subtasks = False
+        if not draft_run:
+            fresh_plan = True                     # a draft planned from Redmine's cases is not this file's plan
     from . import casegen
     from . import feature as F
     feature = rm.feature_tasks(task_id, tc_prefix) if subtasks and not retest_bug else []
@@ -212,6 +244,9 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
     state, draft = _state_for_run(settings.runs_dir, task_id, draft, draft_src, draft_state, subtasks)
     state.data["env"] = env                       # known even if the run is stopped before planning
     state.data["mode"] = {"cases": parse_cases_early(case), "subtasks": bool(subtasks)}
+    if cases_text is not None:
+        (state.dir / "cases_file.md").write_text(cases_text)     # kept with the run, so a fresh plan can reuse it
+        state.data["mode"]["cases_file"] = Path(cases_file).name
     state.save()
     print(f"Pack: {pack.slug}. Run folder: {state.dir}")
 
@@ -935,6 +970,8 @@ def _main(argv=None) -> int:
     t.add_argument("--env", default=None, help="staging, pre-prod or production (asked if not given)")
     t.add_argument("--headed", action="store_true", help="show the testers' browser windows (debugging)")
     t.add_argument("--dry-run", action="store_true", help="plan and questions only")
+    t.add_argument("--cases-file", type=Path, default=None,
+                   help="Markdown/text file of test cases to use instead of the ticket's Redmine Test Cases task")
     t.add_argument("--fresh-plan", action="store_true", help="plan again even if a plan-only draft exists")
     t.add_argument("--from-draft", dest="draft_run", default=None, help="run folder of a plan-only run to execute")
     t.add_argument("--no-subtasks", dest="subtasks", action="store_false",
@@ -1017,7 +1054,8 @@ def _main(argv=None) -> int:
                     return 2
             a.env = env
         return cmd_test(settings, a.task_id, a.case, a.env, a.dry_run, a.retest_bug, a.email, a.email_progress,
-                        fresh_plan=a.fresh_plan, draft_run=a.draft_run, subtasks=a.subtasks)
+                        fresh_plan=a.fresh_plan, draft_run=a.draft_run, subtasks=a.subtasks,
+                        cases_file=a.cases_file)
     if a.cmd == "rerun":
         return cmd_rerun(settings, a.task_id, a.cases, a.src_run, a.failed)
     if a.cmd == "web":

@@ -471,6 +471,8 @@ class Handler(BaseHTTPRequestHandler):
                     args = ["test", d.name.split("-")[0], "--env", env, "--fresh-plan"]
                     if not _subtasks_of(d):
                         args.append("--no-subtasks")
+                    if (d / "cases_file.md").exists():
+                        args += ["--cases-file", str(d / "cases_file.md")]
                 elif b.get("execute"):                # run the plan of a plan-only run
                     d = self._run(str(b["execute"]))
                     if not d:
@@ -499,6 +501,12 @@ class Handler(BaseHTTPRequestHandler):
                         args.append("--dry-run")
                     if b.get("subtasks") is False:
                         args.append("--no-subtasks")
+                    cf = str(b.get("cases_file") or "").strip()
+                    if cf:
+                        p = Path(cf).expanduser()
+                        if p.suffix.lower() not in (".md", ".txt", ".markdown") or not p.is_file():
+                            return self._send(400, {"error": f"no .md or .txt file at {cf}"})
+                        args += ["--cases-file", str(p.resolve())]
                 j = Job(args)
                 JOBS[j.id] = j
                 return self._send(200, j.info())

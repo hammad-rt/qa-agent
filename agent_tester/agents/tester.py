@@ -72,6 +72,29 @@ RELOAD_HINT = ("You already saved/searched here and the expected message did not
                "call note_behaviour with it and continue. If the action opened another tab, use browser_tabs to "
                "list and select it, read it, then select the first tab again.")
 ACTIONS_PER_STEP = int(os.environ.get("TESTER_ACTIONS_PER_STEP", "30"))   # actions allowed without step progress
+HARD_STOP_AFTER = 4                  # calls allowed after a stop/limit error before code ends the turn itself
+_AFTER_STOP_OK = {"finish", "record_value", "mark_step", "evidence_name", "note_behaviour", "propose_memory"}
+
+
+class TesterHardStop(Exception):
+    """Raised from before_tool when the model ignores a stop: ends the tester turn without another model call."""
+
+
+def _hard_stop_in(e: BaseException) -> bool:
+    """ADK/anyio may wrap the exception (ExceptionGroup, __cause__); find it anywhere in the chain."""
+    seen = set()
+    stack = [e]
+    while stack:
+        x = stack.pop()
+        if x is None or id(x) in seen:
+            continue
+        seen.add(id(x))
+        if isinstance(x, TesterHardStop):
+            return True
+        stack += [x.__cause__, x.__context__, *getattr(x, "exceptions", ())]
+    return False
+
+
 LOOP_WARN, LOOP_STOP = 3, 5          # same call repeated this often without progress: warn, then stop
 
 
@@ -803,6 +826,22 @@ class TesterSession:
         step (reset by each new mark_step) and in total; the same call repeated without progress is a loop."""
         if name == "finish":
             return None
+        if self.result.limit_hit:                            # already told to stop: don't let it carry on for ever
+            self._after_stop = getattr(self, "_after_stop", 0) + 1
+            if self._after_stop > HARD_STOP_AFTER:
+                self.result.stuck = True
+                self.finished = True
+                why = "a repeated call" if self.result.loop else "the case's time or action limit"
+                self.result.notes = self.result.notes or (
+                    f"Stopped by code: the tester was told to finish after {why} but kept calling tools "
+                    f"(last: {name}). Step reached: {self.current_step}.")
+                self.state.log_action(case_id=self.case_id, app=self.app, tool="hard_stop", args={"call": name},
+                                      plan_step=self.current_step, outcome="stop")
+                raise TesterHardStop(self.result.notes)
+            if name not in _AFTER_STOP_OK:
+                return {"error": "You were already told to stop. No browser tool will run now. Call "
+                                 "finish(notes, stuck=True) saying which step you reached and what the page showed."}
+            return None
         over_time = time.time() > self.deadline
         if not over_time and self.calls > 4 * self.max_calls:
             over_time = True                                 # runaway reads
@@ -1251,7 +1290,11 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
                 try:
                     await run_agent(agent, prompt, settings, trace_path=run_dir / "trace.jsonl",
                                     follow_up=lambda final: nudge_text(final) if not (sess.finished or sess.result.limit_hit) else None)
+                except TesterHardStop:
+                    pass
                 except Exception as e:  # noqa: BLE001
+                    if _hard_stop_in(e):
+                        return
                     if not _is_context_error(e):
                         raise
                     sess.result.stuck, sess.finished = True, True

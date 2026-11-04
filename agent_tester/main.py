@@ -151,6 +151,18 @@ def _feature_checks(feature, plan, pack) -> list[str]:
     return issues
 
 
+def _state_for_run(runs_dir, task_id, draft, draft_src, draft_state, subtasks):
+    """The run folder for a test run: a plan-only draft is run in its own folder (no second entry in the run
+    list); a draft made with the other scope (feature vs only this ticket) is not used."""
+    from .run_state import RunState
+    if draft is not None and ((draft_state.get("mode") or {}).get("subtasks", True) is not False) != bool(subtasks):
+        print("The plan-only draft was made with a different scope (feature vs only this ticket); planning again.")
+        draft = None
+    if draft is not None:
+        return RunState(draft_src), draft
+    return RunState.new(runs_dir, task_id), None
+
+
 def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_run: bool,
              retest_bug: int | None = None, email: bool = False, email_progress: bool = False,
              fresh_plan: bool = False, draft_run: str | None = None, subtasks: bool = True) -> int:
@@ -187,7 +199,17 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
                   + ("  [no Test Cases: I'll write them]" if casegen.needs_generation(b, tc_prefix) else ""))
     if generate:
         print("No 'Test Cases - ...' task found; I'll write the cases from the task description for you to review.")
-    state = RunState.new(settings.runs_dir, task_id)
+    from .modes import drafted_plan, draft_from
+    if draft_run and not (dry_run or retest_bug or fresh_plan):
+        draft, draft_src, draft_state = draft_from(settings.runs_dir, draft_run, task_id)
+        if draft is None:
+            print(f"{draft_run} is not a plan-only run of #{task_id}; planning again.")
+    else:
+        draft, draft_src, draft_state = (None, None, {}) if (dry_run or retest_bug or fresh_plan) else \
+            drafted_plan(settings.runs_dir, task_id)
+    if draft is not None and getattr(draft, "env", env) != env:
+        draft = None                                  # drafted for another environment: plan again
+    state, draft = _state_for_run(settings.runs_dir, task_id, draft, draft_src, draft_state, subtasks)
     state.data["env"] = env                       # known even if the run is stopped before planning
     state.data["mode"] = {"cases": parse_cases_early(case), "subtasks": bool(subtasks)}
     state.save()
@@ -209,16 +231,6 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
             hint = bug["text"] if bug else f"Redmine issue #{retest_bug}"
             print(f"No earlier run links cases to bug {retest_bug}; the planner will pick cases related to it.")
             task_text += f"\n\nRETEST MODE: plan only the cases that check this fixed bug: {hint}"
-    from .modes import drafted_plan, draft_from
-    if draft_run and not (dry_run or retest_bug or fresh_plan):
-        draft, draft_src, draft_state = draft_from(settings.runs_dir, draft_run, task_id)
-        if draft is None:
-            print(f"{draft_run} is not a plan-only run of #{task_id}; planning again.")
-    else:
-        draft, draft_src, draft_state = (None, None, {}) if (dry_run or retest_bug or fresh_plan) else \
-            drafted_plan(settings.runs_dir, task_id, skip=state.dir)
-    if draft is not None and getattr(draft, "env", env) != env:
-        draft = None                                  # drafted for another environment: plan again
     lessons_mem = open_memory(settings, pack)
     from .agents.llm import LLMOutputError
     try:
@@ -325,7 +337,7 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
     state.set_plan(plan)
     if still:
         print("\nStill missing: " + ", ".join(r.key for r in still) + ". Stopping before the run.")
-        state.checkpoint("stopped at plan gate: missing requirements", status="blocked")
+        state.checkpoint("stopped at plan gate: missing requirements", status="dry_run" if draft is not None else "blocked")
         return 2
     if dry_run:
         state.checkpoint("dry run: stopped after plan gate", status="dry_run")
@@ -336,7 +348,7 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
           + ". If the app sends it anywhere else (like a payment page), I'll ask you first.")
     ok, pre = gate.plan_gate(plan, policy=policy, issues=check_plan(plan))
     if not ok:
-        state.checkpoint("user stopped at plan gate", status="stopped")
+        state.checkpoint("user stopped at plan gate", status="dry_run" if draft is not None else "stopped")
         return 1
     policy.preapprove(pre)
     state.data["approved"], state.data["preapproved"] = True, pre

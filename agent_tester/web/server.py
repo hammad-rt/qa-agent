@@ -20,6 +20,15 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNS = ROOT / "runs"
+SERVER_MTIME = Path(__file__).stat().st_mtime
+
+
+def code_stale() -> bool:
+    """True when the web server's own code changed on disk after it started (a restart picks it up)."""
+    try:
+        return Path(__file__).stat().st_mtime != SERVER_MTIME
+    except OSError:
+        return False
 PACKS = ROOT / "packs"
 MEM_FIELDS = ("id", "kind", "scope", "area", "text", "status", "source", "evidence", "linked_issue",
               "created_at", "last_confirmed_at", "success_count", "failure_count")
@@ -325,6 +334,8 @@ class Handler(BaseHTTPRequestHandler):
                 ds = sorted((d for d in RUNS.iterdir() if d.is_dir() and not d.name.startswith(".")),
                             key=run_sort_key, reverse=True) if RUNS.exists() else []
                 return self._send(200, [run_summary(d) for d in ds[:100]])
+            if parts == ["api", "version"]:
+                return self._send(200, {"stale": code_stale()})
             if parts == ["api", "jobs"]:
                 return self._send(200, [j.info(len(j.out)) for j in JOBS.values()])
             if parts == ["api", "knowledge"]:

@@ -55,7 +55,7 @@ CRM base https://staging5.rolustech.com:4220/index.php
 - Admin settings (open from Administration `action=index`; a direct URL gives an XSRF error): `saveRewardsPanel` (Savo Rewards), `saveShipmentProtection`, `saveExpressCategoryWeightDefaults`, `saveExpressPricingSettings`.
 
 ## Business rules
-- Rewards earn rate: 5% of each order. Earned when the order is paid and moved to "Order Delivered" in the CRM.
+- Rewards earn rate: 5% of shipping after rewards. Earned when the order is fully paid and its status changes to "Order Delivered" in the CRM.
 - Redemption cap: rewards cover at most 10% of the shipping price, not the order total.
 - Adding a parcel to an already-paid order: the rewards limit is based only on the new unpaid shipping (confirmed intended by the user; for example a $400 parcel gives a $40 limit on order A1158).
 - A rewards balance of at least $100 or 50,000 KES is needed for the redemption cases.
@@ -66,10 +66,15 @@ CRM base https://staging5.rolustech.com:4220/index.php
 - Shipping-only orders are `AOS_Invoices` records; Buy & Ship orders are `AOS_Quotes`.
 - Admin redemption: order DetailView > "Rewards Redeemed" subpanel > Create (name "Redeemed rewards by admin against <order>"; Redeemed Rewards editable, Applicable Rewards read-only).
 - Client: portal user "Hammad" = CRM client Hammad Iqbal (not "Sidney Test"). Match the client by the orders it owns, not by name. Contact fields: Total Rewards, Current Rewards, Rewards Used.
-- Earn happens only on the status change to Order Delivered (re-triggering overwrites). Earn = 5% of shipping after rewards (pending product confirmation).
-- Earning needs a payment first: moving an UNPAID order to Order Delivered earns nothing. Any case that earns rewards
-  must (1) pay the order (4242 card on staging/local), (2) confirm the payment was recorded (portal balance 0 or the
-  CRM order shows the payment) and only then (3) set Order Delivered. If the payment did not go through, do not move
+- Earn happens only when the status CHANGES to Order Delivered; re-saving an order already at Order Delivered does
+  nothing. To re-trigger, move it to another status, save, then set Order Delivered again. Shipping Only overwrites
+  its single earn row on re-trigger; Buy & Ship earns once and never updates that row (code, 2026-11-04).
+- Earned = earn % x (shipping - rewards redeemed on that order). The order's own earn % field overrides the Admin
+  setting. Earning also needs Savo Rewards enabled on the CRM contact (`sav_rewards_enabled`); check it in E0.
+- Earning needs the order FULLY paid: a linked payment and a balance of 0 or less. A Paid payment that leaves a
+  balance earns nothing, and an unpaid order earns nothing. Any case that earns rewards must (1) pay the whole
+  balance (4242 card on staging/local), (2) confirm the payment is recorded and the balance is 0 (portal and CRM)
+  and only then (3) set Order Delivered. If the payment did not go through, do not move
   the status: the case is BLOCKED ("payment not recorded"), not FAIL. A wallet that stays empty after Order Delivered
   on an unpaid order is expected, not a bug.
 - Redeem cap = 10% of unpaid shipping; 0 once paid >= shipping.
@@ -102,8 +107,19 @@ rewards, cap(s) = R% x unpaid shipping s.
   cap(total) - redeemed), and no customer credit.
 - KES: the wallet is held in USD and shown as FX x W on KES orders, on both the portal and the CRM. The cap uses
   shipping only: non-shipping charges (shipment protection, next-day delivery, misc) are never included.
-- Buy & Ship: same parity ("up to" = CRM Applicable = cap of its shipping); whole amounts only, so floor(cap) is
-  accepted; the total updates after apply; card payment should be offered (never use M-Pesa).
+- Whole units in every currency: decimals are rejected (`rewards_not_whole_number`) and "up to" rounds down
+  (35.19 shows as 35). Stripe charges are whole units too.
+- Buy & Ship and Shipping Only must handle rewards identically; any difference is a bug. On Buy & Ship the rewards box
+  shows only at Awaiting Payment, Shipping Fee Invoiced or Order Arrived, with a payable above 0. Card payment
+  should be offered (never use M-Pesa).
+- The portal rewards session lasts 30 minutes: don't judge pending-rewards behaviour on a page left idle longer.
+- At balance 0, Pay By Card says "Order is already fully paid."; with under 1 unit left it shows the "below the minimum
+  amount" message. Both are expected, not bugs.
+- The Stripe webhook sets the payment to Paid first, then marks the rewards Used. Payment Paid but rewards still
+  Applied = FAIL; payment never Paid = BLOCKED (payment not recorded).
+- A refund reverts earned and redeemed rewards (hook exists in code; amounts not yet verified, so check, don't assume).
+- Switching an order's currency must not change the wallet's Total, Current or Used.
+- E0 must confirm the portal user is the CRM contact whose wallet is read (match by the orders it owns).
 - Invariants, always: W = L - U (gap 0), portal wallet = CRM Current, no order balance below 0, paid + rewards = total,
   and no portal "against" Applied rows left on test orders at the end.
 - Build check: cases tied to the earlier report bugs (B1, B3, B6, B7, B8, B13, B15, B16, B19, A8, A14, C7) are expected

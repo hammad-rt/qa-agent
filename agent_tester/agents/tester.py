@@ -484,7 +484,7 @@ class TesterSession:
             from .. import learned
             line = learned.record_behaviour(s.state.data.get("pack_root"), s.brief.get("area"), s.app,
                                             redact(text), s.case_id)
-            s.state.log_action(case_id=s.case_id, app=s.app, tool="note_behaviour", args={"text": redact(text)[:300]},
+            s.state.log_action(case_id=s.case_id, app=s.app, tool="note_behaviour", args={"text": redact(text)[:2000]},
                                plan_step=s.current_step)
             return {"saved": bool(line)} if line else {"saved": False, "note": "already known or too short"}
 

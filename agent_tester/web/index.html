@@ -208,7 +208,7 @@ function addEvent(e){const who=`<span class="who">${esc((e.at||'').slice(11,19))
   if(a=='judge'){const v=tryJson(e.text)||{};if(v.case_id){if(!openBlock||openBlock.id!=v.case_id)ensure(v.case_id);openBlock.verdict=v.verdict}openBlock&&(openBlock.html+=verdictHtml(v));openBlock&&(openBlock.closed=true);return}
   if(!openBlock||openBlock.closed||openBlock.id=='plan'){ensure(nextCaseId())}
   if(e.calls)openBlock.html+=e.calls.map(c=>callHtml(c,who)).join('');
-  else if(e.text){const t=clean(e.text);if(t)openBlock.html+=`<div class="say">${esc(t.length>700?t.slice(0,700)+'…':t)}</div>`}}
+  else if(e.text){const t=clean(e.text);if(t)openBlock.html+=`<div class="say">${t.length>700?`${esc(t.slice(0,700))}<details class="more"><summary>show the rest</summary>${esc(t.slice(700))}</details>`:esc(t)}</div>`}}
 let picked=null;
 function nextCaseId(){const done=new Set(blocks.map(b=>b.id));const c=((lastPlan||{}).cases||[]).find(x=>!done.has(x.id)&&(!picked||picked.includes(x.id)));return c?c.id:'case '+(blocks.length)}
 function ensure(id,title){if(openBlock&&openBlock.id==id&&!openBlock.closed)return;let b=blocks.find(x=>x.id==id&&!x.closed);if(!b){b={id,title:title||caseTitle(id),html:'',verdict:null,closed:false};blocks.push(b)}openBlock=b}

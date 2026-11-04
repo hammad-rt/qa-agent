@@ -140,7 +140,7 @@ def _trace(path, ev) -> None:
     if resps:
         rec["responses"] = resps
     if text:
-        rec["text"] = text[:500]
+        rec["text"] = text if len(text) <= 8000 else text[:8000] + " …[cut: over 8000 characters]"
     line = scrub_secrets(redact(json.dumps(rec, default=str)))
     with open(path, "a") as f:
         f.write(line + "\n")

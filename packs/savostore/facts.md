@@ -59,6 +59,11 @@ CRM base https://staging5.rolustech.com:4220/index.php
 - Admin redemption: order DetailView > "Rewards Redeemed" subpanel > Create (name "Redeemed rewards by admin against <order>"; Redeemed Rewards editable, Applicable Rewards read-only).
 - Client: portal user "Hammad" = CRM client Hammad Iqbal (not "Sidney Test"). Match the client by the orders it owns, not by name. Contact fields: Total Rewards, Current Rewards, Rewards Used.
 - Earn happens only on the status change to Order Delivered (re-triggering overwrites). Earn = 5% of shipping after rewards (pending product confirmation).
+- Earning needs a payment first: moving an UNPAID order to Order Delivered earns nothing. Any case that earns rewards
+  must (1) pay the order (4242 card on staging/local), (2) confirm the payment was recorded (portal balance 0 or the
+  CRM order shows the payment) and only then (3) set Order Delivered. If the payment did not go through, do not move
+  the status: the case is BLOCKED ("payment not recorded"), not FAIL. A wallet that stays empty after Order Delivered
+  on an unpaid order is expected, not a bug.
 - Redeem cap = 10% of unpaid shipping; 0 once paid >= shipping.
 - Buy & Ship rewards box shows only at Awaiting Payment / Shipping Fee Invoiced; USD shows only Pay to Bank Account. Shipping ~$10/cu ft, $35 minimum.
 - Order fit check before any rewards case: invoice exists, balance > 0, unpaid shipping > 0, client matches. A paid order (e.g. A1148) is unusable; prepare a fresh shipping-only order with an invoice and unpaid shipping (needs approval).

@@ -46,8 +46,26 @@ Edit or delete freely; wrong lines are worse than none.
 - Shipping Only has its own menu, separate from Buy & Ship; Stripe tests pay an existing unpaid Shipping Only order (4242 card), never a new order.
 
 ## crm:crm
+- Behaviour: Quick Repair: The agent logged in as admin, navigated to the Repair menu, and triggered 'Quick Repair and Rebuild'. The resulting page text confirms the process was executed, showing multiple 'Clearing...done' messages and 'Rebuilding...' logs. (2026-11-04, 184815.TC1)
+- Route: open / (2026-11-04, 184815.TC1 reached)
+- Behaviour: Line item save still works: The parcel status was changed to 'Not Yet Received', saved, and verified to persist after reload. The value was subsequently restored to 'Received'. (2026-10-28, TC4)
+- Behaviour: Declined / no protection stays zero: The shipment protection was set to 'No'. After changing the parcel value to 5000.00, the protection cost fields remained at 0.00. (2026-10-28, TC3)
+- Behaviour: Parcel drives value and cost: The agent updated the parcel value from 4000 to 5000; the shipment value and protection cost (80 to 100) updated live and persisted after saving and reloading the page. (2026-10-28, TC2)
+- Behaviour: Shipment Value read-only: Both the 'Shipment Value' and 'Shipment Value(USD)' fields were confirmed as read-only. The agent attempted to type '5000.00' into both fields, and both attempts failed with a TimeoutError because the locators resolved to inputs with the 'readonly' attribute (e.g., <input r (2026-10-28, TC1)
+- Route: click 'Orders' -> click 'Shipping Only Orders' -> click ' for order <a record>' (2026-10-28, TC1 reached)
+- Behaviour: Line item save still works: The agent changed the parcel status of order <a record> to 'Received', saved the order, and verified the change persisted by attempting to set it back to 'Not Yet Received' in the subsequent step, confirming the save was successful. (2026-10-28, TC4)
+- Behaviour: Declined / no protection stays zero: The agent updated the Parcel Value in USD to 3,000.00 and verified that the protection cost remained 0.00, as the Shipment Protection was set to 'No'. (2026-10-28, TC3)
+- Behaviour: Parcel drives value and cost: The Shipment Value was increased from 3000.0 to 4000.0, which caused the protection cost to recalculate from 60.0 to 80.0. These values persisted after saving and reloading the page. (2026-10-28, TC2)
+- Route: click 'Orders' -> click 'Shipping Only Orders' -> click '' -> click 'Yes' (2026-10-28, TC1 reached)
 - Behaviour: Line item save still works: The agent changed the parcel status of order <a record> to 'Received', saved it, and verified it persisted upon reload. (2026-10-26, TC4)
 - Behaviour: Declined / no protection stays zero: The agent changed the parcel value to 3000.00 and verified that the protection cost remained 0.00 (as the order had protection set to 'No'). (2026-10-26, TC3)
 - Behaviour: Parcel drives value and cost: Initial values (Parcel Sum 1001.0, Protection Cost 20.02) were updated to (Parcel Sum 2000.0, Protection Cost 40.02). After save and reload, the final values persisted as Parcel Sum 2000.0 and Protection Cost 40.0 (rounded as per project facts). (2026-10-26, TC2)
 - Behaviour: Shipment Value and Shipment Value USD are read-only after Quick Repair and Rebuild plus a hard reload; before the repair they looked editable from stale cache (2026-10-26, #183498 TC1).
 - Route: click 'Orders' -> click 'Shipping Only Orders' -> click 'EditView for <a record>' -> click 'Edit link for order <a record>' -> click 'Shipment Value field' (2026-10-26, TC1 reached)
+
+## admin:crm
+- Behaviour: Run Quick Repair and Rebuild on the target environment: Quick Repair and Rebuild was executed successfully; database tables were synced with vardefs without errors. (2026-10-28, TC0)
+
+## portal:portal
+- Behaviour: Desktop field order: The field order matches the expectation: Recipient's Name -> Phone Number | Recipient's email -> Warning paragraph -> Street | Nearest Landmark -> City | County/State -> Postal Code | Country. (2026-11-04, 184815.TC2)
+- Route: open / (2026-11-04, 184815.TC2 reached)

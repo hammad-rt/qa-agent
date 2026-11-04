@@ -125,12 +125,19 @@ async def run_json(agent, prompt: str, settings: Settings, *, validate=None, lab
     raise LLMOutputError(f"{label}: the model returned unusable JSON {attempts} times ({last_err}).{where}")
 
 
+import contextvars
+
+TRACE_CASE: contextvars.ContextVar[str | None] = contextvars.ContextVar("TRACE_CASE", default=None)
+
+
 def _trace(path, ev) -> None:
     """Append a masked one-line summary of an ADK event to trace.jsonl."""
     from datetime import datetime
 
     from ..redact import redact, scrub_secrets
     rec = {"at": datetime.now().isoformat(timespec="seconds"), "author": getattr(ev, "author", None)}
+    if TRACE_CASE.get():
+        rec["case_id"] = TRACE_CASE.get()           # the web UI groups steps by this, not by guessing the order
     parts = (ev.content.parts if ev.content and ev.content.parts else [])
     calls = [{"name": p.function_call.name, "args": dict(p.function_call.args or {})} for p in parts if getattr(p, "function_call", None)]
     resps = [p.function_response.name for p in parts if getattr(p, "function_response", None)]

@@ -219,10 +219,13 @@ function addEvent(e){const who=`<span class="who">${esc((e.at||'').slice(11,19))
   const a=e.author||'';
   if(a=='planner'||a=='reviewer'){ensure('plan','Planning');openBlock.html+=a=='reviewer'?`<div class="ev">${who}<br>Plan review: ${esc((tryJson(e.text)||{}).ok===false?'changes requested':'ok')}</div>`:`<div class="ev">${who}<br>Drafted the plan</div>`;return}
   if(a=='judge'){const v=tryJson(e.text)||{};
+   if(!v.case_id&&e.case_id)v.case_id=e.case_id;
+   if(v.case_id&&openBlock&&!openBlock.closed&&/^case \d+$/.test(openBlock.id)&&!blocks.some(b=>b.id==v.case_id)){openBlock.id=v.case_id;openBlock.title=''}   // older traces: name the guessed block after the judged case
    if(v.case_id){if(!openBlock||openBlock.id!=v.case_id)ensure(v.case_id);openBlock.verdict=v.verdict;openBlock.html+=verdictHtml(v)}
    else{if(!openBlock||openBlock.closed)ensure(nextCaseId());openBlock.judgeFromResults=true}   // older runs cut the judge's text, so read the saved result
    openBlock.closed=true;return}
-  if(!openBlock||openBlock.closed||openBlock.id=='plan'){ensure(nextCaseId())}
+  if(e.case_id){if(!openBlock||openBlock.id!=e.case_id||openBlock.closed)ensure(e.case_id)}
+  else if(!openBlock||openBlock.closed||openBlock.id=='plan'){ensure(nextCaseId())}
   if(e.calls)openBlock.html+=e.calls.map(c=>callHtml(c,who)).join('');
   else if(e.text){const t=clean(e.text);if(t)openBlock.html+=`<div class="say">${t.length>700?`${esc(t.slice(0,700))}<details class="more"><summary>show the rest</summary>${esc(t.slice(700))}</details>`:esc(t)}</div>`}}
 let picked=null;
@@ -231,7 +234,7 @@ function ensure(id,title){if(openBlock&&openBlock.id==id&&!openBlock.closed)retu
 function drawBlocks(){const box=$('#events');const open=new Set([...box.querySelectorAll('details[open]')].map(d=>d.dataset.id));
   setHTML(box,blocks.map((b,i)=>{const isLast=i==blocks.length-1;const o=open.has(b.id)||isLast;
    const r=lastResults[b.id]||{},v=b.verdict||r.verdict,jr=b.judgeFromResults?(r.verdict?verdictHtml(r):'<div class="verdict mute">Waiting for the judge\'s saved verdict…</div>'):'';
-   return `<details class="blk" data-id="${esc(b.id)}" ${o?'open':''}><summary><b>${esc(b.id)}</b> <span>${esc(b.title)}</span> ${v?vpill(v):(isLast&&!b.closed&&b.id!='plan'?'<span class="pill running">in progress</span>':'')}</summary><div class="body">${b.html}${jr}</div></details>`}).join('')||'<div class="empty">No steps yet.</div>');
+   return `<details class="blk" data-id="${esc(b.id)}" ${o?'open':''}><summary><b>${esc(b.id)}</b> <span>${esc(b.title||caseTitle(b.id))}</span> ${v?vpill(v):(isLast&&!b.closed&&b.id!='plan'?'<span class="pill running">in progress</span>':'')}</summary><div class="body">${b.html}${jr}</div></details>`}).join('')||'<div class="empty">No steps yet.</div>');
   {const p=$('#live');if($('#follow').checked&&p._stick!==false)p.scrollTop=p.scrollHeight}}
 async function refresh(){if(!cur)return;let d;
  try{d=await api(`/api/runs/${cur}`)}catch(e){return}

@@ -37,3 +37,11 @@ class Guidance(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HeldIsLoggable(unittest.TestCase):
+    def test_action_log_accepts_held(self):
+        from agent_tester.models import ActionLogEntry
+        e = ActionLogEntry(seq=1, case_id="TC1", app="portal", tool="browser_click", approval="held",
+                           outcome="user guidance delivered")
+        self.assertEqual(e.approval, "held")

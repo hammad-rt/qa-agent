@@ -89,7 +89,7 @@ class ActionLogEntry(BaseModel):
     args: dict = Field(default_factory=dict)
     plan_step: int | None = None
     inferred: bool = False
-    approval: Literal["not_needed", "approved", "pre_approved", "denied"] = "not_needed"
+    approval: Literal["not_needed", "approved", "pre_approved", "denied", "held"] = "not_needed"
     outcome: str = "ok"
     deviation: str | None = None
 

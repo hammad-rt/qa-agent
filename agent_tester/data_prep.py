@@ -41,6 +41,28 @@ def consumes(case, rule: dict) -> bool:
     return any(re.search(k, _case_text(case), re.I) for k in rule.get("consumed_by", []))
 
 
+_NO_REWARDS = r"without (any |the |savo )*rewards|no (savo )?rewards (applied|used)|(do not|don't|not) (apply|use) (any |savo )*rewards"
+
+
+def uses_rewards(case) -> bool:
+    """True when the case applies or redeems Savo Rewards; False for a plain card payment
+    (e.g. the case that pays without rewards to fill the wallet)."""
+    text = _case_text(case)
+    if re.search(_NO_REWARDS, text, re.I):
+        return False
+    return bool(re.search(r"\breward|\bredeem|use up to|wallet", text, re.I))
+
+
+def verify_text(case, v: dict) -> str:
+    """The check's text, with {rewards} filled for this case: the rewards-box condition only when the case
+    uses rewards."""
+    t = v["text"]
+    if "{rewards}" in t:
+        part = v.get("rewards" if uses_rewards(case) else "no_rewards", "")
+        t = t.replace("{rewards}", part.replace("{space}", " "))
+    return t
+
+
 def _turn(tester, plan, state, rule, app, text, read_only, case_id):
     from .coordinator import brief_for
     pseudo = PlannedCase(id=case_id, title=f"data prep: {rule['id']}", area=rule.get("area"),
@@ -113,8 +135,9 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
         if vt is not None:
             try:
                 vr = _turn(vt, plan, state, rule, v.get("app", "portal"),
-                           v["text"].replace("{value}", str(rec)).replace("{record}", str(sr.values.get(f"{value}_record") or "unknown")) +
-                           f"\nIf it is usable, record_value('{value}_ok', 'yes'); otherwise record_value('{value}_ok', 'no: <why>').",
+                           verify_text(case, v).replace("{value}", str(rec)).replace("{record}", str(sr.values.get(f"{value}_record") or "unknown")) +
+                           f"\nIf it is usable, record_value('{value}_ok', 'yes'); otherwise record_value('{value}_ok', 'no: <why>'). "
+                           f"Record exactly 'yes' or 'no: <why>' as {value}_ok, never a number or amount from the page.",
                            True, f"PREP-{key}-check")
                 ok = str(vr.values.get(f"{value}_ok", "")).lower()
                 if not ok.startswith("yes"):

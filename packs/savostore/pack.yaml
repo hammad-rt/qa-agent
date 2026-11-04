@@ -117,10 +117,15 @@ data_prep:
         Follow recipe R1 step 4: browser_navigate straight to <portal URL>/shipping-only/invoice/{record} (the
         portal invoice address uses the CRM record id; do not use View Invoice). If {record} is unknown, open
         Shipping Only orders and find order {value}. Do not click Make a Payment or Pay By Card. Wait about 4 seconds, then
-        read the page: it is usable if it shows a balance > 0, a Pay By Card button and the Savo Rewards box with
-        "You can use up to $X" (X > 0). Reload once if the box says "no Savo Rewards".
+        read the page: it is usable if it shows a balance > 0 and a Pay By Card button.{rewards}
         If rewards from an earlier run are still applied (a pending amount with an X), click the X to remove them,
         re-read the page and judge it again; that order is still usable.
+      rewards: >-
+        {space}It must also show the Savo Rewards box with "You can use up to $X" (X > 0). Reload once if the box
+        says "no Savo Rewards".
+      no_rewards: >-
+        {space}This case pays without rewards (it may be the case that fills the wallet), so a Savo Rewards box
+        that says "no Savo Rewards" is fine and does not make the order unusable. Do not apply rewards.
     consumed_by: ["complete payment", "pay with", "\\bpays?\\b", "4242"]
   - id: buy_ship_order
     area: rewards
@@ -138,8 +143,13 @@ data_prep:
     verify:
       app: portal
       text: >-
-        Log in to the portal and open Buy & Ship order {value}. It is usable if it shows a balance > 0 and the Savo
-        Rewards box with "You can use up to $X" (X > 0). Reload once if the box says "no Savo Rewards".
+        Log in to the portal and open Buy & Ship order {value}. It is usable if it shows a balance > 0.{rewards}
+      rewards: >-
+        {space}It must also show the Savo Rewards box with "You can use up to $X" (X > 0). Reload once if the box
+        says "no Savo Rewards".
+      no_rewards: >-
+        {space}This case pays without rewards, so a Savo Rewards box that says "no Savo Rewards" is fine. Do not
+        apply rewards.
     consumed_by: ["complete payment", "pay with", "\\bpays?\\b", "4242"]
   - id: paid_order_new_parcel
     area: rewards

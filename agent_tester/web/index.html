@@ -39,6 +39,8 @@ button.ghost{background:transparent;border-color:transparent;color:var(--mute)}b
 .pill{display:inline-flex;align-items:center;gap:4px;padding:1px 9px;border-radius:999px;font-size:12px;font-weight:500;margin-right:4px;background:#1f2a3e;color:#cbd5e1;border:1px solid #ffffff10;white-space:nowrap}
 .PASS,.passed,.done{background:var(--ok-bg);color:var(--ok)}.FAIL,.failed,.error{background:var(--bad-bg);color:var(--bad)}
 .BLOCKED,.blocked{background:var(--blk-bg);color:var(--blk)}.running{background:var(--run-bg);color:var(--run)}.dry_run{background:#1e2a44;color:#a5b4fc}.paused,.AGENT,.stopped{background:var(--warn-bg);color:var(--warn)}
+.NOT,.AGENT{background:var(--warn-bg);color:var(--warn)}.pending{background:#1f2a3e;color:var(--mute)}.pill svg.i{width:12px;height:12px;flex-basis:12px;vertical-align:-1px}
+.cstrip{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;padding:0;list-style:none}.cstrip li{margin:0}.cstrip button{min-height:28px;padding:2px 9px;font-size:12.5px;font-weight:600;border-radius:999px;border:1px solid #ffffff14;gap:5px}.cstrip button.pending{background:transparent;border-style:dashed;border-color:var(--line2)}.cstrip button:hover{filter:brightness(1.2)}
 .running::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 1.4s infinite}
 @keyframes pulse{50%{opacity:.25}}
 .tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);padding:0 14px;overflow-x:auto;background:var(--panel)}
@@ -125,6 +127,17 @@ const ic=n=>`<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${IC[n]||''}<
 function progress(c,total){const n=Math.max(total||0,1),g=k=>Object.entries(c||{}).filter(([x])=>x.split(' ')[0]==k).reduce((a,[,v])=>a+v,0);
  const p=g('PASS'),f=g('FAIL'),b=g('BLOCKED'),o=Object.values(c||{}).reduce((a,v)=>a+v,0)-p-f-b;
  return `<div class="bar" role="img" aria-label="${p} passed, ${f} failed, ${b} blocked of ${total||0}"><i class="p" style="width:${p/n*100}%"></i><i class="f" style="width:${f/n*100}%"></i><i class="b" style="width:${b/n*100}%"></i><i class="o" style="width:${Math.max(o,0)/n*100}%"></i></div>`}
+const VC=v=>{const k=String(v||'').toUpperCase();return k.startsWith('PASS')?'PASS':k.startsWith('FAIL')?'FAIL':k.startsWith('BLOCK')?'BLOCKED':k.startsWith('NOT')?'NOT':k=='RUNNING'?'running':k=='PENDING'?'pending':k?'AGENT':''};
+const VI={PASS:'check',FAIL:'x',BLOCKED:'lock',NOT:'alert',AGENT:'alert'};
+// Status is never shown by colour alone: every pill carries an icon and its word.
+const vpill=v=>`<span class="pill ${VC(v)}">${VI[VC(v)]?ic(VI[VC(v)]):''}${esc(v)}</span>`;
+let lastResults={};
+function caseStrip(plan,res,status){const cs=(plan||{}).cases||[];if(!cs.length)return '';let nowSet=false;
+ return `<ul class="cstrip" aria-label="Case results">${cs.map(c=>{const v=(res[c.id]||{}).verdict;let st=v||'pending';if(!v&&status=='running'&&!nowSet&&(!picked||picked.includes(c.id))){st='running';nowSet=true}
+  const k=VC(st),short=c.id.split('.').slice(-1)[0],word=st=='running'?'in progress':st;
+  return `<li><button class="${k}" title="${esc(c.id)} ${esc(c.title||'')}: ${esc(word)}" aria-label="${esc(c.id)} ${esc(word)}" onclick="goCase('${esc(c.id)}')">${VI[k]?ic(VI[k]):''}${esc(short)}</button></li>`}).join('')}</ul>`}
+function goCase(id){const t=[...document.querySelectorAll('.tab')].find(x=>x.dataset.p=='live');t.click();const d=[...document.querySelectorAll('#events details.blk')].find(x=>x.dataset.id==id);
+ if(d){d.open=true;d.scrollIntoView({block:'start',behavior:matchMedia('(prefers-reduced-motion:reduce)').matches?'auto':'smooth'})}else{[...document.querySelectorAll('.tab')].find(x=>x.dataset.p=='cases').click()}}
 const stLabel=x=>({dry_run:'plan only'}[x]||x);
 function nearBottom(el){return el.scrollHeight-el.scrollTop-el.clientHeight<40}
 function setHTML(el,html){if(typeof el=='string')el=$(el);if(!el||el._h===html)return;
@@ -142,12 +155,12 @@ async function baseFor(id){try{return (await api(`/api/runs/${id}/console`)).tex
 function showConsole(){const live=job&&(cur===null||cur===job.run_dir);const t=live?jobBase+jobOut:(savedCon[cur]||'');$('#consoleWrap').style.display=t?'':'none';const c=$('#console');if(c._t!==t){const stick=nearBottom(c);c.textContent=t;c._t=t;if(stick)c.scrollTop=c.scrollHeight}}
 document.querySelectorAll('.tab').forEach(t=>{t.insertAdjacentHTML('afterbegin',ic(t.dataset.i));t.onkeydown=e=>{if(e.key=='Enter'||e.key==' '){e.preventDefault();t.click()}}});document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{document.querySelectorAll('.tab,.pane').forEach(x=>x.classList.remove('on'));t.classList.add('on');document.querySelectorAll('.tab').forEach(x=>x.setAttribute('aria-selected',x===t));$('#'+t.dataset.p).classList.add('on')});
 async function api(p,b){const r=await fetch(p,b?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}:{});const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j}
-function pills(c){return Object.entries(c||{}).map(([k,v])=>`<span class="pill ${k.split(' ')[0]}">${v} ${esc(k)}</span>`).join('')}
+function pills(c){return Object.entries(c||{}).map(([k,v])=>`<span class="pill ${VC(k)}">${VI[VC(k)]?ic(VI[VC(k)]):''}${v} ${esc(k)}</span>`).join('')}
 let sel=new Set();
 async function loadRuns(){try{const rs=await api('/api/runs');const ids=new Set(rs.map(r=>r.id));sel=new Set([...sel].filter(x=>ids.has(x)));
  const bar=`<div class="runbar"><label class="mute"><input type="checkbox" ${rs.length&&sel.size==rs.length?'checked':''} onchange="selAll(this.checked)"> select all</label><span style="flex:1"></span>${sel.size?`<button class="dan sm" onclick="delSel()">${ic('trash')}Delete ${sel.size}</button>`:''}</div>`;
  window._runs=rs;
- setHTML('#runs',(rs.length?bar:'')+rs.map(r=>`<div class="run ${r.id==cur?'sel':''}" tabindex="0" role="button" aria-label="Run for task ${esc(r.task)}" onkeydown="if(event.key=='Enter')openRun('${r.id}')" onclick="openRun('${r.id}')"><div class="t"><input type="checkbox" class="rsel" ${sel.has(r.id)?'checked':''} onclick="event.stopPropagation();togSel('${r.id}',this.checked)"> #${esc(r.task)} <span class="pill ${r.status}">${esc(stLabel(r.status))}</span><span class="grow"></span><span class="racts"><button class="sm icon ghost" title="Rename" aria-label="Rename run" onclick="event.stopPropagation();renameRun('${r.id}')">${ic('edit')}</button><button class="sm icon dan" title="Delete" aria-label="Delete run" onclick="event.stopPropagation();delRun('${r.id}')">${ic('trash')}</button></span></div>${r.label?`<div class="lbl">${esc(r.label)}</div>`:''}${progress(r.counts,r.cases)}<div class="mute">${esc(r.env||'')} · ${r.done}/${r.cases} cases · ${esc((r.started||'').replace('T',' ').slice(0,16))}</div><div>${pills(r.counts)}</div></div>`).join('')||'<div class="empty">No runs yet.</div>')}catch(e){}}
+ setHTML('#runs',(rs.length?bar:'')+rs.map(r=>`<div class="run ${r.id==cur?'sel':''}" tabindex="0" role="button" aria-label="Run for task ${esc(r.task)}" onkeydown="if(event.key=='Enter')openRun('${r.id}')" onclick="openRun('${r.id}')"><div class="t"><input type="checkbox" class="rsel" ${sel.has(r.id)?'checked':''} onclick="event.stopPropagation();togSel('${r.id}',this.checked)"> #${esc(r.task)} <span class="pill ${r.status}">${esc(stLabel(r.status))}</span><span class="grow"></span><span class="racts"><button class="sm icon ghost" title="Rename" aria-label="Rename run" onclick="event.stopPropagation();renameRun('${r.id}')">${ic('edit')}</button><button class="sm icon dan" title="Delete" aria-label="Delete run" onclick="event.stopPropagation();delRun('${r.id}')">${ic('trash')}</button></span></div>${r.label?`<div class="lbl">${esc(r.label)}</div>`:''}${progress(r.counts,r.cases)}<div class="mute">${esc(r.env||'')} · ${r.done}/${r.cases} cases${r.current?` · now <b>${esc(r.current.split('.').slice(-1)[0])}</b>`:''} · ${esc((r.started||'').replace('T',' ').slice(0,16))}</div><div>${pills(r.counts)}</div></div>`).join('')||'<div class="empty">No runs yet.</div>')}catch(e){}}
 function openRun(id){if(cur!==id){cur=id;showConsole();traceNext=0;blocks=[];openBlock=null;$('#events').innerHTML='';}loadRuns();refresh()}
 async function start(dry){$('#startErr').textContent='';try{job=await api('/api/start',{task:$('#task').value,env:$('#env').value,cases:$("#caseIds").value,dry_run:dry,subtasks:$('#scope').value!=='only'});outLen=0;jobOut='';jobBase='';cur=null;$('#events').innerHTML='';$('#title').textContent='Starting #'+$('#task').value+'…';pollJob()}catch(e){$('#startErr').textContent=e.message}}
 async function rerun(o){if(!cur)return;if(job&&job.running){alert('A run is still going; stop it or wait for it to finish.');return}
@@ -197,7 +210,7 @@ function callHtml(c,who){const a=c.args||{};let cls='',txt;
   case 'propose_memory':txt=`${ic('bulb')} Learned: ${esc(a.text||a.fact||JSON.stringify(a))}`;break;
   default:txt=`<code>${esc(c.name)}</code> <span class="mute">${esc(JSON.stringify(a).slice(0,140))}</span>`}
   return `<div class="ev ${cls}">${who}<br>${txt}</div>`}
-function verdictHtml(v){return `<div class="verdict"><div><span class="pill ${String(v.verdict||'').split(' ')[0]}">${esc(v.verdict)}</span> <b>Judge</b>${v.severity?` · severity ${esc(v.severity)}`:''}</div>
+function verdictHtml(v){return `<div class="verdict"><div>${v.verdict?vpill(v.verdict):''} <b>Judge</b>${v.severity?` · severity ${esc(v.severity)}`:''}</div>
  ${v.expected?`<div><b>Expected:</b> ${esc(v.expected)}</div>`:''}${v.actual?`<div><b>Actual:</b> ${esc(v.actual)}</div>`:''}${v.note?`<div class="mute">${esc(v.note)}</div>`:''}${v.bug_title?`<div><b>Bug:</b> ${esc(v.bug_title)}</div>`:''}</div>`}
 let blocks=[], openBlock=null;
 function caseTitle(id){const c=((lastPlan||{}).cases||[]).find(x=>x.id==id);return c?c.title:''}
@@ -205,7 +218,10 @@ let lastPlan=null;
 function addEvent(e){const who=`<span class="who">${esc((e.at||'').slice(11,19))} · ${esc((e.author||'').replace('tester_',''))}</span>`;
   const a=e.author||'';
   if(a=='planner'||a=='reviewer'){ensure('plan','Planning');openBlock.html+=a=='reviewer'?`<div class="ev">${who}<br>Plan review: ${esc((tryJson(e.text)||{}).ok===false?'changes requested':'ok')}</div>`:`<div class="ev">${who}<br>Drafted the plan</div>`;return}
-  if(a=='judge'){const v=tryJson(e.text)||{};if(v.case_id){if(!openBlock||openBlock.id!=v.case_id)ensure(v.case_id);openBlock.verdict=v.verdict}openBlock&&(openBlock.html+=verdictHtml(v));openBlock&&(openBlock.closed=true);return}
+  if(a=='judge'){const v=tryJson(e.text)||{};
+   if(v.case_id){if(!openBlock||openBlock.id!=v.case_id)ensure(v.case_id);openBlock.verdict=v.verdict;openBlock.html+=verdictHtml(v)}
+   else{if(!openBlock||openBlock.closed)ensure(nextCaseId());openBlock.judgeFromResults=true}   // older runs cut the judge's text, so read the saved result
+   openBlock.closed=true;return}
   if(!openBlock||openBlock.closed||openBlock.id=='plan'){ensure(nextCaseId())}
   if(e.calls)openBlock.html+=e.calls.map(c=>callHtml(c,who)).join('');
   else if(e.text){const t=clean(e.text);if(t)openBlock.html+=`<div class="say">${t.length>700?`${esc(t.slice(0,700))}<details class="more"><summary>show the rest</summary>${esc(t.slice(700))}</details>`:esc(t)}</div>`}}
@@ -214,19 +230,20 @@ function nextCaseId(){const done=new Set(blocks.map(b=>b.id));const c=((lastPlan
 function ensure(id,title){if(openBlock&&openBlock.id==id&&!openBlock.closed)return;let b=blocks.find(x=>x.id==id&&!x.closed);if(!b){b={id,title:title||caseTitle(id),html:'',verdict:null,closed:false};blocks.push(b)}openBlock=b}
 function drawBlocks(){const box=$('#events');const open=new Set([...box.querySelectorAll('details[open]')].map(d=>d.dataset.id));
   setHTML(box,blocks.map((b,i)=>{const isLast=i==blocks.length-1;const o=open.has(b.id)||isLast;
-   return `<details class="blk" data-id="${esc(b.id)}" ${o?'open':''}><summary><b>${esc(b.id)}</b> <span>${esc(b.title)}</span> ${b.verdict?`<span class="pill ${b.verdict.split(' ')[0]}">${esc(b.verdict)}</span>`:(isLast&&!b.closed?'<span class="pill running">in progress</span>':'')}</summary><div class="body">${b.html}</div></details>`}).join('')||'<div class="empty">No steps yet.</div>');
+   const r=lastResults[b.id]||{},v=b.verdict||r.verdict,jr=b.judgeFromResults?(r.verdict?verdictHtml(r):'<div class="verdict mute">Waiting for the judge\'s saved verdict…</div>'):'';
+   return `<details class="blk" data-id="${esc(b.id)}" ${o?'open':''}><summary><b>${esc(b.id)}</b> <span>${esc(b.title)}</span> ${v?vpill(v):(isLast&&!b.closed&&b.id!='plan'?'<span class="pill running">in progress</span>':'')}</summary><div class="body">${b.html}${jr}</div></details>`}).join('')||'<div class="empty">No steps yet.</div>');
   {const p=$('#live');if($('#follow').checked&&p._stick!==false)p.scrollTop=p.scrollHeight}}
 async function refresh(){if(!cur)return;let d;
  try{d=await api(`/api/runs/${cur}`)}catch(e){return}
- lastPlan=d.plan;picked=(d.mode||{}).cases||null;
+ lastPlan=d.plan;picked=(d.mode||{}).cases||null;lastResults=d.results||{};
  try{const s=d.summary;setHTML('#title',`#${esc(s.task)} on ${esc(s.env||'')} <span class="pill ${s.status}">${esc(stLabel(s.status))}</span>`);
-  setHTML('#sub',`${progress(s.counts,s.cases)}<div class="stats"><span class="stat"><b>${s.done}/${s.cases}</b>cases done</span>${pills(s.counts)}<span class="mute">${esc(s.last||'')}</span></div>`);$('#resumeBtn').style.display=(s.status=='paused'&&!(job&&job.running))?'':'none';$('#execBtn').style.display=(s.status=='dry_run'&&s.cases&&!(job&&job.running))?'':'none';$('#rerunBtns').style.display=(s.status!='running'&&!(job&&job.running))?'':'none';{const hp=!!((d.plan||{}).cases||[]).length;$('#rerunAll').innerHTML=ic('redo')+(hp?'Rerun all':'Start again');$('#rerunAll').dataset.mode=hp?'':'start';$('#rerunAll').style.display=s.status=='dry_run'?'none':'';$('#rerunAll').title=hp?'Run every case again from the start, same plan':'This run stopped before it had a plan: start the same task again';$('#rerunFailed').style.display=hp&&s.done?'':'none'}}catch(e){console.error(e)}
+  setHTML('#sub',`${progress(s.counts,s.cases)}<div class="stats"><span class="stat"><b>${s.done}/${s.cases}</b>cases done</span>${pills(s.counts)}<span class="mute">${esc(s.last||'')}</span></div>${caseStrip(d.plan,lastResults,s.status)}`);$('#resumeBtn').style.display=(s.status=='paused'&&!(job&&job.running))?'':'none';$('#execBtn').style.display=(s.status=='dry_run'&&s.cases&&!(job&&job.running))?'':'none';$('#rerunBtns').style.display=(s.status!='running'&&!(job&&job.running))?'':'none';{const hp=!!((d.plan||{}).cases||[]).length;$('#rerunAll').innerHTML=ic('redo')+(hp?'Rerun all':'Start again');$('#rerunAll').dataset.mode=hp?'':'start';$('#rerunAll').style.display=s.status=='dry_run'?'none':'';$('#rerunAll').title=hp?'Run every case again from the start, same plan':'This run stopped before it had a plan: start the same task again';$('#rerunFailed').style.display=hp&&s.done?'':'none'}}catch(e){console.error(e)}
  const key=JSON.stringify(d);if(key!==lastDetail){lastDetail=key;try{render(d)}catch(e){console.error('render',e)}}
  if(!(job&&job.running&&job.run_dir===cur)){try{const k=await api(`/api/runs/${cur}/console`);savedCon[cur]=k.text||''}catch(e){}}showConsole();
  try{const t=await api(`/api/runs/${cur}/trace?since=${traceNext}`);if(!traceNext){blocks=[];openBlock=null}
-  if(t.lines.length){for(const ln of t.lines){try{addEvent(ln)}catch(e){console.error('event',e,ln)}}traceNext=t.next;drawBlocks()}}catch(e){console.error('trace',e)}}
+  if(t.lines.length){for(const ln of t.lines){try{addEvent(ln)}catch(e){console.error('event',e,ln)}}traceNext=t.next}drawBlocks()}catch(e){console.error('trace',e)}}
 function render(d){const res=d.results||{};d.shots=d.shots||[];d.reports=d.reports||[];d.action_log=d.action_log||[];
- setHTML('#cases',((d.plan||{}).cases||[]).map(c=>{const r=res[c.id]||{};return `<div class="case"><h2><span>${esc(c.id)}</span><span class="grow">${esc(c.title)}</span> ${r.verdict?`<span class="pill ${r.verdict.split(' ')[0]}">${esc(r.verdict)}</span>`:'<span class="pill">pending</span>'} <button class="sm" onclick="rerun({cases:'${esc(c.id)}'})" title="Rerun only this case with the same plan">${ic('redo')}Rerun</button></h2>
+ setHTML('#cases',((d.plan||{}).cases||[]).map(c=>{const r=res[c.id]||{};return `<div class="case"><h2><span>${esc(c.id)}</span><span class="grow">${esc(c.title)}</span> ${r.verdict?vpill(r.verdict):'<span class="pill pending">pending</span>'} <button class="sm" onclick="rerun({cases:'${esc(c.id)}'})" title="Rerun only this case with the same plan">${ic('redo')}Rerun</button></h2>
  <ol>${(c.steps||[]).map(st=>typeof st=='string'?`<li>${esc(st)}</li>`:`<li>[${esc(st.app)}] ${esc(st.text)} ${st.inferred?'<span class="inf">inferred</span>':''} ${st.changes_data?'<span class="chg">changes data</span>':''}</li>`).join('')}</ol>
  <div><b>Expected:</b> ${esc(c.expected)}</div>${r.actual?`<div><b>Actual:</b> ${esc(r.actual)}</div>`:''}${r.note?`<div><b>Notes:</b> ${esc(r.note)}</div>`:''}
  ${r.values&&Object.keys(r.values).length?`<div><b>Values:</b> ${Object.entries(r.values).map(([k,v])=>`${esc(k)}=<code>${esc(typeof v=='object'?v.value??JSON.stringify(v):v)}</code>`).join(' ')}</div>`:''}</div>`}).join('')||'<div class="empty">No plan yet.</div>');

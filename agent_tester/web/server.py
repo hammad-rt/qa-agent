@@ -250,7 +250,9 @@ def run_summary(d: Path) -> dict:
     live = any(j.info()["run_dir"] == d.name and j.proc.poll() is None for j in JOBS.values())
     return {"id": d.name, "task": plan.get("task_id") or d.name.split("-")[0], "env": plan.get("env"),
             "status": "running" if live else st.get("status", "unknown"), "cases": len(plan.get("cases") or []),
-            "done": len(results), "counts": counts, "started": cps[0]["at"] if cps else None,
+            "done": len(results), "counts": counts,
+            "current": next((c.get("id") for c in plan.get("cases") or [] if c.get("id") not in results
+                             and (not (st.get("mode") or {}).get("cases") or c.get("id") in (st.get("mode") or {}).get("cases"))), None) if live else None, "started": cps[0]["at"] if cps else None,
             "last": cps[-1]["label"] if cps else None, "mtime": d.stat().st_mtime,
             "label": (d / "label.txt").read_text().strip() if (d / "label.txt").exists() else "",
             "report": next((f.name for f in (d / "report.html", d / "report.pdf") if f.exists()), None)}

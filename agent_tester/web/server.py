@@ -109,6 +109,9 @@ class Job:
         self.out = ""
         self.pending: dict | None = None      # the question the run is waiting on (from an ASK marker line)
         self._buf = ""
+        self._saved = 0                       # how much of out is already in runs/<run>/console.log
+        # resume doesn't print "Run folder:", but its run is the argument
+        self.run_hint = Path(args[1]).name if len(args) > 1 and args[0] == "resume" else None
         self.lock = threading.Lock()
         env = {**os.environ, "PYTHONUNBUFFERED": "1", "QA_WEB": "1"}
         self.proc = subprocess.Popen([sys.executable, "-u", "-m", "agent_tester", *args], cwd=ROOT,
@@ -123,9 +126,32 @@ class Job:
             if not chunk:
                 break
             self._feed(chunk.decode("utf-8", "replace"))
+            self._persist()
         with self.lock:
             self.out += self._buf
             self._buf = ""
+        self._persist()
+
+    def _persist(self):
+        """Append new console text to runs/<run>/console.log so it is still there after the run stops,
+        pauses, or the web server restarts."""
+        try:
+            with self.lock:
+                text, start = self.out, self._saved
+            run = _run_dir_from(text) or self.run_hint
+            if not run or len(text) == start:
+                return
+            d = RUNS / run
+            if not d.is_dir():
+                return
+            with open(d / "console.log", "a", encoding="utf-8") as f:
+                if start == 0:
+                    f.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')}  agent_tester {' '.join(self.args)} ===\n")
+                f.write(text[start:])
+            with self.lock:
+                self._saved = len(text)
+        except OSError:
+            pass
 
     def _feed(self, text: str):
         """Marker lines become a readable question (no newline, the answer is echoed after it) and set pending.
@@ -173,7 +199,7 @@ class Job:
         return {"id": self.id, "args": self.args, "started": self.started, "running": self.proc.poll() is None,
                 "code": self.proc.poll(), "out": text[since:], "len": len(text), "waiting": waiting,
                 "secret": secret, "prompt": prompt,
-                "run_dir": _run_dir_from(text)}
+                "run_dir": _run_dir_from(text) or self.run_hint}
 
     def answer(self, text: str):
         if self.proc.poll() is None:
@@ -184,6 +210,7 @@ class Job:
             with self.lock:
                 self.pending = None
                 self.out += ("********" if secret and text else text) + "\n"
+            self._persist()
 
     def stop(self):
         if self.proc.poll() is None:
@@ -302,6 +329,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(404, {"error": "no such run"})
                 if len(parts) == 3:
                     return self._send(200, run_detail(d))
+                if parts[3] == "console":
+                    f = d / "console.log"
+                    text = f.read_text(errors="replace")[-300_000:] if f.is_file() else ""
+                    return self._send(200, {"text": text})
                 if parts[3] == "trace":
                     return self._send(200, trace_lines(d, int(q.get("since", 0))))
                 if parts[3] == "file":

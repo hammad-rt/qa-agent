@@ -35,8 +35,15 @@ ANALYZE_JS = r"""() => {
   const before = boxes.filter(e => e !== pw && (form === document || e.form === form) &&
       (e.compareDocumentPosition(pw) & Node.DOCUMENT_POSITION_FOLLOWING));
   const user = before[before.length - 1] || null;
-  const btn = [...form.querySelectorAll('button, input[type=submit], input[type=button], input[type=image]')]
-      .filter(vis).find(b => (b.type || '').toLowerCase() !== 'reset') || null;
+  // Pick the real submit button. Password show/hide eye icons and other toggles are buttons too; clicking one
+  // leaves the form sitting there, which looked like a wrong password.
+  const TOGGLE = /\b(show|hide|reveal|toggle|view)\b|eye|visib/i;
+  const isToggle = b => b.hasAttribute('aria-pressed') || b.getAttribute('aria-controls') === pw.id ||
+      TOGGLE.test([lab(b), b.getAttribute('title') || '', b.className || '', b.id || '', b.name || ''].join(' '));
+  const cands = [...form.querySelectorAll('button, input[type=submit], input[type=button], input[type=image]')]
+      .filter(b => vis(b) && (b.type || '').toLowerCase() !== 'reset' && !isToggle(b));
+  const btn = cands.find(b => ['submit', 'image'].includes((b.type || '').toLowerCase())) ||
+      cands.find(b => /log\s*in|sign\s*in|continue|submit|next/i.test(lab(b))) || null;
   return JSON.stringify({has_password: true, user: desc(user), password: desc(pw),
       submit: btn && {id: btn.id || '', name: btn.name || '', label: lab(btn)}, error: errText});
 }"""
@@ -115,9 +122,16 @@ async def run(browser, ctx, account: str, path: str = ""):
         if not pw:
             raise
         from agent_tester.config import write_env_secret
-        write_env_secret(env_name, pw)
+        old = os.environ.get(env_name)
         os.environ[env_name] = pw
-        return await _attempt(browser, ctx, account, path)
+        try:
+            res = await _attempt(browser, ctx, account, path)
+        except LoginRejected:
+            if old is not None:
+                os.environ[env_name] = old       # a wrong retry never replaces the saved password
+            raise
+        write_env_secret(env_name, pw)           # saved only once it actually logged in
+        return res
 
 
 async def _attempt(browser, ctx, account: str, path: str = ""):

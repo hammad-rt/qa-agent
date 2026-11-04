@@ -39,6 +39,7 @@ Portal base https://staging5.rolustech.com:4225
 - Buy & Ship: list `/buy-and-ship`, purchase-quote form `/buy-and-ship/create`, open an order `/buy-and-ship?editedOrder=<B-number>`, edit `/buy-and-ship/edit/<record id>?orderNumber=<B-number>`, invoice/payment `/buy-and-ship/invoice/<record id>`.
 - Savo Express: `/savo-express`, cart `/savo-express/cart`. Express orders appear in the Buy & Ship list as BX numbers.
 - Orders have no detail page: `editedOrder` opens the order's card expanded in the list.
+- "Delivery Information" in a ticket means the delivery step inside a Buy & Ship or Shipping Only order (pick Next-Day Door Delivery or Pickup there). Its phone field is the combined box labelled "Phone Number" with the +254 flag and a green NEW tag. `/delivery-addresses/create` (Account > Delivery Addresses > Add) is a different form whose field is just "Phone" with no NEW tag; never use it for Delivery Information cases (#184815 TC3/TC6 false fails, 2026-11-04).
 
 CRM base https://staging5.rolustech.com:4220/index.php
 - Shipping Only orders `module=AOS_Invoices`; Buy & Ship (incl. BX) `module=AOS_Quotes`; Payments `module=sav_payments`; Clients `module=Contacts`; Rewards Redeemed `module=sav_rewards_redeemed`; Loyalty Rewards `module=sav_rewards`.

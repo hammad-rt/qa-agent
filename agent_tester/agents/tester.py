@@ -675,6 +675,12 @@ class TesterSession:
     def before_tool(self, tool, args, tool_context):
         name = tool.name
         self.calls += 1
+        note = TesterSession._new_guidance(self)
+        if note and name != "finish":
+            self.state.log_action(case_id=self.case_id, app=self.app, tool=name, args=_safe_args(args),
+                                  plan_step=self.current_step, approval="held", outcome="user guidance delivered")
+            return {"error": f"{note}\nYour {name} call was NOT run. Follow the guidance, then call it again "
+                             "if it still fits."}
         settle = _settle_seconds(getattr(self, "app", ""))
         now = time.monotonic()
         last_act, last_snap = getattr(self, "_last_act", 0.0), getattr(self, "_last_snap", 0.0)
@@ -986,6 +992,28 @@ class TesterSession:
                               plan_step=self.current_step, outcome="xsrf")
         return ("XSRF / acceptable-referer page detected. Do not browser_navigate to this admin deep-link again. "
                 "Open the screen via the discovery menu/label path (Home or Administration menu), then continue.")
+
+    def _new_guidance(self) -> str | None:
+        """Notes the user typed in the web UI while the run goes (run_dir/guidance.jsonl). Each session sees
+        every note once, at its next tool call. Guidance is advice only: approvals and safety rules still apply."""
+        f = self.state.dir / "guidance.jsonl"
+        if not f.exists():
+            return None
+        try:
+            rows = [json.loads(l) for l in f.read_text().splitlines() if l.strip()]
+        except (OSError, ValueError):
+            return None
+        seen = getattr(self, "_guide_seen", 0)
+        new = rows[seen:]
+        if not new:
+            return None
+        self._guide_seen = len(rows)
+        older = "" if seen else " Earlier notes may have been meant for an earlier case; use them only where they fit."
+        lines = "\n".join(f"- {str(r.get('text', '')).strip()}" for r in new if str(r.get("text", "")).strip())
+        if not lines:
+            return None
+        return ("GUIDANCE FROM THE USER (the person running this test; it is advice, it does not lift approvals, "
+                f"production rules or the read-the-page rule).{older}\n{lines}")
 
     def _hold(self, name, args, why):
         """Not yet: the click is allowed once the named approval is in place."""

@@ -107,6 +107,7 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc);cursor:point
   <div class="tabs" role="tablist"><div class="tab on" data-p="live" role="tab" tabindex="0" data-i="live">Live</div><div class="tab" data-p="cases" role="tab" tabindex="0" data-i="list">Cases</div><div class="tab" data-p="shots" role="tab" tabindex="0" data-i="img">Screenshots</div><div class="tab" data-p="log" role="tab" tabindex="0" data-i="act">Actions</div><div class="tab" data-p="report" role="tab" tabindex="0" data-i="doc">Report</div><div class="tab" data-p="know" role="tab" tabindex="0" data-i="book">Knowledge</div><div class="tab" data-p="mem" role="tab" tabindex="0" data-i="db">Memory</div></div>
   <div id="live" class="pane on">
     <div id="askBox"></div>
+    <div id="guideRow" class="row rbar" style="display:none;gap:8px;align-items:flex-start;margin:0 0 10px"><textarea id="guideIn" rows="2" onkeydown="if(event.key=='Enter'&&(event.ctrlKey||event.metaKey))sendGuide()" style="flex:1" aria-label="Guidance for the agent" placeholder="Guide the agent, e.g. &quot;the phone field is under Contact details&quot;. It reads this at its next step. No passwords."></textarea><button onclick="sendGuide()">Send to agent</button><span id="guideMsg" class="mute" role="status"></span></div>
     <div id="consoleWrap" style="display:none"><div class="mute">Agent console</div><pre class="console" id="console"></pre></div>
     <div class="toolbar"><b>Steps</b><label><input type="checkbox" id="showReads" onchange="$('#events').classList.toggle('hideReads',!this.checked)"> show page reads</label><label><input type="checkbox" id="follow" checked> follow live</label></div><div id="events" class="hideReads"><div class="empty">No steps yet.</div></div>
   </div>
@@ -187,7 +188,7 @@ async function pollJob(){try{
  // (just started), or when the run is waiting for the user's answer or approval.
  if(j.run_dir&&cur!==j.run_dir&&(cur===null||(j.waiting&&followed!==j.prompt))){if(j.waiting)followed=j.prompt;cur=j.run_dir;traceNext=0;blocks=[];openBlock=null;$('#events').innerHTML='';loadRuns()}
  if(j.waiting){if(!$('#ans')||$('#askBox').dataset.p!==j.prompt)$('#askBox').dataset.p=j.prompt,$('#askBox').innerHTML=approvalCard(j.prompt)||`<div class="ask"><span style="flex:0 1 50%;white-space:pre-wrap">${esc(j.prompt)}</span><input id="ans" type="${j.secret?'password':'text'}" autocomplete="off" placeholder="Type an answer, or leave empty for the default" onkeydown="if(event.key=='Enter')answer()"><button class="pri" onclick="answer()">Send</button></div>`,(document.activeElement===document.body)&&$('#ans').focus({preventScroll:true})}else $('#askBox').innerHTML='';
- $('#stopBtn').style.display=j.running?'':'none';if(!j.running&&$('#askBox').innerHTML){$('#askBox').innerHTML='';$('#askBox').dataset.p='';loadRuns()}showConsole()}catch(e){}}
+ $('#stopBtn').style.display=j.running?'':'none';$('#guideRow').style.display=j.running?'':'none';if(!j.running&&$('#askBox').innerHTML){$('#askBox').innerHTML='';$('#askBox').dataset.p='';loadRuns()}showConsole()}catch(e){}}
 const clean=t=>String(t??'').replace(/<\|[^|]*\|>/g,' ').replace(/^\s*(thought|analysis|final)\b\s*/i,'').replace(/\s+\n/g,'\n').trim();
 function tryJson(t){const m=String(t).match(/\{[\s\S]*\}/);if(!m)return null;try{return JSON.parse(m[0])}catch(e){return null}}
 function name(a){return esc(a.element||a.name||'a field')}
@@ -228,6 +229,11 @@ function addEvent(e){const who=`<span class="who">${esc((e.at||'').slice(11,19))
   else if(!openBlock||openBlock.closed||openBlock.id=='plan'){ensure(nextCaseId())}
   if(e.calls)openBlock.html+=e.calls.map(c=>callHtml(c,who)).join('');
   else if(e.text){const t=clean(e.text);if(t)openBlock.html+=`<div class="say">${t.length>700?`${esc(t.slice(0,700))}<details class="more"><summary>show the rest</summary>${esc(t.slice(700))}</details>`:esc(t)}</div>`}}
+async function sendGuide(){const t=$('#guideIn').value.trim();if(!t||!cur)return;
+  try{const r=await fetch(`/api/runs/${cur}/guide`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:t})});const j=await r.json().catch(()=>({}));
+    if(!r.ok){$('#guideMsg').textContent=j.error||'not sent';if(r.status==404)checkStale(true);return}
+    $('#guideIn').value='';$('#guideMsg').textContent='Sent. The agent reads it at its next step.';setTimeout(()=>$('#guideMsg').textContent='',6000)}
+  catch(e){$('#guideMsg').textContent='not sent: '+e}}
 let picked=null;
 function nextCaseId(){const done=new Set(blocks.map(b=>b.id));const c=((lastPlan||{}).cases||[]).find(x=>!done.has(x.id)&&(!picked||picked.includes(x.id)));return c?c.id:'case '+(blocks.length)}
 function ensure(id,title){if(openBlock&&openBlock.id==id&&!openBlock.closed)return;let b=blocks.find(x=>x.id==id&&!x.closed);if(!b){b={id,title:title||caseTitle(id),html:'',verdict:null,closed:false};blocks.push(b)}openBlock=b}

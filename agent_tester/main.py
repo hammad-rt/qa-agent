@@ -386,10 +386,12 @@ def _execute(settings, pack, plan, state, policy, memory) -> int:
                         restore_pass(plan, state, testers, left)
             except RunPaused as e:
                 progress.paused(str(e))
+                _partial_report(state, pack)
                 print(f"Resume with: python -m agent_tester resume {state.dir}")
                 return 3
             except KeyboardInterrupt:
                 state.checkpoint("stopped by user (Ctrl-C)", status="paused")
+                _partial_report(state, pack)
                 print(f"\nStopped. Resume with: python -m agent_tester resume {state.dir}")
                 return 130
             except Exception as e:  # noqa: BLE001  (anything outside a single case: keep the run resumable)
@@ -397,6 +399,7 @@ def _execute(settings, pack, plan, state, policy, memory) -> int:
                     raise
                 _save_trace(state.dir / "agent_error.log")
                 state.checkpoint(f"stopped by error: {friendly_error(e)}", status="paused")
+                _partial_report(state, pack)
                 print(f"\nThe run stopped: {friendly_error(e)}\nFinished cases are saved. Details: "
                       f"{state.dir / 'agent_error.log'}\nResume with: python -m agent_tester resume {state.dir}")
                 return 1
@@ -612,7 +615,16 @@ def cmd_report(settings: Settings, run_dir: Path, pack_slug: str | None) -> int:
     from .report.builder import build_report
     from .run_state import RunState
     state = RunState(run_dir)
-    pack = load_pack(settings.packs_dir / pack_slug) if pack_slug else _pack_for_run(settings, state.plan)
+    if not state.plan:
+        print("This run has no plan yet, so there is nothing to report.")
+        return 1
+    root = state.data.get("pack_root")
+    if pack_slug:
+        pack = load_pack(settings.packs_dir / pack_slug)
+    elif root and (Path(root) / "pack.yaml").exists():
+        pack = load_pack(Path(root))          # the run's own pack: no Redmine call needed
+    else:
+        pack = _pack_for_run(settings, state.plan)
     out = build_report(state, pack)
     print(f"Report: {state.data.get('report_pdf') or out}")
     return 0
@@ -855,6 +867,20 @@ def _save_trace(path: Path) -> Path:
     except OSError:
         pass
     return path
+
+
+def _partial_report(state, pack) -> None:
+    """A stopped or paused run still gets a report of the cases that finished; the rest show as not run."""
+    if not state.data.get("results"):
+        return
+    from .report.builder import build_report
+    try:
+        out = _safe("building the partial report", build_report, state, pack)
+    except KeyboardInterrupt:                 # a second Ctrl-C skips the report, the run stays resumable
+        print("Report skipped. Build it later with: python -m agent_tester report " + str(state.dir))
+        return
+    if out:
+        print(f"Partial report (finished cases only): {state.data.get('report_pdf') or out}")
 
 
 def _safe(what: str, fn, *a, **kw):

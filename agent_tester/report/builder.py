@@ -25,6 +25,7 @@ th{background:#f5f5f5;text-align:left}h2{border-bottom:2px solid #eee;padding-bo
 <p class="muted">Run {{ run_id }}{% if pack_name %} · {{ pack_name }}{% endif %}{% if model %} · model {{ model.requested }}{% if model.served %} (served: {{ model.served | join(', ') }}){% endif %}{% endif %}</p>
 
 <h2>Summary</h2>
+{% if partial %}<p class="mean"><b>Partial report.</b> The run {{ 'stopped' if run_status == 'paused' else 'has not finished' }} after {{ done_count }} of {{ selected | length }} case(s){% if last_label %} ({{ last_label }}){% endif %}. Cases marked <b>not run</b> were not tested: {{ not_run | join(', ') }}. Resume or rerun the run to finish them, and the report is rebuilt at the end.</p>{% endif %}
 {% if plan.cases_source == 'generated' %}<p class="mean">The task had no test cases, so the agent wrote these from the task description and you reviewed them at the plan gate. A FAIL on a generated case means the app or the task's wording needs a look; it is not a confirmed bug until checked.</p>{% endif %}
 <table><tr>{% for v in order %}<th class="{{ v.split()[0] }}">{{ v }}</th>{% endfor %}<th>Total</th></tr>
 <tr>{% for v in order %}<td>{{ counts.get(v, 0) }}</td>{% endfor %}<td>{{ results | length }} of {{ plan.cases | length }}</td></tr></table>
@@ -107,6 +108,10 @@ def build_report(state, pack=None, pdf: bool | None = None) -> Path:
                 items.append({"kind": "text", "name": bn})
         return items
 
+    only = (state.data.get("mode") or {}).get("cases") or []
+    selected = [c.id for c in plan.cases if not only or c.id in only]
+    not_run = [cid for cid in selected if cid not in results]
+    cps = state.data.get("checkpoints") or []
     html = Environment(autoescape=select_autoescape(default=True)).from_string(TEMPLATE).render(
         plan=plan, results=results, counts=counts, order=ORDER, run_id=state.dir.name,
         pack_name=pack.config.get("name") if pack else None, drafts=drafts, done=done,
@@ -114,14 +119,16 @@ def build_report(state, pack=None, pdf: bool | None = None) -> Path:
         baseline=base, final=fin, snap_keys=list(dict.fromkeys([*base, *fin])),
         ledger=state.data.get("ledger", []), unrestored=[u for u in state.data.get("settings", {}).values() if not u["verified"]],
         learned=state.data.get("learned"), model=state.data.get("model"), notes=state.data.get("notes", []), tool_requests=state.data.get("tool_requests", []),
-        evidence_items=evidence_items)
+        evidence_items=evidence_items, partial=bool(not_run), not_run=not_run, selected=selected,
+        done_count=len([c for c in selected if c in results]), run_status=state.data.get("status"),
+        last_label=cps[-1]["label"] if cps else "")
     out = state.dir / "report.html"
     page = redact(html)
     for key, uri in images.items():
         page = page.replace(key, uri)
     out.write_text(page)
     (state.dir / "report.json").write_text(redact(json.dumps(
-        {"task_id": plan.task_id, "env": plan.env, "counts": counts,
+        {"task_id": plan.task_id, "env": plan.env, "counts": counts, "partial": bool(not_run), "not_run": not_run,
          "results": {k: v.model_dump(mode="json") for k, v in results.items()},
          "bug_drafts": drafts, "ledger": state.data.get("ledger", []), "settings": state.data.get("settings", {}),
          "baseline": state.data.get("baseline"), "final": state.data.get("final"), "learned": state.data.get("learned"),

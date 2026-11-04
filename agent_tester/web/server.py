@@ -375,6 +375,18 @@ class Handler(BaseHTTPRequestHandler):
                 if parts[3] == "label":
                     (d / "label.txt").write_text(str(b.get("label", "")).strip()[:200] + "\n")
                     return self._send(200, {"ok": True})
+                if parts[3] == "report":           # build report.html from the cases finished so far
+                    if not (_read_json(d / "state.json", {}) or {}).get("plan"):
+                        return self._send(400, {"error": "this run has no plan yet, so there is nothing to report"})
+                    try:
+                        r = subprocess.run([sys.executable, "-m", "agent_tester", "report", str(d)], cwd=ROOT,
+                                           capture_output=True, text=True, timeout=300)
+                    except subprocess.TimeoutExpired:
+                        return self._send(504, {"error": "building the report took too long"})
+                    if r.returncode != 0 or not (d / "report.html").exists():
+                        tail = (r.stdout + r.stderr).strip().splitlines()[-3:]
+                        return self._send(500, {"error": "report not built: " + " ".join(tail)})
+                    return self._send(200, {"ok": True})
                 if parts[3] == "delete_shot":
                     f = _safe(d, "shots/" + Path(str(b.get("name", ""))).name)
                     if not f or f.suffix.lower() != ".png":

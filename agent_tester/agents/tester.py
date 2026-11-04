@@ -1221,6 +1221,14 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
                 instr += "\nTested helpers (prefer them for these routine steps; call run_helper):\n" + "\n".join(
                     f"- {n}: {h.meta['description']} params {json.dumps(h.meta.get('params', {}))}"
                     + (" [changes data: needs approval]" if h.meta.get("changes_data") else "") for n, h in helpers.items())
+            if not brief.get("discovery") and getattr(pack, "facts", ""):
+                from ..facts_pick import brief_text, relevant
+                rules = relevant(pack.facts, brief_text(brief))
+                if rules:
+                    instr += ("\nProject rules (facts.md, current). They apply even if your steps were written before "
+                              "a rule existed: if a step skips a prerequisite a rule requires (for example paying in "
+                              "full before Order Delivered), do the prerequisite first and say in notes it was inferred "
+                              "from facts.md; if it cannot be done, stop and report BLOCKED with the reason.\n" + rules + "\n")
             if brief.get("read_only") and not brief.get("discovery"):
                 instr += "\nThis turn is READ-ONLY: log in and read values only. Never change anything."
             recipes = brief.get("recipes") or []

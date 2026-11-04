@@ -30,3 +30,31 @@ class CasesFile(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CaseIdsAndBatches(unittest.TestCase):
+    def test_ids_from_headings(self):
+        from agent_tester.main import case_ids_in
+        text = ("# Title\n## Context\n| E0, E1 | 165348 |\n### E0. Baseline\n### B1 (also B16-2 and C6). Hard reload\n"
+                "### B16-3. Away\n### A12-final. Invariant\n### TC3: Something\n#### C8 (also C11). No pending\n")
+        self.assertEqual(case_ids_in(text), ["E0", "B1", "B16-3", "A12-final", "TC3", "C8"])
+
+    def test_batches_keep_order_and_ids(self):
+        import asyncio
+        from agent_tester.agents import planner as P
+        from agent_tester.models import TestPlan
+        calls = []
+
+        async def fake(settings, pack, text, tid, env, only_case=None, repair=True, **kw):
+            calls.append(only_case)
+            ids = only_case.split(",")
+            return TestPlan.model_validate({"task_id": tid, "env": env, "cases": [
+                {"id": i, "title": i, "type": "ui", "expected": "ok", "steps": [{"text": "look"}]} for i in ids]})
+        orig, P.plan_task = P.plan_task, fake
+        try:
+            ids = [f"A{i}" for i in range(1, 13)]
+            plan = asyncio.run(P.plan_in_batches(None, None, "t", 1, "staging", ids, repair=False))
+        finally:
+            P.plan_task = orig
+        self.assertEqual([c.id for c in plan.cases], ids)
+        self.assertEqual(len(calls), 3)

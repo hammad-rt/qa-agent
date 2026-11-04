@@ -175,6 +175,14 @@ def read_cases_file(path) -> str | None:
     return text or None
 
 
+_CASE_HEAD = __import__("re").compile(r"^#{2,4}\s+([A-Z]{1,3}\d+(?:-[A-Za-z0-9]+)?)(?=[.:)\s(]|$)", __import__("re").M)
+
+
+def case_ids_in(text: str) -> list[str]:
+    """Case ids from the file's headings (### A1. ..., ## TC3: ...), in file order."""
+    return list(dict.fromkeys(m.group(1) for m in _CASE_HEAD.finditer(text or "")))
+
+
 def with_cases_file(bundle, text: str, name: str, prefix: str = "Test Cases - "):
     """The file stands in for the Test Cases child, so the planner keeps its ids and nothing is generated."""
     from dataclasses import replace
@@ -207,14 +215,19 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
             return 2
     tc_prefix = pack.config["redmine"].get("test_case_subject_prefix", "Test Cases - ")
     bundle = rm.fetch_task(task_id, tc_prefix)
-    cases_text = None
+    cases_text, file_ids = None, None
     if cases_file:
         cases_text = read_cases_file(cases_file)
         if cases_text is None:
             print(f"Can't use the cases file {cases_file}: it must be an existing .md or .txt file under 200 KB.")
             return 2
         bundle = with_cases_file(bundle, cases_text, Path(cases_file).name, tc_prefix)
-        print(f"Using the test cases in {Path(cases_file).name} instead of Redmine's (only this ticket).")
+        file_ids = case_ids_in(cases_text)
+        only_early = parse_cases_early(case)
+        if only_early:
+            file_ids = [i for i in file_ids if i in only_early] or None
+        print(f"Using the test cases in {Path(cases_file).name} instead of Redmine's (only this ticket)"
+              + (f": {len(file_ids)} cases." if file_ids else "."))
         subtasks = False
         if not draft_run:
             fresh_plan = True                     # a draft planned from Redmine's cases is not this file's plan
@@ -283,7 +296,8 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
           else:
             plan = asyncio.run(plan_task(settings, pack, task_text, task_id, env, only_case=",".join(only) or None,
                                      lessons=lessons_mem.as_prompt(lessons_mem.preload()), trace_path=state.dir / "trace.jsonl", generate=generate,
-                                     preapprovable=list(pack.config.get("preapprovable_actions", []))))
+                                     preapprovable=list(pack.config.get("preapprovable_actions", [])),
+                                     batch_ids=file_ids))
     except LLMOutputError as e:
         lessons_mem.store.close()
         print(f"\nPlanning stopped: {e}")
@@ -327,7 +341,8 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
                 new = asyncio.run(plan_task(settings, pack, task_text, task_id, env, only_case=",".join(only) or None,
                                         lessons=memory.as_prompt(memory.preload()), trace_path=state.dir / "trace.jsonl",
                                         generate=generate, answers=user_answers,
-                                        preapprovable=list(pack.config.get("preapprovable_actions", []))))
+                                        preapprovable=list(pack.config.get("preapprovable_actions", [])),
+                                        batch_ids=file_ids))
         except LLMOutputError as e:
             print(f"Couldn't update the plan ({e}); keeping the first plan.")
             new = None

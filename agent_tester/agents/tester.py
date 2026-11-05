@@ -781,6 +781,10 @@ class TesterSession:
     def before_tool(self, tool, args, tool_context):
         name = tool.name
         self.calls += 1
+        if getattr(self, "finished", False) is True:
+            # finish() already ran: the case is over. Some models answer the finish response with the same calls
+            # again (mark_step x4 + finish, forever); end the turn here instead of asking the model again.
+            raise TesterHardStop("finished")
         note = TesterSession._new_guidance(self)
         if note:
             self._guidance_notes = getattr(self, "_guidance_notes", []) + [note]

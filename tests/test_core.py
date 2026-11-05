@@ -436,3 +436,14 @@ class ReportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AfterFinish(unittest.TestCase):
+    def test_calls_after_finish_end_the_turn(self):
+        import agent_tester.agents.tester as T
+        cls = T.TesterSession
+        s = cls.__new__(cls)
+        s.calls, s.finished = 0, True
+        tool = type("Tool", (), {"name": "mark_step"})()
+        with self.assertRaises(T.TesterHardStop):
+            s.before_tool(tool, {"n": 1}, None)

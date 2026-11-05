@@ -470,3 +470,24 @@ class RefIntents(unittest.TestCase):
             seq += [T._intent_sig("browser_type", {"target": f"f{f}e116", "text": "x"}),
                     T._intent_sig("browser_click", {"target": f"f{f}e125"})]
         self.assertTrue(T._is_cycle(seq))
+
+
+class StatusWalk(unittest.TestCase):
+    def test_save_after_each_new_status_is_not_a_loop(self):
+        t = TesterCallbacks("test_loop_warn_then_stop"); t.setUp()
+        s = t.s; s.max_calls = 200
+        for st in ["Shipped to Warehouse", "On Warehouse floor", "Ready to Ship", "Shipped", "Invoiced & Shipped"]:
+            r1 = s.before_tool(t.t("browser_select_option"), {"target": "f5e554", "values": [st]}, None)
+            r2 = s.before_tool(t.t("browser_click"), {"target": "f5e114", "element": "Save"}, None)
+            for r in (r1, r2):
+                self.assertTrue(r is None or "Explore" not in r.get("error", "") and "Stop now" not in r.get("error", ""), r)
+
+    def test_save_with_same_value_still_loops(self):
+        t = TesterCallbacks("test_loop_warn_then_stop"); t.setUp()
+        s = t.s; s.max_calls = 200
+        errs = []
+        for _ in range(5):
+            for r in (s.before_tool(t.t("browser_select_option"), {"target": "f5e554", "values": ["Shipped"]}, None),
+                      s.before_tool(t.t("browser_click"), {"target": "f5e114"}, None)):
+                if r: errs.append(r.get("error", ""))
+        self.assertTrue(any("Explore" in e or "did not move" in e for e in errs))

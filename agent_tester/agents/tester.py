@@ -147,15 +147,18 @@ def _label_of(ref: str, snapshot: str) -> str:
 def _intent_sig(name: str, args: dict, snapshot: str = "") -> str | None:
     """What the call is aimed at, ignoring wording: a click on the same element (by its label, since refs change
     with every snapshot), or a script quoting the same texts."""
-    if name in ("browser_click", "browser_type"):
+    if name in ("browser_click", "browser_type", "browser_select_option"):
         ref = re.sub(r"\W|ref", "", str(args.get("target") or args.get("ref") or ""))
         label = _label_of(ref, snapshot) or ("" if ref else str(args.get("element") or "").strip().lower())
         # refs get a new frame prefix after every reload (f3e125, f6e125, ...) but the element keeps its number
         key = label or re.sub(r"^f\d+", "", ref)
         if not key:
             return None
-        verb = "click" if name == "browser_click" else "type"
-        return f"{verb}:{key}" + (f":{str(args.get('text', '')).strip().lower()[:40]}" if verb == "type" else "")
+        verb = {"browser_click": "click", "browser_type": "type"}.get(name, "select")
+        if verb == "click":
+            return f"click:{key}"
+        val = args.get("text", "") if verb == "type" else ",".join(map(str, args.get("values") or []))
+        return f"{verb}:{key}:{str(val).strip().lower()[:40]}"
     if name in ("browser_run_code_unsafe", "browser_evaluate"):
         texts = sorted(set(re.findall(r"""['"]([^'"]{3,60})['"]""", str(args.get("code") or args.get("function") or ""))))
         return "code:" + "|".join(texts) if texts else None
@@ -984,6 +987,17 @@ class TesterSession:
                 self.saves = getattr(self, "saves", 0) + 1
                 if self.saves == 2 or cnt[self.case_id] == 2:
                     return {"error": RELOAD_HINT}
+            if name in ("browser_select_option", "browser_type") and intent:
+                field = intent.rsplit(":", 1)[0]
+                val = str(args.get("values") if name == "browser_select_option" else args.get("text"))
+                vals = getattr(self, "_field_vals", {})
+                if field in vals and vals[field] != val:
+                    # a new value in a field the agent set before (next status, next amount): clicking Save again
+                    # after it is progress, not a repeat
+                    self._sigs = {k: v for k, v in self._sigs.items() if not k.startswith(("click:", "browser_click{"))}
+                    self._recent = []
+                vals[field] = val
+                self._field_vals = vals
             self._recent = (getattr(self, "_recent", []) + [intent or sig])[-12:]
             clicky = name in ("browser_click", "browser_run_code_unsafe", "browser_evaluate")
             warn_at, stop_at = (2, 4) if clicky else (LOOP_WARN, LOOP_STOP)   # a page click that did nothing: rethink at once

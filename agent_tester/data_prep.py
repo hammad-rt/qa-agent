@@ -36,6 +36,22 @@ def matching_rules(case, rules: list[dict]) -> list[dict]:
     return out
 
 
+def client_label(name: str | None, user: str | None) -> str | None:
+    """CRM contact label for prep find/create text.
+
+    The portal (or other client_login_app) account picked for THIS run always wins.
+    Pack ``test_client`` is only a staging/example hint when a login is also set — never
+    the primary lookup key, so a hard-coded name cannot override the run's email.
+    """
+    if user:
+        base = f"the client whose login / email is {user}"
+        if name:
+            return (f"{base} (often named {name} on this env; look up by that email or by "
+                    f"the orders that login owns, never by name alone)")
+        return base
+    return name
+
+
 def consumes(case, rule: dict) -> bool:
     """True when the case uses up the record (e.g. pays the order), so the next case needs a fresh one."""
     return any(re.search(k, _case_text(case), re.I) for k in rule.get("consumed_by", []))
@@ -191,8 +207,7 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
     if not (name or user):
         return blocked("no test user picked and no test client set for this environment; "
                        "the agent will not create orders for an unconfirmed account")
-    client = (f"{name} (the client of login {user})" if name and user else name
-              or f"the client whose login / email is {user}")
+    client = client_label(name, user)
     for k in ("find", "create"):
         if rule.get(k):
             rule = {**rule, k: rule[k].replace("{client}", client or "")}

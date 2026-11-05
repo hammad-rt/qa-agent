@@ -100,14 +100,14 @@ data_prep:
       any: ["shipping[- ]only", "pay by card", "stripe", "abandon", "invoice", "order-[a-z]+"]
       none: ["buy ?& ?ship", "\\bKES\\b", "shilling"]
     app: crm
-    client_login_app: portal          # the portal login picked at the start identifies the test client
+    client_login_app: portal          # the portal login picked at the start identifies the test client (always wins)
     record_hint: the CRM record id from the page URL, the record=... part
     value: test_order
-    test_client:          # optional CRM name per env; otherwise the client is matched by the portal user picked at the start
+    test_client:          # optional staging/example CRM name hint only; portal login/email for the run always wins lookup
       staging: Hammad Iqbal
     find: >-
       In the CRM, open Invoices (AOS_Invoices = shipping-only orders) and find one for the test client {client}
-      (portal user "Hammad"; match by the orders the client owns, not by the name "Sidney Test") that is at
+      (match by that login/email or by the orders it owns, never by a hard-coded name such as "Sidney Test") that is at
       status "Invoiced & Shipped", has an invoice, nothing paid and unpaid shipping > 0. Give the number with its letter prefix, e.g. A1142. An order with rewards
       still pending from an earlier run is still a fit (the check clears them).
     create: >-
@@ -145,14 +145,14 @@ data_prep:
       any: ["\\bKES\\b", "shilling"]
       none: ["buy ?& ?ship"]
     app: crm
-    client_login_app: portal          # the portal login picked at the start identifies the test client
+    client_login_app: portal          # the portal login picked at the start identifies the test client (always wins)
     record_hint: the CRM record id from the page URL, the record=... part
     value: test_order
-    test_client:          # optional CRM name per env; otherwise the client is matched by the portal user picked at the start
+    test_client:          # optional staging/example CRM name hint only; portal login/email for the run always wins lookup
       staging: Hammad Iqbal
     find: >-
       In the CRM, open Invoices (AOS_Invoices = shipping-only orders) and find one for the test client {client}
-      (portal user "Hammad"; match by the orders the client owns, not by the name "Sidney Test") that is at
+      (match by that login/email or by the orders it owns, never by a hard-coded name such as "Sidney Test") that is at
       status "Invoiced & Shipped", in KES (Kenyan Shillings), has an invoice, nothing paid and unpaid shipping > 0. Give the number with its letter prefix, e.g. A1142. An order with rewards
       still pending from an earlier run is still a fit (the check clears them).
     create: >-

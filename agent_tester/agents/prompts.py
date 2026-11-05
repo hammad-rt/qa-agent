@@ -180,6 +180,9 @@ Shape: {{"case_id": "TC1", "verdict": "FAIL", "known_bug": null, "expected": "..
 Verdicts: PASS, FAIL, PARTIAL, BLOCKED, NOT VERIFIED, SKIPPED, AGENT INCOMPLETE.
 - FAIL needs a concrete expected vs actual with values or evidence.
 - If the failure matches a known open bug, set known_bug to its number (report as "still present: bug N").
+- If the case's own expected result was met, but a separate known open bug also shows (e.g. portal matches CRM W0
+  while Total minus Used is wrong), use PARTIAL with that known_bug, not FAIL. FAIL is for the case's expected
+  result itself being wrong.
 - If behaviour differs from the task but the project facts say it is intended, it is PASS with a note.
 - If required evidence is missing, use NOT VERIFIED.
 - Deviations and inferred steps in the log must be mentioned in `note`.

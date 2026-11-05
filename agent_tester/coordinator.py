@@ -321,9 +321,18 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
         return CaseResult(case_id=case.id, verdict="SKIPPED", expected=case.expected, note=case.skip_reason)
     for dep in case.depends_on:
         r = state.result(dep)
-        if r is None or r.verdict not in ("PASS", "PARTIAL"):
+        if r is None:
             return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,
-                              note=f"depends on {dep} ({r.verdict if r else 'not run'})")
+                              note=f"depends on {dep} (not run)")
+        if r.verdict in ("PASS", "PARTIAL"):
+            continue
+        # A known open bug that is still present is recorded as FAIL, but it must not stop the rest of the
+        # suite: later cases still need to run (especially on staging after a deploy).
+        if r.verdict == "FAIL" and r.known_bug:
+            state.checkpoint(f"{case.id}: {dep} failed with known bug {r.known_bug} still present; continuing")
+            continue
+        return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,
+                          note=f"depends on {dep} ({r.verdict})")
     results: list[StepResult] = []
     for app, steps in app_turns(case):
         if app in ("none", "redmine"):

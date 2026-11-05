@@ -36,16 +36,171 @@ def matching_rules(case, rules: list[dict]) -> list[dict]:
     return out
 
 
-def client_label(name: str | None, user: str | None) -> str | None:
+def client_label(name: str | None, user: str | None, record_id: str | None = None) -> str | None:
     """CRM contact label for prep find/create text.
 
     The portal (or other client_login_app) account picked for THIS run is the only identity
     when set. Pack ``test_client`` names are ignored whenever a login/email is present so
-    env-bound contact names never override the run account.
+    env-bound contact names never override the run account. When a CRM record id was resolved
+    into run state, open by that id — never by typing a person's name from facts.
     """
+    if record_id and user:
+        return (f"the CRM contact record id {record_id} (login/email {user}; "
+                f"open by record id, do not search by a person's name)")
+    if record_id:
+        return f"the CRM contact record id {record_id} (open by record id, do not search by name)"
     if user:
         return f"the client whose login / email is {user}"
     return name
+
+
+def portal_login(plan, login_app: str | None, prep_app: str | None = None) -> str | None:
+    """The client-app login/email picked for this run (e.g. portal customer), if any."""
+    for r in getattr(plan, "requirements", []) or []:
+        if not r.value:
+            continue
+        if login_app and r.key.startswith(f"account.{login_app}."):
+            return r.value
+        if not login_app and r.key.startswith("account.") and not (
+                prep_app and r.key.startswith(f"account.{prep_app}.")):
+            return r.value
+    return None
+
+
+def contact_needed(case, rules: list[dict]) -> dict | None:
+    """First matching prep rule that identifies a CRM contact via a client login app."""
+    for rule in matching_rules(case, rules):
+        if rule.get("client_login_app") and rule.get("app"):
+            return rule
+    return None
+
+
+LOOKUP_VALUE = "crm_contact_id"
+LOOKUP_EMAIL_VALUE = "crm_contact_email"
+
+
+def contact_lookup_brief_text(email: str, display_name: str | None = None) -> str:
+    """Pack-agnostic CRM/contact search ladder. Email for this run always wins over any name hint."""
+    name_step = (
+        f"1. If a display name is known ({display_name!r}), try the module's basic name search once.\n"
+        if display_name else
+        "1. Skip basic name search (no display name known for this run).\n"
+    )
+    return (
+        f"LOOK UP the CRM contact for portal login/email {email!r}. READ-ONLY: open lists and records; change nothing.\n"
+        f"Search ladder (try in order; do not finish stuck until you have asked):\n"
+        f"{name_step}"
+        f"2. On the Clients/Contacts list, filter or use Advanced Search by email = {email}.\n"
+        f"3. If that fails, use the app's global search for the email.\n"
+        f"4. After two or three failed routes, call ask_user with what you tried and one concrete question "
+        f"(e.g. which CRM contact record is portal email {email}?). Only finish(stuck=True) if the user "
+        f"does not answer or declines.\n"
+        f"On a candidate, open the record and confirm its email field matches {email} before accepting it.\n"
+        f"When confirmed, record_value('{LOOKUP_VALUE}', '<CRM record id from the URL record=>') and "
+        f"record_value('{LOOKUP_EMAIL_VALUE}', '<email shown on the record>'), then finish.\n"
+        f"Never type a fixed person name from facts/learned as the client; the portal email for this run wins.\n"
+        f"Do not write the record id into learned.md — run state only."
+    )
+
+
+def ensure_contact(plan, case, state, testers: dict, rules: list[dict]) -> CaseResult | None:
+    """Resolve the run's portal email to a CRM contact record id before mutating prep.
+
+    Stores the id in state.data['contact'] / state.values only (never learned.md).
+    Returns a BLOCKED CaseResult when lookup fails; None when ready or not needed.
+    """
+    rule = contact_needed(case, rules)
+    if rule is None:
+        return None
+    login_app = rule.get("client_login_app")
+    app = rule.get("app")
+    email = portal_login(plan, login_app, app)
+    if not email:
+        return None
+    store = state.data.setdefault("contact", {})
+    if store.get("email") == email and store.get("record_id") and not store.get("failed"):
+        state.values[LOOKUP_VALUE] = {"value": store["record_id"], "source": "contact_lookup"}
+        state.values[LOOKUP_EMAIL_VALUE] = {"value": store.get("email_on_record") or email,
+                                            "source": "contact_lookup"}
+        return None
+
+    tester = testers.get(app) if app else None
+    if tester is None:
+        return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,
+                          note=f"contact lookup needs app '{app}' but no tester is available")
+
+    # Optional display name from pack test_client only as a search hint — never as identity.
+    clients = rule.get("test_client")
+    name_hint = clients.get(plan.env) if isinstance(clients, dict) else clients
+    if name_hint and str(name_hint).lower() in {str(email).lower(), "h", "x"}:
+        name_hint = None
+
+    text = contact_lookup_brief_text(email, name_hint)
+    from .coordinator import brief_for
+    pseudo = PlannedCase(id=f"CONTACT-{case.id}", title=f"look up contact for {email}",
+                         area=rule.get("area") or case.area,
+                         steps=[Step(text=text, app=app)],
+                         values_to_record=[LOOKUP_VALUE, LOOKUP_EMAIL_VALUE])
+    brief = brief_for(plan, pseudo, [0], state)
+    brief["data_prep"] = True
+    brief["contact_lookup"] = True
+    brief["read_only"] = True
+    brief["prefer_ask_user"] = True
+    brief["max_tool_calls"] = min(PREP_MAX_ACTIONS, 60)
+    brief["actions_per_step"] = min(PREP_MAX_ACTIONS, 60)
+    brief["values_to_record"] = [LOOKUP_VALUE, LOOKUP_EMAIL_VALUE]
+
+    from .coordinator import RunPaused
+    from .reliability import is_retryable, wait_for_model
+    outages = 0
+    while True:
+        mark = len(state.data.get("action_log", []))
+        try:
+            sr = tester(app, brief, state)
+            break
+        except RunPaused:
+            raise
+        except Exception as e:  # noqa: BLE001
+            changed = [a for a in state.data.get("action_log", [])[mark:]
+                       if a.get("approval") in ("approved", "pre_approved")]
+            if is_retryable(e) and not changed and outages < 3:
+                outages += 1
+                state.checkpoint("contact lookup: model server unreachable, waiting for it to come back")
+                if wait_for_model():
+                    continue
+            from .logsetup import short_error
+            return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,
+                              note=f"contact lookup failed: {short_error(e, 'contact lookup')}")
+
+    rec = str((sr.values or {}).get(LOOKUP_VALUE) or "").strip()
+    shown = str((sr.values or {}).get(LOOKUP_EMAIL_VALUE) or "").strip()
+    asked = [a for a in state.data.get("action_log", [])
+             if a.get("case_id") == pseudo.id and a.get("tool") == "ask_user"]
+    if _is_none(rec):
+        store.update({"email": email, "failed": True, "notes": (sr.notes or "")[:300],
+                      "asked": bool(asked)})
+        state.save()
+        why = (sr.notes or "").strip() or "no matching contact record id"
+        if asked and not any((a.get("args") or {}).get("answer") for a in asked):
+            why = f"asked the user after failed lookup routes; no answer ({why})"
+        state.checkpoint(f"contact lookup failed for {email}: {why}")
+        return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,
+                          note=f"CRM contact not resolved for portal email {email}: {why}")
+
+    # Soft confirm: if the turn recorded an email, it should match the portal login.
+    if shown and email.lower() not in shown.lower() and shown.lower() not in email.lower():
+        store.update({"email": email, "failed": True, "notes": f"email mismatch: page={shown}"})
+        state.save()
+        return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,
+                          note=f"CRM contact {rec} email {shown!r} does not match portal {email!r}")
+
+    store.update({"email": email, "record_id": rec, "email_on_record": shown or email,
+                  "app": app, "failed": False})
+    state.values[LOOKUP_VALUE] = {"value": rec, "source": "contact_lookup"}
+    state.values[LOOKUP_EMAIL_VALUE] = {"value": shown or email, "source": "contact_lookup"}
+    state.save()
+    state.checkpoint(f"contact lookup: {email} -> record {rec}")
+    return None
 
 
 def consumes(case, rule: dict) -> bool:
@@ -197,13 +352,13 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
     name = clients.get(plan.env) if isinstance(clients, dict) else clients
     app = rule.get("app")
     login_app = rule.get("client_login_app")       # whose picked login identifies the test client (e.g. the customer app)
-    user = next((r.value for r in getattr(plan, "requirements", []) or []
-                 if r.value and (r.key.startswith(f"account.{login_app}.") if login_app
-                                 else r.key.startswith("account.") and not r.key.startswith(f"account.{app}."))), None)
+    user = portal_login(plan, login_app, app)
+    contact = state.data.get("contact") or {}
+    record_id = contact.get("record_id") if contact.get("email") == user and not contact.get("failed") else None
     if not (name or user):
         return blocked("no test user picked and no test client set for this environment; "
                        "the agent will not create orders for an unconfirmed account")
-    client = client_label(name, user)
+    client = client_label(name, user, record_id)
     for k in ("find", "create"):
         if rule.get(k):
             rule = {**rule, k: rule[k].replace("{client}", client or "")}

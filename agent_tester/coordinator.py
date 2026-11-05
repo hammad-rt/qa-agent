@@ -104,44 +104,88 @@ def recipes_covering(memory, area: str | None, app: str) -> list[str]:
     return [r["text"] for r in memory.recall(q, k=5) if r.get("kind") == "recipe" and r.get("text")]
 
 
+def env_fingerprint(plan, apps: list[str] | None = None) -> str:
+    """Stable host fingerprint for the apps in this run (re-discover when CRM/portal host changes)."""
+    from urllib.parse import urlparse
+    want = set(apps or [])
+    hosts: dict[str, str] = {}
+    for r in getattr(plan, "requirements", None) or []:
+        key = getattr(r, "key", None) or (r.get("key") if isinstance(r, dict) else None)
+        val = getattr(r, "value", None) or (r.get("value") if isinstance(r, dict) else None)
+        kind = getattr(r, "kind", None) or (r.get("kind") if isinstance(r, dict) else None)
+        if not key or not val:
+            continue
+        parts = str(key).split(".")
+        if len(parts) >= 3 and parts[0] == "env" and (kind in (None, "url") or str(val).startswith("http")):
+            app = parts[-1]
+            if want and app not in want:
+                continue
+            host = urlparse(str(val)).netloc or str(val)
+            if host:
+                hosts[app] = host
+    env = getattr(plan, "env", "") or ""
+    return "|".join([f"env={env}"] + [f"{a}={hosts[a]}" for a in sorted(hosts)])
+
+
+def mark_discovery_stale(state, area: str | None, app: str, why: str = "") -> None:
+    """Invalidate a cached discovery entry so the next ensure_discovery re-runs (recipe failed / env change)."""
+    key = discovery_key(area, app)
+    stale = state.data.setdefault("discovery_stale", {})
+    stale[key] = why or "stale"
+    store = state.data.get("discovery") or {}
+    if key in store:
+        del store[key]
+    state.save()
+    state.checkpoint(f"discovery stale for {key}" + (f": {why}" if why else ""))
+
+
 DISCOVERY_TRIES = 2
 _NO_PROGRESS = re.compile(r"maximum repeated|did not respond|no screens were mapped|unable to|could not reach|stuck",
                           re.I)
 
 
 def ensure_discovery(plan, case, app: str, state, testers: dict, memory) -> dict:
-    """If memory has no recipe for this area/app, run a bounded discovery pass once per area:app this run.
-    Returns {source, recipes, notes} stored under state.data['discovery'][key]."""
+    """Always run a bounded read-only discovery pass for this area/app (once per key this run).
+
+    Prior pack/memory recipes are HINTS only — they never skip discovery. Re-runs when the env
+    fingerprint (CRM/portal host) changed or when a recipe used this run was marked failed/stale.
+    Returns {source, recipes, notes, hints, env} stored under state.data['discovery'][key]."""
     key = discovery_key(case.area, app)
     store = state.data.setdefault("discovery", {})
-    if key in store:
-        return store[key]
+    fp = env_fingerprint(plan, [app])
+    stale = (state.data.get("discovery_stale") or {}).get(key)
+    cached = store.get(key)
+    if cached and not stale and cached.get("env") == fp:
+        return cached
+    if cached and (stale or cached.get("env") != fp):
+        why = stale or f"env changed ({cached.get('env')!r} -> {fp!r})"
+        state.checkpoint(f"discovery re-run for {key}: {why}")
+        store.pop(key, None)
+        (state.data.get("discovery_stale") or {}).pop(key, None)
+
     from . import learned
     pack_routes = learned.read(state.data.get("pack_root"), case.area, app, case.title or "")
-    recipes = pack_routes + recipes_covering(memory, case.area, app)
-    if memory is None and not recipes:
-        entry = {"source": "no_memory", "recipes": [], "notes": ""}
-        store[key] = entry
-        state.save()
-        return entry
-    if recipes:
-        entry = {"source": "pack" if pack_routes else "memory", "recipes": recipes, "notes": ""}
-        store[key] = entry
-        state.save()
-        state.checkpoint(f"discovery skipped for {key}: memory has {len(recipes)} recipe(s)")
-        return entry
+    hints = pack_routes + recipes_covering(memory, case.area, app)
     tester = testers.get(app)
     if tester is None:
-        entry = {"source": "skipped", "recipes": [], "notes": f"no tester for {app}"}
+        entry = {"source": "skipped", "recipes": list(hints), "hints": list(hints),
+                 "notes": f"no tester for {app}", "env": fp}
         store[key] = entry
         state.save()
         return entry
+
     from .models import Step
     goal = case.title or case.id
     disco_case_id = f"DISCO-{case.area or app}"
+    hint_note = ""
+    if hints:
+        hint_note = (
+            f" Prior recipes/routes for this area are HINTS only ({len(hints)}): verify each against the live UI; "
+            "ignore stale or wrong paths; map the real menus, search and screens you see now.")
     steps = [Step(
         text=(f"Map how to reach the screens/actions needed for: {goal}. "
-              "Note menu labels, URLs and search paths. Do not change data, settings, or pay."),
+              "Note menu labels, search/filter paths and URLs (ID only). Do not change data, settings, or pay."
+              + hint_note),
         app=app)]
     pseudo = PlannedCase(id=disco_case_id, title=f"discover UI for {case.area or app}",
                          area=case.area, steps=steps, type=case.type)
@@ -150,6 +194,8 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory) -> dict
     brief["read_only"] = True
     brief["max_tool_calls"] = 30
     brief["discovery_goal"] = goal
+    brief["recipes"] = list(hints)          # hints for the discovery turn; never a skip
+    brief["discovery_hints"] = list(hints)
     notes, blocked = "", False
     try:
         sr = tester(app, brief, state)
@@ -170,30 +216,62 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory) -> dict
                     proposed.append(r["text"])
         except Exception:  # noqa: BLE001
             pass
-    entry = {"source": "discovery", "recipes": proposed, "notes": notes, "blocked": blocked}
+    # Live discovery notes win; keep prior hints so later turns still see them, after fresh findings.
+    recipes = list(dict.fromkeys(proposed + list(hints)))
+    entry = {"source": "discovery", "recipes": recipes, "hints": list(hints),
+             "notes": notes, "blocked": blocked, "env": fp}
     useful = bool(proposed) or bool(notes and not blocked and not notes.startswith("discovery failed")
                                     and not _NO_PROGRESS.search(notes))
     tries = state.data.setdefault("discovery_tries", {})
     tries[key] = tries.get(key, 0) + 1
-    if useful:
-        store[key] = entry
-        if notes:
-            learned.add(state.data.get("pack_root"), case.area, app,
-                        f"Discovery: {learned.scrub(notes)[:500]} ({date.today().isoformat()})")
-    elif tries[key] >= DISCOVERY_TRIES:
-        state.save()
-        raise RunPaused(f"Discovery for {key} found no way to the screen after {tries[key]} tries "
-                        f"({notes[:300] or 'no notes'}). Sort out the login, or add a route under '## {key}' in "
-                        f"the pack's learned.md, then resume.")
+    # Always cache for this run so ensure_case_discovery + _run_case do not double-fire the same key.
+    # Re-run only on env fingerprint change or mark_discovery_stale (failed recipe this run).
+    store[key] = entry
+    if useful and notes:
+        learned.add(state.data.get("pack_root"), case.area, app,
+                    f"Discovery: {learned.scrub(notes)[:500]} ({date.today().isoformat()})")
     state.save()
     ddir = state.dir / "discovery"
     ddir.mkdir(parents=True, exist_ok=True)
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in (case.area or app))
     (ddir / f"{safe}.md").write_text(
-        f"# Discovery {key}\n\nsource: discovery\n\n## Notes\n{notes}\n\n## Recipes\n"
+        f"# Discovery {key}\n\nsource: discovery\nenv: {fp}\n\n## Notes\n{notes}\n\n## Hints\n"
+        + "\n".join(f"- {r}" for r in hints) + "\n\n## Recipes\n"
         + "\n".join(f"- {r}" for r in proposed) + "\n")
-    state.checkpoint(f"discovery done for {key}" + (" (blocked)" if blocked else ""))
+    state.checkpoint(f"discovery done for {key}" + (" (blocked)" if blocked else "")
+                     + (f" ({len(hints)} hint(s))" if hints else ""))
+    # Pause the run only when login/transport blocked discovery repeatedly — empty notes alone
+    # must not stop the suite (case body / hints can still try).
+    hard = blocked or notes.startswith("discovery failed")
+    if not useful and hard and tries[key] >= DISCOVERY_TRIES:
+        raise RunPaused(f"Discovery for {key} found no way to the screen after {tries[key]} tries "
+                        f"({notes[:300] or 'no notes'}). Sort out the login, then resume "
+                        f"(prior recipes are hints only and do not replace a live discovery pass).")
     return entry
+
+
+def apps_needing_discovery(case, data_prep: list[dict] | None = None) -> list[str]:
+    """Apps that need a discovery pass before mutating prep / the case body (case steps + matching prep)."""
+    apps: list[str] = []
+    for s in case.steps:
+        a = s.app or "none"
+        if a not in ("none", "redmine") and a not in apps:
+            apps.append(a)
+    if data_prep:
+        from .data_prep import matching_rules
+        for rule in matching_rules(case, data_prep):
+            for a in (rule.get("app"), (rule.get("verify") or {}).get("app")):
+                if a and a not in ("none", "redmine") and a not in apps:
+                    apps.append(a)
+    return apps
+
+
+def ensure_case_discovery(plan, case, state, testers: dict, memory, data_prep: list[dict] | None = None) -> dict:
+    """Read-only self-discovery for every app this case (and its prep) will use, before any mutate."""
+    out = {}
+    for app in apps_needing_discovery(case, data_prep):
+        out[app] = ensure_discovery(plan, case, app, state, testers, memory)
+    return out
 
 
 _ADMIN_DEEPLINK = "module=Administration&action="
@@ -297,10 +375,17 @@ def _run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge
             continue                                  # resume: already done
         case = by_id[cid]
         from .agents.llm import TRACE_CASE
-        from .data_prep import ensure_data, after_case
+        from .data_prep import ensure_data, after_case, ensure_contact
         tok = TRACE_CASE.set(cid)
         try:
-            result = None if case.skip_reason else ensure_data(plan, case, state, testers, data_prep or [])
+            # Deps before discovery (do not spend a discovery pass on a blocked case).
+            result = _deps_block(case, state)
+            if result is None and not case.skip_reason:
+                # Discover first (read-only), then resolve CRM contact id, then mutating prep / case body.
+                ensure_case_discovery(plan, case, state, testers, memory, data_prep or [])
+                result = ensure_contact(plan, case, state, testers, data_prep or [])
+            if result is None and not case.skip_reason:
+                result = ensure_data(plan, case, state, testers, data_prep or [])
             if result is None:
                 result = _run_case(plan, case, state, testers, judge, max_retries, manual_login,
                                    manual_login_apps, memory=memory)
@@ -315,8 +400,8 @@ def _run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge
     return {cid: state.result(cid) for cid in execution_order(plan)}
 
 
-def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
-              manual_login_apps=None, memory=None) -> CaseResult:
+def _deps_block(case, state) -> CaseResult | None:
+    """SKIPPED / BLOCKED from skip_reason or unmet depends_on; None when the case may run."""
     if case.skip_reason:
         return CaseResult(case_id=case.id, verdict="SKIPPED", expected=case.expected, note=case.skip_reason)
     for dep in case.depends_on:
@@ -333,6 +418,14 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
             continue
         return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,
                           note=f"depends on {dep} ({r.verdict})")
+    return None
+
+
+def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
+              manual_login_apps=None, memory=None) -> CaseResult:
+    blocked = _deps_block(case, state)
+    if blocked is not None:
+        return blocked
     results: list[StepResult] = []
     for app, steps in app_turns(case):
         if app in ("none", "redmine"):
@@ -421,6 +514,8 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
                                 values={k: v for r in results for k, v in r.values.items()},
                                 evidence=[s for r in results for s in r.screenshots], note=note)
             _learn_failure(case, app, state, log_mark, why, sr.notes or "")
+            # A recipe/path that failed this run must not keep discovery skipped next time.
+            mark_discovery_stale(state, case.area, app, why)
             return result
     full_brief = brief_for(plan, case, list(range(len(case.steps))), state)
     try:

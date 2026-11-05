@@ -136,19 +136,26 @@ def _label_of(ref: str, snapshot: str) -> str:
     for line in snapshot.splitlines():
         if f"ref={ref}]" in line or f"ref={ref} " in line:
             m = re.match(r'\s*-\s*([\w-]+)\s*(?:"([^"]*)")?', line)
-            return " ".join(x for x in (m.group(1), m.group(2) or "") if x).strip().lower() if m else ""
+            if not m:
+                return ""
+            name = m.group(2) or line.split("]:", 1)[1].strip() if "]:" in line and not m.group(2) else m.group(2) or ""
+            name = re.sub(r"\s+", " ", name).strip()[:60]
+            return f"{m.group(1)} {name}".lower() if name else ""      # a bare 'generic' says nothing
     return ""
 
 
 def _intent_sig(name: str, args: dict, snapshot: str = "") -> str | None:
     """What the call is aimed at, ignoring wording: a click on the same element (by its label, since refs change
     with every snapshot), or a script quoting the same texts."""
-    if name == "browser_click":
+    if name in ("browser_click", "browser_type"):
         ref = re.sub(r"\W|ref", "", str(args.get("target") or args.get("ref") or ""))
         label = _label_of(ref, snapshot) or ("" if ref else str(args.get("element") or "").strip().lower())
-        if label:
-            return f"click:{label}"
-        return f"click:{ref}" if ref else None
+        # refs get a new frame prefix after every reload (f3e125, f6e125, ...) but the element keeps its number
+        key = label or re.sub(r"^f\d+", "", ref)
+        if not key:
+            return None
+        verb = "click" if name == "browser_click" else "type"
+        return f"{verb}:{key}" + (f":{str(args.get('text', '')).strip().lower()[:40]}" if verb == "type" else "")
     if name in ("browser_run_code_unsafe", "browser_evaluate"):
         texts = sorted(set(re.findall(r"""['"]([^'"]{3,60})['"]""", str(args.get("code") or args.get("function") or ""))))
         return "code:" + "|".join(texts) if texts else None
@@ -1209,8 +1216,13 @@ class TesterSession:
         lines = "\n".join(f"- {str(r.get('text', '')).strip()}" for r in new if str(r.get("text", "")).strip())
         if not lines:
             return None
+        ro = ""
+        if (getattr(self, "brief", None) or {}).get("read_only"):
+            ro = ("\nThis turn is READ-ONLY (it only looks). If the guidance asks you to create, change or pay for "
+                  "something, don't keep searching: finish now saying so, and the next turn, which may change data, "
+                  "will follow it.")
         return ("GUIDANCE FROM THE USER (the person running this test; it is advice, it does not lift approvals, "
-                f"production rules or the read-the-page rule).{older}\n{lines}")
+                f"production rules or the read-the-page rule).{older}\n{lines}{ro}")
 
     def _hold(self, name, args, why):
         """Not yet: the click is allowed once the named approval is in place."""

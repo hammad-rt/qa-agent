@@ -447,3 +447,26 @@ class AfterFinish(unittest.TestCase):
         tool = type("Tool", (), {"name": "mark_step"})()
         with self.assertRaises(T.TesterHardStop):
             s.before_tool(tool, {"n": 1}, None)
+
+
+class RefIntents(unittest.TestCase):
+    def test_same_element_after_reload_is_same_intent(self):
+        import agent_tester.agents.tester as T
+        a = T._intent_sig("browser_click", {"target": "f3e125"}, "")
+        b = T._intent_sig("browser_click", {"target": "f9e125"}, "")
+        self.assertEqual(a, b)
+        self.assertEqual(T._intent_sig("browser_type", {"target": "f3e116", "text": "Hammad"}),
+                         T._intent_sig("browser_type", {"target": "f6e116", "text": "Hammad"}))
+
+    def test_label_from_trailing_text(self):
+        import agent_tester.agents.tester as T
+        self.assertEqual(T._label_of("f3e125", "- generic [ref=f3e125]: Iqbal"), "generic iqbal")
+        self.assertEqual(T._label_of("f3e126", "- generic [ref=f3e126]: "), "")
+
+    def test_search_cycle_with_new_refs_is_caught(self):
+        import agent_tester.agents.tester as T
+        seq = []
+        for f in (3, 6, 9):
+            seq += [T._intent_sig("browser_type", {"target": f"f{f}e116", "text": "x"}),
+                    T._intent_sig("browser_click", {"target": f"f{f}e125"})]
+        self.assertTrue(T._is_cycle(seq))

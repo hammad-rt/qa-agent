@@ -53,49 +53,46 @@ class PrepSplit(unittest.TestCase):
         self.assertIn("Never edit", f.calls[0][2])
         self.assertEqual(st.values["test_order_record"]["value"], "r1")
 
-    def test_prep_find_uses_portal_email_not_hardcoded_hammad(self):
-        """Preprod-style: no test_client for env; pack find must not inject portal user Hammad."""
+    def test_savostore_pack_has_no_fixed_crm_test_client(self):
+        """Env-bound CRM contact names must not live in the savostore pack (any env)."""
         import yaml
         from pathlib import Path
+        text = Path("packs/savostore/facts.md").read_text()
+        # Redmine poster / attribution mentions of Hammad are fine; CRM-client identity is not.
+        self.assertNotIn("CRM contact Hammad", text)
+        self.assertNotIn("hammad.iqbal@rolustech.com", text)
+        self.assertNotIn("Staging example only", text)
         with Path("packs/savostore/pack.yaml").open() as fh:
-            rules = yaml.safe_load(fh)["data_prep"]
-        rule = next(r for r in rules if r["id"] == "shipping_only_order")
-        self.assertNotIn('portal user "Hammad"', rule["find"])
-        self.assertNotIn('portal user "Hammad"', rule.get("create", ""))
-        email = "equipmentventures@gmail.com"
-        plan = N(env="preprod",
-                 requirements=[N(key="account.portal.customer", value=email)],
-                 task_id=1)
-        f = Fake({"find": [{"test_order": "A1", "test_order_record": "r1"}], "check": [{"test_order_ok": "yes"}]})
-        st = State()
-        with mock.patch("agent_tester.coordinator.brief_for",
-                        side_effect=lambda p, c, s, st: {"case_id": c.id, "steps": [{"text": c.steps[0].text}]}):
-            r = D._ensure_one(plan, case(), st, {"crm": f, "portal": f}, dict(rule))
-        self.assertIsNone(r)
-        find_text = f.calls[0][2]
-        self.assertIn(email, find_text)
-        self.assertNotIn("Hammad", find_text)
-        self.assertIn("login / email", find_text)
+            pack = yaml.safe_load(fh)
+        for rule in pack.get("data_prep") or []:
+            self.assertNotIn("test_client", rule, rule.get("id"))
+            blob = " ".join(str(rule.get(k, "")) for k in ("find", "create"))
+            self.assertNotIn("Hammad", blob, rule.get("id"))
+            self.assertNotIn("Sidney Test", blob, rule.get("id"))
 
-    def test_staging_hint_keeps_email_primary(self):
+    def test_prep_find_uses_portal_email_only_on_every_env(self):
+        """Staging and preprod both identify the CRM contact from the picked portal email only."""
         import yaml
         from pathlib import Path
         with Path("packs/savostore/pack.yaml").open() as fh:
             rules = yaml.safe_load(fh)["data_prep"]
         rule = next(r for r in rules if r["id"] == "shipping_only_order")
         email = "equipmentventures@gmail.com"
-        plan = N(env="staging",
-                 requirements=[N(key="account.portal.customer", value=email)],
-                 task_id=1)
-        f = Fake({"find": [{"test_order": "A1", "test_order_record": "r1"}], "check": [{"test_order_ok": "yes"}]})
-        st = State()
-        with mock.patch("agent_tester.coordinator.brief_for",
-                        side_effect=lambda p, c, s, st: {"case_id": c.id, "steps": [{"text": c.steps[0].text}]}):
-            r = D._ensure_one(plan, case(), st, {"crm": f, "portal": f}, dict(rule))
-        self.assertIsNone(r)
-        find_text = f.calls[0][2]
-        self.assertTrue(find_text.index(email) < find_text.index("Hammad Iqbal"))
-        self.assertIn("never by name alone", find_text)
+        for env in ("staging", "preprod", "local", "prod"):
+            f = Fake({"find": [{"test_order": "A1", "test_order_record": "r1"}],
+                      "check": [{"test_order_ok": "yes"}]})
+            st = State()
+            plan = N(env=env, requirements=[N(key="account.portal.customer", value=email)], task_id=1)
+            with mock.patch("agent_tester.coordinator.brief_for",
+                            side_effect=lambda p, c, s, st: {"case_id": c.id, "steps": [{"text": c.steps[0].text}]}):
+                r = D._ensure_one(plan, case(), st, {"crm": f, "portal": f}, dict(rule))
+            self.assertIsNone(r, env)
+            find_text = f.calls[0][2]
+            self.assertIn(email, find_text, env)
+            self.assertIn("login / email", find_text, env)
+            self.assertNotIn("Hammad", find_text, env)
+            self.assertNotIn("often named", find_text, env)
+            self.assertNotIn("Sidney Test", find_text, env)
 
     def test_none_found_creates(self):
         r, st, f = run(RULE, {"find": [{"test_order": "none"}], "create": [{"test_order": "A9", "test_order_record": "r9"}],

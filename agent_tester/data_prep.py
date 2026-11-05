@@ -63,6 +63,13 @@ def verify_text(case, v: dict) -> str:
 
 def _turn(tester, plan, state, rule, app, text, read_only, case_id):
     from .coordinator import brief_for
+    from . import learned
+    kind = "create" if case_id.endswith("-create") else "find"
+    known = [l for l in learned.read(state.data.get("pack_root"), rule.get("area"), app, rule["id"])
+             if f"{kind} test data {rule['id']}" in l]
+    if known:   # the pack learned this on an earlier run: start from it, re-read the screen, and adapt if it moved
+        text += ("\nThis worked before (learned, not yet confirmed; follow it but read each screen first):\n- "
+                 + "\n- ".join(known[-2:]))
     pseudo = PlannedCase(id=case_id, title=f"data prep: {rule['id']}", area=rule.get("area"),
                          steps=[Step(text=text, app=app)], values_to_record=[rule["value"]])
     brief = brief_for(plan, pseudo, [0], state)
@@ -199,7 +206,8 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
             f"is a 'none'. If one fits exactly, record_value('{value}', '<its number exactly as shown, with its "
             f"prefix, exactly as shown>') and record_value('{value}_record', '<{hint}>'), then finish. "
             f"If none fits exactly, record_value('{value}', 'none') and finish. "
-            f"Look at no more than the first two list pages.")
+            f"Use the list's search, filters and sorting to narrow it down rather than paging through everything; "
+            f"open a candidate to check it rather than assuming from the list. Say 'none' only after searching.")
     sr = None
     try:
         sr = _call(tester, plan, state, rule, app, find, True, f"PREP-{key}-find", key)
@@ -257,6 +265,7 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
     if rec is None:
         return blocked(f"no usable record after {CREATE_TRIES} tries; rejected: "
                        + "; ".join(f"{r['value']}: {r['why']}" for r in rejected[-CREATE_TRIES:]))
+    _learn(state, rule, key, app)
     store[key] = {"value": rec, "record": record, "consumed": False, "for": case.id}
     state.values[value] = {"value": rec, "source": f"prep/{key}"}
     if record:
@@ -264,6 +273,18 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
     state.save()
     state.checkpoint(f"data prep {key}: using {rec} for {case.id}")
     return None
+
+
+def _learn(state, rule, key, app) -> None:
+    """The pack builds itself: how the record was found or made is saved as a recipe in learned.md, and the
+    next prep turn reads it (it is in the brief for this area and app)."""
+    from . import learned
+    log = state.data.get("action_log", [])
+    for turn, what in ((f"PREP-{key}-create", f"create test data {key}"), (f"PREP-{key}-find", f"find test data {key}")):
+        acts = [a for a in log if a.get("case_id") == turn]
+        if acts and learned.record_recipe(state.data.get("pack_root"), rule.get("area"), app, what, acts):
+            state.checkpoint(f"data prep {key}: saved how it was done to the pack ({what})")
+            return
 
 
 def _verify(plan, case, state, testers, rule, rec, record, key) -> tuple[str, str]:

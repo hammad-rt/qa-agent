@@ -96,6 +96,31 @@ def _hard_stop_in(e: BaseException) -> bool:
 
 
 LOOP_WARN, LOOP_STOP = 3, 5          # same call repeated this often without progress: warn, then stop
+EXPLORE_ACTIONS = 15                 # extra actions for one exploration of a screen when a step is stuck
+EXPLORE_TEXT = (
+    "STOP guessing: {why}. Explore before you act again ({n} more actions for this):\n"
+    "1. browser_snapshot and list for yourself every menu, tab, button, link, dropdown (with its options) and "
+    "field on this screen that could reach the step's goal. Check the other tabs too (browser_tabs).\n"
+    "2. Look where the needed field, status or action really lives: the record's detail and edit views, its "
+    "subpanels and related records, list filters and search, the actions menu, and the app's documentation "
+    "(lookup_docs).\n"
+    "3. Pick a route you have NOT tried. Already tried: {tried}. After each action, re-read the page and check "
+    "what actually changed before the next one.\n"
+    "4. Save each thing you learn with note_behaviour (e.g. where a field is set, the order statuses must follow, "
+    "what a save rejects silently), so later cases and runs do not have to find it again.\n"
+    "Then do the step. If the screen has no way to do it, finish(notes, stuck=True) with what you found.")
+
+
+def _is_cycle(recent: list[str]) -> bool:
+    """The last calls repeat a short pattern (A B A B A B, or A B C A B C) - a loop even if no single call repeats
+    often enough on its own."""
+    for period in (2, 3, 4):
+        need = period * 3
+        if len(recent) >= need:
+            tail = recent[-need:]
+            if len(set(tail)) > 1 and all(tail[i] == tail[i % period] for i in range(need)):
+                return True
+    return False
 
 
 ACTING_TOOLS = {"browser_click", "browser_type", "browser_fill_form", "browser_select_option", "browser_press_key",
@@ -103,10 +128,25 @@ ACTING_TOOLS = {"browser_click", "browser_type", "browser_fill_form", "browser_s
                 "browser_handle_dialog", "run_helper"}
 
 
-def _intent_sig(name: str, args: dict) -> str | None:
-    """What the call is aimed at, ignoring wording: a click on the same ref, or a script quoting the same texts."""
+def _label_of(ref: str, snapshot: str) -> str:
+    """The visible name of an element ref in the last snapshot ('- button "Save" [ref=e12]' -> 'button Save')."""
+    if not ref or not snapshot:
+        return ""
+    for line in snapshot.splitlines():
+        if f"ref={ref}]" in line or f"ref={ref} " in line:
+            m = re.match(r'\s*-\s*([\w-]+)\s*(?:"([^"]*)")?', line)
+            return " ".join(x for x in (m.group(1), m.group(2) or "") if x).strip().lower() if m else ""
+    return ""
+
+
+def _intent_sig(name: str, args: dict, snapshot: str = "") -> str | None:
+    """What the call is aimed at, ignoring wording: a click on the same element (by its label, since refs change
+    with every snapshot), or a script quoting the same texts."""
     if name == "browser_click":
         ref = re.sub(r"\W|ref", "", str(args.get("target") or args.get("ref") or ""))
+        label = _label_of(ref, snapshot) or ("" if ref else str(args.get("element") or "").strip().lower())
+        if label:
+            return f"click:{label}"
         return f"click:{ref}" if ref else None
     if name in ("browser_run_code_unsafe", "browser_evaluate"):
         texts = sorted(set(re.findall(r"""['"]([^'"]{3,60})['"]""", str(args.get("code") or args.get("function") or ""))))
@@ -775,6 +815,7 @@ class TesterSession:
             self.since_progress, self._sigs = 0, {}          # a value read back is progress too
         if name == "mark_step" and args.get("n") not in self.result.steps_done:
             self.since_progress, self._sigs, self.saves, self.misses = 0, {}, 0, 0          # real progress: fresh per-step allowance
+            self._explored, self._recent = False, []
         limit = self._budget_check(name, args)
         if limit:
             return limit
@@ -852,8 +893,13 @@ class TesterSession:
                                          details={"tool": name, "args": _safe_args(args)})
             except PolicyViolation as e:
                 return self._deny(name, args, str(e))
+            logged = _safe_args(args)
+            if name in ("browser_click", "browser_select_option", "browser_type") and not logged.get("element"):
+                lab = _label_of(str(args.get("target") or args.get("ref") or ""), self.last_snapshot)
+                if lab:
+                    logged = {**logged, "element": lab}     # learned routes need the label; refs die with the page
             self._pending_seq = self.state.log_action(case_id=self.case_id, app=self.app, tool=name,
-                                                      args=_safe_args(args), plan_step=self.current_step).seq
+                                                      args=logged, plan_step=self.current_step).seq
         return None
 
     def _budget_check(self, name: str, args: dict):
@@ -885,7 +931,7 @@ class TesterSession:
             self.since_progress += 1
             sig = _call_sig(name, args)
             self._sigs[sig] = self._sigs.get(sig, 0) + 1
-            intent = _intent_sig(name, args)              # same target reached by reworded calls/scripts
+            intent = _intent_sig(name, args, self.last_snapshot)   # same target reached by reworded calls/refs
             if intent:
                 self._sigs[intent] = self._sigs.get(intent, 0) + 1
             n = max(self._sigs[sig], self._sigs.get(intent, 0) if intent else 0)
@@ -895,8 +941,15 @@ class TesterSession:
                 self.saves = getattr(self, "saves", 0) + 1
                 if self.saves == 2 or cnt[self.case_id] == 2:
                     return {"error": RELOAD_HINT}
+            self._recent = (getattr(self, "_recent", []) + [intent or sig])[-12:]
             clicky = name in ("browser_click", "browser_run_code_unsafe", "browser_evaluate")
             warn_at, stop_at = (2, 4) if clicky else (LOOP_WARN, LOOP_STOP)   # a page click that did nothing: rethink at once
+            cycling = _is_cycle(self._recent)
+            if (n >= stop_at or cycling) and not getattr(self, "_explored", False):
+                return self._start_exploring(name, "the same actions kept repeating" if cycling else
+                                             f"{name} was repeated {n} times")
+            if cycling:
+                n = stop_at
             if n >= stop_at:
                 self.result.limit_hit = True
                 self.result.loop = True
@@ -911,12 +964,27 @@ class TesterSession:
                                  "the same purpose). If no available tool can do what the step needs, ask for one with "
                                  "create_tool. When the other route works, call propose_memory with it as a recipe "
                                  "so the next run goes straight there. If no route exists, finish(stuck=True)."}
-            if self.since_progress > int(self.brief.get("actions_per_step") or ACTIONS_PER_STEP) or self.actions > self.max_calls:
+            per_step = int(self.brief.get("actions_per_step") or ACTIONS_PER_STEP)
+            if self.since_progress > per_step and not getattr(self, "_explored", False) and self.actions <= self.max_calls:
+                return self._start_exploring(name, f"{per_step} actions went by without finishing a step")
+            if self.since_progress > per_step + (EXPLORE_ACTIONS if getattr(self, "_explored", False) else 0) \
+                    or self.actions > self.max_calls + (EXPLORE_ACTIONS if getattr(self, "_explored", False) else 0):
                 over_time = True
         if over_time:
             self.result.limit_hit = True
             return {"error": "Limit reached. Call finish() now with what you have, saying which step you reached."}
         return None
+
+    def _start_exploring(self, name: str, why: str) -> dict:
+        """Stuck: instead of stopping (or retrying the same guess), map the screen once, then retry from what was
+        found. One exploration per step; a second stall stops the case with the findings."""
+        self._explored = True
+        tried = [t for t in dict.fromkeys(getattr(self, "_recent", [])) if t][-8:]
+        self._sigs, self._recent, self.since_progress = {}, [], 0
+        self.state.log_action(case_id=self.case_id, app=self.app, tool="explore", args={"why": why, "tried": tried},
+                              plan_step=self.current_step, outcome="explore")
+        self.state.checkpoint(f"{self.case_id}: stuck ({why}); exploring the screen instead of guessing")
+        return {"error": EXPLORE_TEXT.format(why=why, tried="; ".join(tried) or "none", n=EXPLORE_ACTIONS)}
 
     async def auto_shot(self, what: str, tool_context) -> str | None:
         """Code-taken proof screenshot (never left to the model). Waits for the page to settle, then checks the

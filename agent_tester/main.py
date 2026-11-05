@@ -208,7 +208,7 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
     rm = Redmine(settings.redmine_url, settings.redmine_api_key)
     print(f"Fetching #{task_id} from Redmine...")
     first = rm.issue(task_id)
-    pack = find_pack(settings.packs_dir, [first["project"]["id"]])
+    pack = _pack_or_onboard(settings, first["project"]["id"])
     if env is None and pack is not None:
         env = gate.choose_env(pack)
         if env is None:
@@ -513,6 +513,22 @@ def cmd_resume(settings: Settings, run_dir: Path) -> int:
     policy.preapprove(state.data.get("preapproved", []))
     run_sites(policy, plan)
     return _execute(settings, pack, plan, state, policy, open_memory(settings, pack))
+
+
+def _pack_or_onboard(settings, project_id):
+    """The run's pack. A project with no pack gets one built at the start of the run: drafted from its Redmine
+    project (addresses, apps, areas), one batch of questions, saved after a yes. The run then goes on with it and
+    fills learned.md (routes, recipes, how the app behaves) as it tests."""
+    from .preflight.pack_loader import NoPackFound, find_pack
+    try:
+        return find_pack(settings.packs_dir, [project_id])
+    except NoPackFound:
+        if not sys.stdin.isatty() and not os.environ.get("QA_WEB"):
+            raise
+        print(f"No test pack covers Redmine project {project_id} yet; building one for it now.")
+        if cmd_onboard(settings, str(project_id), None) != 0:
+            raise
+        return find_pack(settings.packs_dir, [project_id])
 
 
 def _pack_for_run(settings, plan):

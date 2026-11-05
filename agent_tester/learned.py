@@ -27,13 +27,14 @@ def scrub(text: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
-def route_from_actions(actions: list[dict], app: str, limit: int = 8) -> list[str]:
-    """Navigation the tester did on this app before its first data-changing step, as readable hops."""
+def route_from_actions(actions: list[dict], app: str, limit: int = 8, changes: bool = False) -> list[str]:
+    """Navigation the tester did on this app before its first data-changing step, as readable hops.
+    With changes=True the whole procedure, data-changing clicks included (a recipe that worked)."""
     hops: list[str] = []
     for a in actions:
         if a.get("app") != app:
             continue
-        if a.get("approval") in ("approved", "pre_approved"):
+        if a.get("approval") in ("approved", "pre_approved") and not changes:
             break
         tool, args = a.get("tool"), a.get("args") or {}
         if (a.get("outcome") or "ok") != "ok" and not str(a.get("outcome", "")).startswith("ok"):
@@ -43,7 +44,9 @@ def route_from_actions(actions: list[dict], app: str, limit: int = 8) -> list[st
         elif tool == "browser_click" and (args.get("element") or args.get("name")):
             hop = f"click '{scrub(args.get('element') or args.get('name'))}'"
         elif tool == "browser_select_option" and args.get("element"):
-            hop = f"choose in '{scrub(args['element'])}'"
+            vals = args.get("values")
+            hop = f"choose {scrub(', '.join(map(str, vals)))!r} in '{scrub(args['element'])}'" if changes and vals \
+                else f"choose in '{scrub(args['element'])}'"
         elif tool == "run_helper" and args.get("name"):
             hop = f"run helper {args['name']}"
         else:
@@ -123,4 +126,14 @@ def record_behaviour(pack_root, area, app, text: str, case_id: str) -> str | Non
     if len(body) < 12:
         return None
     line = f"{BEHAVIOUR_PREFIX}{body} ({date.today().isoformat()}, {case_id})"
+    return line if add(pack_root, area, app, line) else None
+
+
+def record_recipe(pack_root, area, app, what: str, actions: list[dict]) -> str | None:
+    """A procedure that worked end to end (e.g. creating test data), data-changing steps included, so the next
+    case or run follows it instead of working it out again."""
+    hops = route_from_actions(actions, app, limit=30, changes=True)
+    if len(hops) < 2:
+        return None
+    line = f"Recipe ({scrub(what)}): " + " -> ".join(hops) + f" ({date.today().isoformat()})"
     return line if add(pack_root, area, app, line) else None

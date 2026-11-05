@@ -327,8 +327,27 @@ class TesterCallbacks(unittest.TestCase):
         rs = [self.s.before_tool(self.t("calculate"), dict(args), None) for _ in range(5)]
         self.assertIsNone(rs[0]); self.assertIsNone(rs[1])
         self.assertIn("did not move", rs[2]["error"])
-        self.assertIn("Stop now", rs[4]["error"])
+        self.assertIn("Explore before you act", rs[4]["error"])      # first stall: explore, don't stop
+        self.assertFalse(self.s.result.limit_hit)
+        rs = [self.s.before_tool(self.t("calculate"), dict(args), None) for _ in range(5)]
+        self.assertIn("Stop now", rs[4]["error"])                    # same loop after exploring: stop
         self.assertTrue(self.s.result.loop and self.s.result.limit_hit)
+
+    def test_cycle_is_a_loop(self):
+        import agent_tester.agents.tester as T
+        self.assertTrue(T._is_cycle(["a", "b"] * 3))
+        self.assertTrue(T._is_cycle(["x", "a", "b", "c"] + ["a", "b", "c"] * 2))
+        self.assertFalse(T._is_cycle(["a", "b", "c", "d", "e", "f"]))
+        self.s.max_calls = 100
+        r = [self.s.before_tool(self.t("calculate"), {"expression": e}, None) for e in ["1", "2"] * 3]
+        self.assertIn("Explore before you act", r[-1]["error"])
+
+    def test_label_from_snapshot(self):
+        import agent_tester.agents.tester as T
+        snap = '- button "Save" [ref=f4e12]\n- link "Edit" [ref=f4e13]'
+        self.assertEqual(T._intent_sig("browser_click", {"target": "f4e12"}, snap), "click:button save")
+        snap2 = '- button "Save" [ref=f7e90]'
+        self.assertEqual(T._intent_sig("browser_click", {"target": "f7e90"}, snap2), "click:button save")
 
     def test_mark_step_renews_step_allowance(self):
         import agent_tester.agents.tester as T
@@ -342,7 +361,10 @@ class TesterCallbacks(unittest.TestCase):
             self.s.result.steps_done.append(1)
             for i in range(3):
                 self.assertIsNone(self.s.before_tool(self.t("calculate"), {"expression": f"b{i}"}, None))
-            self.assertIn("Limit", self.s.before_tool(self.t("calculate"), {"expression": f"c"}, None)["error"])
+            self.assertIn("Explore", self.s.before_tool(self.t("calculate"), {"expression": f"c"}, None)["error"])
+            for i in range(4 + T.EXPLORE_ACTIONS):
+                r = self.s.before_tool(self.t("calculate"), {"expression": f"d{i}"}, None)
+            self.assertIn("Limit", r["error"])
         finally:
             T.ACTIONS_PER_STEP = old
 

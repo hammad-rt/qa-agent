@@ -98,7 +98,7 @@ data_prep:
     when:
       areas: [rewards, portal]        # portal-area cases (B1, B3, B12, B15, B16) open an invoice too
       any: ["shipping[- ]only", "pay by card", "stripe", "abandon", "invoice", "order-[a-z]+"]
-      none: ["buy ?& ?ship"]
+      none: ["buy ?& ?ship", "\\bKES\\b", "shilling"]
     app: crm
     client_login_app: portal          # the portal login picked at the start identifies the test client
     record_hint: the CRM record id from the page URL, the record=... part
@@ -122,6 +122,51 @@ data_prep:
         portal invoice address uses the CRM record id; do not use View Invoice). If {record} is unknown, open
         Shipping Only orders and find order {value}. Do not click Make a Payment or Pay By Card. Wait about 4 seconds, then
         read the page: it is usable if it shows a balance > 0 and a Pay By Card button.{condition}
+        If rewards from an earlier run are still applied (a pending amount with an X), click the X to remove them,
+        re-read the page and judge it again; that order is still usable.
+      condition:                     # fills {condition}: does this case use Savo Rewards?
+        when: ["\\breward", "\\bredeem", "use up to", "wallet"]
+        unless: ["without (any |the |savo )*rewards", "no (savo )?rewards (applied|used)", "(do not|don't|not) (apply|use) (any |savo )*rewards"]
+        then: >-
+          {space}It must also show the Savo Rewards box with "You can use up to $X" (X > 0). Reload once if the box
+          says "no Savo Rewards".
+        else: >-
+          {space}This case pays without rewards (it may be the case that fills the wallet), so a Savo Rewards box
+          that says "no Savo Rewards" is fine and does not make the order unusable. Do not apply rewards.
+      keep_record_if:                # order is fine but the wallet is empty: keep the order, block the case
+        reason: "no savo rewards|rewards box|use up to|wallet|no rewards"
+        only_when_condition: true
+        note: the client's Savo Rewards wallet is empty or negative (top it up with the earn case first)
+    consumed_by: ["complete payment", "pay with", "\\bpays?\\b", "4242"]
+  - id: shipping_only_order_kes
+    area: rewards
+    when:
+      areas: [rewards, portal]        # portal-area cases (B1, B3, B12, B15, B16) open an invoice too
+      any: ["\\bKES\\b", "shilling"]
+      none: ["buy ?& ?ship"]
+    app: crm
+    client_login_app: portal          # the portal login picked at the start identifies the test client
+    record_hint: the CRM record id from the page URL, the record=... part
+    value: test_order
+    test_client:          # optional CRM name per env; otherwise the client is matched by the portal user picked at the start
+      staging: Hammad Iqbal
+    find: >-
+      In the CRM, open Invoices (AOS_Invoices = shipping-only orders) and find one for the test client {client}
+      (portal user "Hammad"; match by the orders the client owns, not by the name "Sidney Test") that is at
+      status "Invoiced & Shipped", in KES (Kenyan Shillings), has an invoice, nothing paid and unpaid shipping > 0. Give the number with its letter prefix, e.g. A1142. An order with rewards
+      still pending from an earlier run is still a fit (the check clears them).
+    create: >-
+      Create a shipping-only order in KES (Kenyan Shillings) for the test client {client} only, with "QA-AGENT TEST" in its description,
+      set its parcel to Received, then move the status one step at a time: Shipped to Warehouse > On Warehouse
+      floor > Ready to Ship > Shipped > Invoiced & Shipped ("Shipped" alone does not create the invoice).
+      Do not pay and do not apply rewards.
+    verify:
+      app: portal
+      text: >-
+        Follow recipe R1 step 4: browser_navigate straight to <portal URL>/shipping-only/invoice/{record} (the
+        portal invoice address uses the CRM record id; do not use View Invoice). If {record} is unknown, open
+        Shipping Only orders and find order {value}. Do not click Make a Payment or Pay By Card. Wait about 4 seconds, then
+        read the page: it is usable if it shows a balance > 0 in KES and a Pay By Card button.{condition}
         If rewards from an earlier run are still applied (a pending amount with an X), click the X to remove them,
         re-read the page and judge it again; that order is still usable.
       condition:                     # fills {condition}: does this case use Savo Rewards?

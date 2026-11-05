@@ -111,6 +111,17 @@ EXPLORE_TEXT = (
     "what a save rejects silently), so later cases and runs do not have to find it again.\n"
     "Then do the step. If the screen has no way to do it, finish(notes, stuck=True) with what you found.")
 
+# Contact / identity lookups: after failed search routes, ask the person instead of finishing stuck.
+EXPLORE_TEXT_ASK = (
+    "STOP guessing: {why}. Explore before you act again ({n} more actions for this):\n"
+    "1. browser_snapshot and list menus, tabs, list filters, Advanced Search and global search that could find "
+    "the contact/record. Already tried: {tried}.\n"
+    "2. Try one route you have NOT used (basic name search only if a display name is known; then email filter / "
+    "Advanced Search; then global search).\n"
+    "3. After two or three failed lookup routes, call ask_user with what you tried and one concrete question "
+    "(e.g. which CRM contact is this portal email?). Only finish(notes, stuck=True) if they do not answer or decline.\n"
+    "Then continue from their answer, or finish stuck only when ask_user is exhausted.")
+
 
 def _is_cycle(recent: list[str]) -> bool:
     """The last calls repeat a short pattern (A B A B A B, or A B C A B C) - a loop even if no single call repeats
@@ -1041,7 +1052,8 @@ class TesterSession:
         self.state.log_action(case_id=self.case_id, app=self.app, tool="explore", args={"why": why, "tried": tried},
                               plan_step=self.current_step, outcome="explore")
         self.state.checkpoint(f"{self.case_id}: stuck ({why}); exploring the screen instead of guessing")
-        return {"error": EXPLORE_TEXT.format(why=why, tried="; ".join(tried) or "none", n=EXPLORE_ACTIONS)}
+        tmpl = EXPLORE_TEXT_ASK if self.brief.get("prefer_ask_user") or self.brief.get("contact_lookup") else EXPLORE_TEXT
+        return {"error": tmpl.format(why=why, tried="; ".join(tried) or "none", n=EXPLORE_ACTIONS)}
 
     async def auto_shot(self, what: str, tool_context) -> str | None:
         """Code-taken proof screenshot (never left to the model). Waits for the page to settle, then checks the

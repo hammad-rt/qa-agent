@@ -71,6 +71,11 @@ CRM base https://staging5.rolustech.com:4220/index.php
 - Client / CRM contact for a run: always the contact that matches the portal login/email picked for THIS run
   (look up by that email, or by the orders that login owns). Never name a fixed CRM contact here for any env —
   staging included. Contact fields: Total Rewards, Current Rewards, Rewards Used.
+- Contact search ladder (SuiteCRM Clients/Contacts): basic name search is name-based only — for email use the
+  list filter or Advanced Search, then global search. Confirm the record's email field matches the portal email
+  before accepting the id. Open later steps by that CRM record id (run state), never by typing a person's name
+  from facts. After two or three failed routes, ask which CRM contact is this portal email — do not finish stuck
+  first. The resolved id stays in run state only (never learned.md).
 - Earn happens only when the status CHANGES to Order Delivered; re-saving an order already at Order Delivered does
   nothing. To re-trigger, move it to another status, save, then set Order Delivered again. Shipping Only overwrites
   its single earn row on re-trigger; Buy & Ship earns once and never updates that row (code, 2026-11-04).

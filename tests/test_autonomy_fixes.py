@@ -10,8 +10,10 @@ from unittest import mock
 from agent_tester.agents.tester import TesterSession, tool_budget, _is_xsrf_page, _url_nav_key
 from agent_tester.config import ROOT
 from agent_tester.coordinator import (
-    ensure_discovery, inject_discovery, recipes_covering, run_plan, discovery_key,
+    ensure_discovery, ensure_case_discovery, inject_discovery, recipes_covering, run_plan,
+    discovery_key, env_fingerprint, mark_discovery_stale, apps_needing_discovery,
 )
+from agent_tester.models import Requirement
 from agent_tester.models import CaseResult, CaseType, PlannedCase, Step, StepResult, TestPlan
 from agent_tester.preflight.pack_loader import load_pack
 from agent_tester.run_state import RunState
@@ -109,20 +111,49 @@ class DiscoveryFirst(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_skips_discovery_when_memory_has_recipe(self):
+    def test_runs_discovery_with_memory_recipes_as_hints(self):
+        """Recipes in memory/learned are hints only — discovery still runs a live pass."""
         mem = FakeMemory(recipes=["when creating an order, go to Orders then New"])
         seen = []
 
         def tester(app, brief, state):
-            seen.append(brief.get("case_id"))
-            return StepResult(case_id=brief["case_id"], app=app, notes="mapped")
+            seen.append(brief)
+            self.assertTrue(brief.get("discovery"))
+            self.assertTrue(brief.get("read_only"))
+            self.assertIn("Orders then New", (brief.get("recipes") or [""])[0])
+            self.assertTrue(brief.get("discovery_hints"))
+            return StepResult(case_id=brief["case_id"], app=app, notes="Menu: Orders > New Order (verified)")
 
         entry = ensure_discovery(self.plan, self.case, "portal", self.state, {"portal": tester}, mem)
-        self.assertEqual(entry["source"], "memory")
-        self.assertEqual(seen, [])  # tester never called
-        self.assertIn("Orders", entry["recipes"][0])
+        self.assertEqual(entry["source"], "discovery")
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(any("Orders then New" in h for h in entry["hints"]))
+        self.assertIn("verified", entry["notes"])
         brief = inject_discovery({"case_id": "TC2", "steps": []}, entry)
-        self.assertEqual(brief["recipes"], entry["recipes"])
+        self.assertTrue(brief["recipes"])
+
+    def test_learned_pack_routes_do_not_skip_discovery(self):
+        """Stale Routes/Stuck/Behaviour lines in learned.md must not skip a fresh discovery pass."""
+        pack = Path(self.tmp.name) / "pack"
+        pack.mkdir()
+        (pack / "learned.md").write_text(
+            "# What the agent learned\n\n## orders:portal\n"
+            "- Stuck (loop): old dead end\n"
+            "- Behaviour: something old\n"
+            "- Route: Home > Orders (2020-01-01)\n")
+        self.state.data["pack_root"] = str(pack)
+        mem = FakeMemory(recipes=[])
+        seen = []
+
+        def tester(app, brief, state):
+            seen.append(brief.get("case_id"))
+            self.assertTrue(brief.get("discovery_hints"))
+            return StepResult(case_id=brief["case_id"], app=app, notes="live map: Orders list")
+
+        entry = ensure_discovery(self.plan, self.case, "portal", self.state, {"portal": tester}, mem)
+        self.assertEqual(entry["source"], "discovery")
+        self.assertEqual(seen, [f"DISCO-{self.case.area}"])
+        self.assertTrue(any("Stuck" in h or "Route" in h or "Behaviour" in h for h in entry["hints"]))
 
     def test_runs_discovery_once_when_memory_empty(self):
         mem = FakeMemory(recipes=[])
@@ -145,18 +176,55 @@ class DiscoveryFirst(unittest.TestCase):
         self.assertEqual(entry2, entry)
         self.assertTrue((self.state.dir / "discovery" / "orders.md").is_file())
 
-    def test_run_plan_injects_recipes_into_real_brief(self):
+    def test_reruns_discovery_when_env_host_changes(self):
+        mem = FakeMemory(recipes=[])
+        seen = []
+
+        def tester(app, brief, state):
+            seen.append(brief.get("case_id"))
+            return StepResult(case_id=brief["case_id"], app=app, notes="mapped path A")
+
+        self.plan.requirements = [
+            Requirement(key="env.staging.portal", kind="url", value="https://old.example:4225/")]
+        ensure_discovery(self.plan, self.case, "portal", self.state, {"portal": tester}, mem)
+        self.assertEqual(len(seen), 1)
+        self.plan.requirements = [
+            Requirement(key="env.staging.portal", kind="url", value="https://new.example:4225/")]
+        ensure_discovery(self.plan, self.case, "portal", self.state, {"portal": tester}, mem)
+        self.assertEqual(len(seen), 2)
+
+    def test_reruns_discovery_when_recipe_marked_stale(self):
+        mem = FakeMemory(recipes=["stale route"])
+        seen = []
+
+        def tester(app, brief, state):
+            seen.append(1)
+            return StepResult(case_id=brief["case_id"], app=app, notes="fresh map")
+
+        ensure_discovery(self.plan, self.case, "portal", self.state, {"portal": tester}, mem)
+        self.assertEqual(len(seen), 1)
+        mark_discovery_stale(self.state, self.case.area, "portal", "got stuck")
+        ensure_discovery(self.plan, self.case, "portal", self.state, {"portal": tester}, mem)
+        self.assertEqual(len(seen), 2)
+
+    def test_run_plan_discovers_even_when_memory_has_recipes(self):
         mem = FakeMemory(recipes=["when X, click Y"])
         briefs = []
 
         def tester(app, brief, state):
             briefs.append(dict(brief))
+            if brief.get("discovery"):
+                return StepResult(case_id=brief["case_id"], app=app, notes="live: click Y")
             return StepResult(case_id=brief["case_id"], app=app)
 
         judge = lambda b, a, r, s: CaseResult(case_id=b["case_id"], verdict="PASS")
         run_plan(self.plan, self.state, {"portal": tester}, judge, memory=mem)
-        self.assertEqual(len(briefs), 1)  # no discovery turn
-        self.assertEqual(briefs[0]["recipes"], ["when X, click Y"])
+        self.assertGreaterEqual(len(briefs), 2)
+        self.assertTrue(briefs[0].get("discovery"))
+        self.assertIn("click Y", (briefs[0].get("recipes") or [""])[0])
+        case_brief = next(b for b in briefs if b["case_id"] == "TC2")
+        self.assertFalse(case_brief.get("discovery"))
+        self.assertTrue(case_brief.get("recipes"))
 
     def test_run_plan_discovers_then_runs_case(self):
         mem = FakeMemory(recipes=[])
@@ -175,6 +243,46 @@ class DiscoveryFirst(unittest.TestCase):
         self.assertEqual(briefs[1][0], "TC2")
         self.assertFalse(briefs[1][1])
         self.assertIn("/orders/new", briefs[1][2])
+
+    def test_discovery_runs_before_mutating_prep(self):
+        """Self-discovery must complete before ensure_data create/edit turns."""
+        from agent_tester import data_prep as DP
+        mem = FakeMemory(recipes=["old recipe"])
+        order = []
+        rule = {"id": "o", "value": "test_order", "app": "portal", "area": "orders",
+                "find": "find for {client}", "create": "make for {client}",
+                "client_login_app": "portal",
+                "when": {"areas": ["orders"], "any": ["create"]}}
+
+        def tester(app, brief, state):
+            if brief.get("discovery"):
+                order.append("discovery")
+                return StepResult(case_id=brief["case_id"], app=app, notes="mapped create order")
+            if brief.get("data_prep"):
+                order.append("prep:" + ("ro" if brief.get("read_only") else "mutate"))
+                # Find returns none so create would run; we only need order of calls.
+                return StepResult(case_id=brief["case_id"], app=app,
+                                  values={"test_order": "A1", "test_order_record": "r1"})
+            order.append("case")
+            return StepResult(case_id=brief["case_id"], app=app)
+
+        self.plan.requirements = [
+            Requirement(key="account.portal.customer", kind="account", value="user@example.com")]
+        judge = lambda b, a, r, s: CaseResult(case_id=b["case_id"], verdict="PASS")
+        run_plan(self.plan, self.state, {"portal": tester}, judge, memory=mem, data_prep=[rule])
+        self.assertEqual(order[0], "discovery")
+        self.assertIn("prep:ro", order)
+        self.assertLess(order.index("discovery"), order.index("prep:ro"))
+        self.assertLess(order.index("discovery"), order.index("case"))
+
+    def test_env_fingerprint_tracks_hosts(self):
+        plan = TestPlan(task_id=1, env="staging", cases=[], requirements=[
+            Requirement(key="env.staging.portal", kind="url", value="https://a.example:1/"),
+            Requirement(key="env.staging.crm", kind="url", value="https://b.example:2/"),
+        ])
+        self.assertIn("portal=a.example:1", env_fingerprint(plan))
+        self.assertIn("crm=b.example:2", env_fingerprint(plan, ["crm"]))
+        self.assertNotIn("portal=", env_fingerprint(plan, ["crm"]))
 
 class XsrfDeepLinkGuard(unittest.TestCase):
     """Stop SuiteCRM Administration deep-link / XSRF loops (run 180966-…182438)."""

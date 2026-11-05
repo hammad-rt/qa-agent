@@ -156,12 +156,15 @@ DISCOVERY = """You are mapping the {app_label} app ({base_url}) on {env} before 
 Goal: find concrete navigation paths and control labels the tester will need. Do NOT change data,
 settings, create records, or pay. Prefer navigate + snapshot; click only to open menus or reach screens.
 
+- Prior recipes / learned routes (if any) are HINTS only. Verify each against the live page. Ignore stale or
+  wrong paths; they must never stop a fresh map of menus, search/filters and screens for this environment.
 - Call recall_lessons for the area if unsure.
 - For each working path, call propose_memory("recipe", "when <goal>, click <menu> then <label> …").
   Recipes must be **menu/label click sequences** (selectors/labels only) — never passwords or credentials.
   If you note a URL for identification, say it is for ID only: do NOT tell the tester to browser_navigate to
   SuiteCRM `module=Administration&action=…` URLs (those deep-links trigger XSRF / missing referer).
-- Call finish(notes) with a short structured map (menus, labels, blockers; URLs only as ID notes). No pass/fail verdict.
+- Call finish(notes) with a short structured map (menus, search paths, labels, blockers; URLs only as ID notes).
+  No pass/fail verdict.
 - If a CAPTCHA blocks login, call needs_manual_login and stop. Do not invent UI you did not see.
 """
 

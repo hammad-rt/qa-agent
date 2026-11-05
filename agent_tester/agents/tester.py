@@ -1458,7 +1458,11 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
             recipes = brief.get("recipes") or []
             disco_notes = (brief.get("discovery_notes") or "").strip()
             if recipes or disco_notes:
-                instr += "\nUI map from discovery / memory (follow menu/label paths; do not re-explore from scratch):\n"
+                if brief.get("discovery"):
+                    instr += ("\nPrior recipes / learned routes are HINTS only — verify on the live page; "
+                              "ignore stale paths; map real menus, search and screens for this environment:\n")
+                else:
+                    instr += "\nUI map from discovery / memory (follow menu/label paths; do not re-explore from scratch):\n"
                 instr += ("On an XSRF / acceptable-referer page, return via Home/menu — never retry the same "
                           "Administration deep-link with browser_navigate.\n")
                 for r in recipes:

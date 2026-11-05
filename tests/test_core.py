@@ -247,7 +247,9 @@ class CoordinatorTests(unittest.TestCase):
             return CaseResult(case_id=brief["case_id"], verdict=v, actual="y", values={"cap": 40.0})
 
         res = run_plan(self.plan(), self.state, {"portal": tester, "crm": tester}, judge)
-        self.assertEqual(calls, [("TC1", "portal", [1]), ("TC1", "crm", [2]), ("TC1", "portal", [3])])
+        case_calls = [c for c in calls if not str(c[0]).startswith("DISCO-")]
+        self.assertTrue(any(str(c[0]).startswith("DISCO-") for c in calls))  # self-discovery before case
+        self.assertEqual(case_calls, [("TC1", "portal", [1]), ("TC1", "crm", [2]), ("TC1", "portal", [3])])
         self.assertEqual(res["TC1"].verdict, "FAIL")
         self.assertEqual(res["TC2"].verdict, "BLOCKED")
         self.assertEqual(res["TC3"].verdict, "SKIPPED")

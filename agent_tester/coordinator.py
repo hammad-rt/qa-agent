@@ -224,17 +224,12 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory) -> dict
                                     and not _NO_PROGRESS.search(notes))
     tries = state.data.setdefault("discovery_tries", {})
     tries[key] = tries.get(key, 0) + 1
-    if useful:
-        store[key] = entry
-        if notes:
-            learned.add(state.data.get("pack_root"), case.area, app,
-                        f"Discovery: {learned.scrub(notes)[:500]} ({date.today().isoformat()})")
-    elif tries[key] >= DISCOVERY_TRIES:
-        state.save()
-        raise RunPaused(f"Discovery for {key} found no way to the screen after {tries[key]} tries "
-                        f"({notes[:300] or 'no notes'}). Sort out the login, then resume "
-                        f"(prior recipes are hints only and do not replace a live discovery pass).")
-    # Not useful yet and under the try cap: return the pass but do not cache, so a later call retries.
+    # Always cache for this run so ensure_case_discovery + _run_case do not double-fire the same key.
+    # Re-run only on env fingerprint change or mark_discovery_stale (failed recipe this run).
+    store[key] = entry
+    if useful and notes:
+        learned.add(state.data.get("pack_root"), case.area, app,
+                    f"Discovery: {learned.scrub(notes)[:500]} ({date.today().isoformat()})")
     state.save()
     ddir = state.dir / "discovery"
     ddir.mkdir(parents=True, exist_ok=True)
@@ -245,6 +240,13 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory) -> dict
         + "\n".join(f"- {r}" for r in proposed) + "\n")
     state.checkpoint(f"discovery done for {key}" + (" (blocked)" if blocked else "")
                      + (f" ({len(hints)} hint(s))" if hints else ""))
+    # Pause the run only when login/transport blocked discovery repeatedly — empty notes alone
+    # must not stop the suite (case body / hints can still try).
+    hard = blocked or notes.startswith("discovery failed")
+    if not useful and hard and tries[key] >= DISCOVERY_TRIES:
+        raise RunPaused(f"Discovery for {key} found no way to the screen after {tries[key]} tries "
+                        f"({notes[:300] or 'no notes'}). Sort out the login, then resume "
+                        f"(prior recipes are hints only and do not replace a live discovery pass).")
     return entry
 
 
@@ -373,13 +375,17 @@ def _run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge
             continue                                  # resume: already done
         case = by_id[cid]
         from .agents.llm import TRACE_CASE
-        from .data_prep import ensure_data, after_case
+        from .data_prep import ensure_data, after_case, ensure_contact
         tok = TRACE_CASE.set(cid)
         try:
-            # Discover first (read-only): map live UI before any mutating prep or case body.
-            if not case.skip_reason:
+            # Deps before discovery (do not spend a discovery pass on a blocked case).
+            result = _deps_block(case, state)
+            if result is None and not case.skip_reason:
+                # Discover first (read-only), then resolve CRM contact id, then mutating prep / case body.
                 ensure_case_discovery(plan, case, state, testers, memory, data_prep or [])
-            result = None if case.skip_reason else ensure_data(plan, case, state, testers, data_prep or [])
+                result = ensure_contact(plan, case, state, testers, data_prep or [])
+            if result is None and not case.skip_reason:
+                result = ensure_data(plan, case, state, testers, data_prep or [])
             if result is None:
                 result = _run_case(plan, case, state, testers, judge, max_retries, manual_login,
                                    manual_login_apps, memory=memory)
@@ -394,8 +400,8 @@ def _run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge
     return {cid: state.result(cid) for cid in execution_order(plan)}
 
 
-def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
-              manual_login_apps=None, memory=None) -> CaseResult:
+def _deps_block(case, state) -> CaseResult | None:
+    """SKIPPED / BLOCKED from skip_reason or unmet depends_on; None when the case may run."""
     if case.skip_reason:
         return CaseResult(case_id=case.id, verdict="SKIPPED", expected=case.expected, note=case.skip_reason)
     for dep in case.depends_on:
@@ -412,6 +418,14 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
             continue
         return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,
                           note=f"depends on {dep} ({r.verdict})")
+    return None
+
+
+def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
+              manual_login_apps=None, memory=None) -> CaseResult:
+    blocked = _deps_block(case, state)
+    if blocked is not None:
+        return blocked
     results: list[StepResult] = []
     for app, steps in app_turns(case):
         if app in ("none", "redmine"):

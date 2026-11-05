@@ -207,11 +207,14 @@ class CoordinatorSafety(unittest.TestCase):
         calls = {"n": 0}
 
         def tester(app, brief, state):
+            if brief.get("discovery"):
+                calls["n"] += 1
+                raise ConnectionError("LLM dropped")  # discovery catches this; must not count as the case write
             calls["n"] += 1
             state.log_action(case_id="TC1", app=app, tool="request_approval", approval="pre_approved")
             raise ConnectionError("LLM dropped")
         res = run_plan(plan, self.state, {"portal": tester}, lambda *a: None)
-        self.assertEqual(calls["n"], 1)
+        self.assertEqual(calls["n"], 2)  # one discovery attempt + one case turn (no replay after write)
         self.assertEqual(res["TC1"].verdict, "AGENT INCOMPLETE")
         self.assertIn("check the record", res["TC1"].note)
 
@@ -225,7 +228,10 @@ class CoordinatorSafety(unittest.TestCase):
             v = {"wallet": 100.0 if brief["case_id"] == "BASELINE" else 95.0} if brief.get("read_only") else {}
             return StepResult(case_id=brief["case_id"], app=app, values=v)
         run_plan(plan, self.state, {"portal": tester}, lambda b, a, r, s: CaseResult(case_id=b["case_id"], verdict="PASS"))
-        self.assertEqual(seen, [("BASELINE", True), ("TC1", False), ("FINAL", True)])
+        self.assertEqual(seen[0], ("BASELINE", True))
+        self.assertTrue(any(c[0].startswith("DISCO-") and c[1] for c in seen))  # read-only discovery
+        self.assertIn(("TC1", False), seen)
+        self.assertEqual(seen[-1], ("FINAL", True))
         self.assertEqual(self.state.data["baseline"], {"wallet": 100.0})
         self.assertEqual(self.state.data["final"], {"wallet": 95.0})
 

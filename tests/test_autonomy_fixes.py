@@ -246,7 +246,6 @@ class DiscoveryFirst(unittest.TestCase):
 
     def test_discovery_runs_before_mutating_prep(self):
         """Self-discovery must complete before ensure_data create/edit turns."""
-        from agent_tester import data_prep as DP
         mem = FakeMemory(recipes=["old recipe"])
         order = []
         rule = {"id": "o", "value": "test_order", "app": "portal", "area": "orders",
@@ -258,9 +257,12 @@ class DiscoveryFirst(unittest.TestCase):
             if brief.get("discovery"):
                 order.append("discovery")
                 return StepResult(case_id=brief["case_id"], app=app, notes="mapped create order")
+            if brief.get("contact_lookup"):
+                order.append("contact")
+                return StepResult(case_id=brief["case_id"], app=app,
+                                  values={"crm_contact_id": "99", "crm_contact_email": "user@example.com"})
             if brief.get("data_prep"):
                 order.append("prep:" + ("ro" if brief.get("read_only") else "mutate"))
-                # Find returns none so create would run; we only need order of calls.
                 return StepResult(case_id=brief["case_id"], app=app,
                                   values={"test_order": "A1", "test_order_record": "r1"})
             order.append("case")
@@ -271,9 +273,12 @@ class DiscoveryFirst(unittest.TestCase):
         judge = lambda b, a, r, s: CaseResult(case_id=b["case_id"], verdict="PASS")
         run_plan(self.plan, self.state, {"portal": tester}, judge, memory=mem, data_prep=[rule])
         self.assertEqual(order[0], "discovery")
+        self.assertIn("contact", order)
         self.assertIn("prep:ro", order)
-        self.assertLess(order.index("discovery"), order.index("prep:ro"))
+        self.assertLess(order.index("discovery"), order.index("contact"))
+        self.assertLess(order.index("contact"), order.index("prep:ro"))
         self.assertLess(order.index("discovery"), order.index("case"))
+        self.assertEqual(self.state.data["contact"]["record_id"], "99")
 
     def test_env_fingerprint_tracks_hosts(self):
         plan = TestPlan(task_id=1, env="staging", cases=[], requirements=[

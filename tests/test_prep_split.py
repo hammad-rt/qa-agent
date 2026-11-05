@@ -104,3 +104,14 @@ class PrepSplit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResumedStore(unittest.TestCase):
+    def test_stored_negative_wallet_is_redone(self):
+        f = Fake({"find": [{"wallet_ready": "none"}], "create": [{"wallet_ready": "9"}]})
+        st = State(); st.data["prep"] = {"w": {"value": -0.22, "consumed": False}}
+        with mock.patch("agent_tester.coordinator.brief_for",
+                        side_effect=lambda p, c, s, st: {"case_id": c.id, "steps": [{"text": c.steps[0].text}]}):
+            r = D._ensure_one(N(env="local", requirements=[]), case(), st, {"crm": f}, WALLET)
+        self.assertIsNone(r)
+        self.assertEqual(st.data["prep"]["w"]["value"], "9")

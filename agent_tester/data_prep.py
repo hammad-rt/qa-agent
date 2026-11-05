@@ -152,6 +152,8 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
     store = state.data.setdefault("prep", {})
     key, value = rule["id"], rule["value"]
     have = store.get(key)
+    if have and not have.get("consumed") and not _usable(rule, have.get("value"), []):
+        have = None                     # e.g. a resumed run that stored a negative wallet as "ready"
     if have and not have.get("consumed"):
         state.values[value] = {"value": have["value"], "source": f"prep/{key}"}
         if have.get("record"):

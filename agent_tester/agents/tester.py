@@ -96,6 +96,7 @@ def _hard_stop_in(e: BaseException) -> bool:
 
 
 LOOP_WARN, LOOP_STOP = 3, 5          # same call repeated this often without progress: warn, then stop
+IDLE_READS = 8                       # page reads in a row with nothing done in between: stalled, not working
 EXPLORE_ACTIONS = 15                 # extra actions for one exploration of a screen when a step is stuck
 EXPLORE_TEXT = (
     "STOP guessing: {why}. Explore before you act again ({n} more actions for this):\n"
@@ -408,6 +409,22 @@ def _other_app(url: str, app_urls: dict, app: str) -> str | None:
         if b != "/" and u.startswith(b) and len(b) > blen:
             best, blen = a, len(b)
     return best if best and best != app else None
+
+
+def _guide_targets(text: str, state) -> set[str]:
+    """Case ids the note names (e.g. 'before E1 ...'); empty when it names none."""
+    try:
+        ids = [c.id for c in state.plan.cases] if state.plan else []
+    except Exception:
+        ids = []
+    return {i for i in ids if re.search(rf"(?<![A-Za-z0-9]){re.escape(i)}(?![A-Za-z0-9])", text, re.I)}
+
+
+def _guide_fits(row: dict, case_id: str, state) -> bool:
+    """A note that names other cases waits for them: the case running now must not act on advice for another
+    (it would change settings in the wrong case). Prep turns for a case don't count as that case."""
+    targets = _guide_targets(str(row.get("text", "")), state)
+    return not targets or (case_id or "").upper() in {t.upper() for t in targets}
 
 
 class TesterSession:
@@ -815,7 +832,7 @@ class TesterSession:
             self.since_progress, self._sigs = 0, {}          # a value read back is progress too
         if name == "mark_step" and args.get("n") not in self.result.steps_done:
             self.since_progress, self._sigs, self.saves, self.misses = 0, {}, 0, 0          # real progress: fresh per-step allowance
-            self._explored, self._recent = False, []
+            self._explored, self._recent, self._reads = False, [], 0
         limit = self._budget_check(name, args)
         if limit:
             return limit
@@ -926,6 +943,21 @@ class TesterSession:
         over_time = time.time() > self.deadline
         if not over_time and self.calls > 4 * self.max_calls:
             over_time = True                                 # runaway reads
+        if name in ("browser_snapshot", "browser_take_screenshot", "browser_find"):   # browser_wait_for is a real wait
+            self._reads = getattr(self, "_reads", 0) + 1
+            if self._reads >= IDLE_READS:
+                self._reads = 0
+                if not getattr(self, "_explored", False):
+                    return self._start_exploring(name, f"the page was read {IDLE_READS} times in a row with nothing done")
+                self.result.limit_hit = True
+                self.result.loop = True
+                self.state.log_action(case_id=self.case_id, app=self.app, tool="loop_detected",
+                                      args={"call": name, "repeats": IDLE_READS}, plan_step=self.current_step,
+                                      outcome="stop")
+                return {"error": "You keep re-reading the page without doing anything. Stop now: call "
+                                 "finish(notes, stuck=True) saying which step you reached and what is on screen."}
+        elif name not in FREE_TOOLS:
+            self._reads = 0
         if name not in FREE_TOOLS:
             self.actions += 1
             self.since_progress += 1
@@ -1165,10 +1197,10 @@ class TesterSession:
         except (OSError, ValueError):
             return None
         seen = getattr(self, "_guide_seen", 0)
-        new = rows[seen:]
+        new = [r for r in rows[seen:] if _guide_fits(r, getattr(self, "case_id", ""), self.state)]
+        self._guide_seen = len(rows)
         if not new:
             return None
-        self._guide_seen = len(rows)
         older = "" if seen else " Earlier notes may have been meant for an earlier case; use them only where they fit."
         lines = "\n".join(f"- {str(r.get('text', '')).strip()}" for r in new if str(r.get("text", "")).strip())
         if not lines:

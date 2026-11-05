@@ -316,10 +316,14 @@ class TesterCallbacks(unittest.TestCase):
         self.assertTrue(self.s.result.limit_hit)
 
     def test_runaway_reads_still_stop(self):
-        r = None
-        for _ in range(21):
-            r = self.s.before_tool(self.t("browser_snapshot"), {}, None)
-        self.assertIn("Limit", r["error"])
+        import agent_tester.agents.tester as T
+        errs = []
+        with self.assertRaises(T.TesterHardStop):       # told to stop, kept reading: code stops it
+            for _ in range(40):
+                r = self.s.before_tool(self.t("browser_snapshot"), {}, None)
+                if r:
+                    errs.append(r["error"])
+        self.assertTrue(any("re-reading" in e for e in errs))
 
     def test_loop_warn_then_stop(self):
         self.s.max_calls = 100
@@ -332,6 +336,22 @@ class TesterCallbacks(unittest.TestCase):
         rs = [self.s.before_tool(self.t("calculate"), dict(args), None) for _ in range(5)]
         self.assertIn("Stop now", rs[4]["error"])                    # same loop after exploring: stop
         self.assertTrue(self.s.result.loop and self.s.result.limit_hit)
+
+    def test_idle_rereads_explore_then_stop(self):
+        import agent_tester.agents.tester as T
+        self.s.max_calls = 100
+        r = [self.s.before_tool(self.t("browser_snapshot"), {}, None) for _ in range(T.IDLE_READS)]
+        self.assertIn("Explore before you act", r[-1]["error"])
+        r = [self.s.before_tool(self.t("browser_snapshot"), {}, None) for _ in range(T.IDLE_READS)]
+        self.assertIn("re-reading the page", r[-1]["error"])
+        self.assertTrue(self.s.result.loop)
+
+    def test_rereads_between_actions_are_fine(self):
+        self.s.max_calls = 100
+        for i in range(20):
+            r = self.s.before_tool(self.t("browser_snapshot"), {}, None)
+            self.assertIsNone(r)
+            self.s.before_tool(self.t("calculate"), {"expression": str(i)}, None)
 
     def test_cycle_is_a_loop(self):
         import agent_tester.agents.tester as T

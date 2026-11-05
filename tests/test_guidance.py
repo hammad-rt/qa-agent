@@ -45,3 +45,25 @@ class HeldIsLoggable(unittest.TestCase):
         e = ActionLogEntry(seq=1, case_id="TC1", app="portal", tool="browser_click", approval="held",
                            outcome="user guidance delivered")
         self.assertEqual(e.approval, "held")
+
+
+class GuidanceForAnotherCase(unittest.TestCase):
+    def _s(self, d, case_id):
+        s = _session(d)
+        s.case_id = case_id
+        plan = SimpleNamespace(cases=[SimpleNamespace(id=i) for i in ("TC0", "E1", "E10", "C7")])
+        s.state = SimpleNamespace(dir=Path(d), plan=plan)
+        return s
+
+    def test_note_naming_a_case_waits_for_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "guidance.jsonl").write_text(
+                json.dumps({"text": "before earning rewards in E1 set the earn % to 80"}) + "\n")
+            self.assertIsNone(self._s(d, "TC0")._new_guidance())
+            self.assertIsNone(self._s(d, "E10")._new_guidance())
+            self.assertIn("80", self._s(d, "E1")._new_guidance())
+
+    def test_general_note_goes_to_current_case(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "guidance.jsonl").write_text(json.dumps({"text": "you seem stuck"}) + "\n")
+            self.assertIn("stuck", self._s(d, "TC0")._new_guidance())

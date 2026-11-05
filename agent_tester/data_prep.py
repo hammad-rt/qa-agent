@@ -166,6 +166,16 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
 
     def blocked(why):
         state.checkpoint(f"data prep {key} for {case.id} failed: {why}")
+        from . import learned
+        try:
+            for turn in (f"PREP-{key}-create", f"PREP-{key}-find"):
+                acts = [a for a in state.data.get("action_log", []) if a.get("case_id") == turn]
+                if acts and learned.record_stuck(state.data.get("pack_root"), rule.get("area"), app or "crm",
+                                                 turn, why, why, acts):
+                    state.checkpoint(f"data prep {key}: saved where it got stuck to the pack")
+                    break
+        except Exception:  # noqa: BLE001
+            pass
         return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,
                           note=f"test data not ready ({key}): {why}")
 

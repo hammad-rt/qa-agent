@@ -33,3 +33,25 @@ class Learned(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / "packs" / "savostore"
         self.assertTrue(learned.read(root, "parcel_value", "portal"))
         self.assertTrue(any("XSRF" in x for x in learned.read(root, "shipment_protection_threshold", "crm")))
+
+
+class StuckKB(unittest.TestCase):
+    def test_stuck_line_keeps_tried_and_route(self):
+        with tempfile.TemporaryDirectory() as d:
+            acts = [
+                {"app": "crm", "tool": "browser_click", "args": {"element": "CREATE"}},
+                {"app": "crm", "tool": "browser_select_option", "approval": "approved",
+                 "args": {"element": "status", "values": ["Ready to Ship"]}},
+                {"app": "crm", "tool": "browser_click", "approval": "approved", "args": {"element": "Save"}},
+                {"app": "crm", "tool": "explore",
+                 "args": {"why": "browser_click was repeated 4 times",
+                          "tried": ["select:e554:ready to ship", "click:e114"]}},
+            ]
+            line = learned.record_stuck(Path(d), "rewards", "crm", "E1",
+                                        "kept repeating the same action without progress",
+                                        "stuck at Ready to Ship", acts)
+            self.assertIsNotNone(line)
+            self.assertIn("Stuck (loop)", line)
+            self.assertIn("already tried", line)
+            self.assertIn("reached", line)
+            self.assertTrue(any("Stuck" in x for x in learned.read(Path(d), "rewards", "crm")))

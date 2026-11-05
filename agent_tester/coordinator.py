@@ -396,19 +396,23 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
         if sr.steps_done and not (sr.stuck or sr.limit_hit or sr.needs_login):
             _learn_route(case, app, state, log_mark)
         if (sr.notes or "").strip().upper().startswith("BLOCKED:"):
-            return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,
-                              values={k: v for r in results for k, v in r.values.items()},
-                              evidence=[s for r in results for s in r.screenshots],
-                              note=f"{app}: {sr.notes.strip()[8:].strip()}")
+            note = f"{app}: {sr.notes.strip()[8:].strip()}"
+            result = CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,
+                                values={k: v for r in results for k, v in r.values.items()},
+                                evidence=[s for r in results for s in r.screenshots], note=note)
+            _learn_failure(case, app, state, log_mark, "blocked", sr.notes or "")
+            return result
         for k, v in sr.values.items():
             state.values.setdefault(k, {"value": v, "source": f"{case.id}/{app}"})
         if sr.stuck or sr.limit_hit:
             why = ("kept repeating the same action without progress" if getattr(sr, "loop", False)
                    else "hit the step/time limit" if sr.limit_hit else "got stuck")
-            return CaseResult(case_id=case.id, verdict="AGENT INCOMPLETE", expected=case.expected,
-                              values={k: v for r in results for k, v in r.values.items()},
-                              evidence=[s for r in results for s in r.screenshots],
-                              note=f"tester on {app} {why}: {sr.notes}".strip())
+            note = f"tester on {app} {why}: {sr.notes}".strip()
+            result = CaseResult(case_id=case.id, verdict="AGENT INCOMPLETE", expected=case.expected,
+                                values={k: v for r in results for k, v in r.values.items()},
+                                evidence=[s for r in results for s in r.screenshots], note=note)
+            _learn_failure(case, app, state, log_mark, why, sr.notes or "")
+            return result
     full_brief = brief_for(plan, case, list(range(len(case.steps))), state)
     try:
         for left in range(2, -1, -1):
@@ -443,6 +447,24 @@ def _learn_route(case, app, state, log_mark) -> None:
                 discovery_key(case.area, app), {"source": "run", "recipes": [], "notes": ""})
             entry.setdefault("recipes", []).insert(0, line)
             state.data.setdefault("notes", []).append(f"saved route for {case.area or app} from {case.id}")
+            state.save()
+    except Exception:  # noqa: BLE001  learning must never fail a case
+        pass
+
+
+def _learn_failure(case, app, state, log_mark, why: str, notes: str) -> None:
+    """A stuck, looped or blocked turn writes what it hit into the pack's learned.md so the next run of this
+    area avoids the same dead end."""
+    from . import learned
+    try:
+        acts = [a for a in state.data["action_log"][log_mark:] if a.get("case_id") == case.id]
+        line = learned.record_stuck(state.data.get("pack_root"), case.area, app, case.id, why, notes, acts)
+        if line:
+            entry = state.data.setdefault("discovery", {}).setdefault(
+                discovery_key(case.area, app), {"source": "run", "recipes": [], "notes": ""})
+            entry.setdefault("recipes", []).insert(0, line)
+            state.data.setdefault("notes", []).append(f"saved stuck note for {case.area or app} from {case.id}")
+            state.checkpoint(f"{case.id}: saved where it got stuck to the pack")
             state.save()
     except Exception:  # noqa: BLE001  learning must never fail a case
         pass

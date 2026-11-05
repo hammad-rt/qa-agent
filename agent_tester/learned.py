@@ -9,7 +9,7 @@ import re
 from datetime import date
 from pathlib import Path
 
-HEADER = ("# What the agent learned\n\nWritten by the agent after each run (routes it used, discovery notes).\n"
+HEADER = ("# What the agent learned\n\nWritten by the agent after each run (routes, recipes, how the app behaves, and where it got stuck).\n"
           "Edit or delete freely; wrong lines are worse than none.\n")
 _NAV_TOOLS = {"browser_navigate", "browser_click", "browser_select_option"}
 
@@ -136,4 +136,28 @@ def record_recipe(pack_root, area, app, what: str, actions: list[dict]) -> str |
     if len(hops) < 2:
         return None
     line = f"Recipe ({scrub(what)}): " + " -> ".join(hops) + f" ({date.today().isoformat()})"
+    return line if add(pack_root, area, app, line) else None
+
+def record_stuck(pack_root, area, app, case_id: str, why: str, notes: str,
+                 actions: list[dict] | None = None) -> str | None:
+    """What went wrong on a failed or stuck turn: so the next run of the same area reads it before it starts
+    and does not repeat the same dead end. Includes the last route, what explore said was already tried, and
+    the tester's own note. Record ids are stripped like routes."""
+    hops = route_from_actions(actions or [], app, limit=12, changes=True)
+    tried: list[str] = []
+    for a in reversed(actions or []):
+        if a.get("tool") == "explore":
+            tried = [scrub(str(t)) for t in (a.get("args") or {}).get("tried") or [] if t][:8]
+            break
+    note = scrub((notes or "").strip())[:280]
+    kind = "loop" if "loop" in (why or "").lower() or "repeat" in (why or "").lower() else "stuck"
+    parts = [f"Stuck ({kind}): {scrub(why or 'stopped').strip()[:120]}"]
+    if hops:
+        parts.append("reached " + " -> ".join(hops[-8:]))
+    if tried:
+        parts.append("already tried: " + "; ".join(tried))
+    if note:
+        parts.append("note: " + note)
+    parts.append("Next time: do not repeat the same clicks; pick a route that was not tried, or finish stuck if none.")
+    line = ". ".join(parts) + f" ({date.today().isoformat()}, {case_id})"
     return line if add(pack_root, area, app, line) else None

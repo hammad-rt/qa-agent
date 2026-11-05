@@ -344,6 +344,23 @@ def _tool_error(text: str | None) -> str | None:
 EXECUTE_LABEL = re.compile(r"(?i)\bexecute\b")
 
 
+def _is_not_found(text: str) -> bool:
+    t = (text or "")[:6000]
+    return bool(re.search(r"\b404\b[^\n]{0,80}(not found|could not be found)|This page could not be found|"
+                          r"Page Title:\s*404|heading \"404\"", t, re.I))
+
+
+def _other_app(url: str, app_urls: dict, app: str) -> str | None:
+    """The other app whose base URL this address is under (longest match), or None."""
+    u = (url or "").rstrip("/") + "/"
+    best, blen = None, -1
+    for a, base in (app_urls or {}).items():
+        b = (base or "").rstrip("/") + "/"
+        if b != "/" and u.startswith(b) and len(b) > blen:
+            best, blen = a, len(b)
+    return best if best and best != app else None
+
+
 class TesterSession:
     """Holds the per-turn bookkeeping that the callbacks and tool functions share."""
 
@@ -699,9 +716,12 @@ class TesterSession:
         name = tool.name
         self.calls += 1
         note = TesterSession._new_guidance(self)
+        if note:
+            self._guidance_notes = getattr(self, "_guidance_notes", []) + [note]
         if note and name != "finish":
             self.state.log_action(case_id=self.case_id, app=self.app, tool=name, args=_safe_args(args),
                                   plan_step=self.current_step, approval="held", outcome="user guidance delivered")
+            self.state.checkpoint(f"{self.case_id} ({self.app}): guidance from the user delivered to the agent")
             return {"error": f"{note}\nYour {name} call was NOT run. Follow the guidance, then call it again "
                              "if it still fits."}
         settle = _settle_seconds(getattr(self, "app", ""))
@@ -778,6 +798,12 @@ class TesterSession:
                             name, args,
                             "this URL already returned an XSRF / acceptable-referer page; "
                             "open the screen via the discovery menu path instead of deep-linking again")
+                    other = _other_app(url, getattr(self, "app_urls", {}), self.app)
+                    if other:
+                        return self._deny(name, args, (
+                            f"{url} is the {other} app, but this turn only does the {self.app} steps (the {other} "
+                            f"steps run in their own turn, with their own login). Stay on {self.app}. If a {self.app} "
+                            f"step needs test data that is missing, finish with notes 'BLOCKED: <what is missing>'."))
                     self.policy.check_url(url)
                     self._last_nav_url = url
                 label = " ".join(str(args.get(k, "")) for k in ("element", "text", "values") if args.get(k))
@@ -963,6 +989,13 @@ class TesterSession:
             blocked = self._check_page_site(tool.name, text)
             if blocked:
                 return {"error": blocked}
+            if tool.name == "browser_navigate" and _is_not_found(text):
+                self.state.log_action(case_id=self.case_id, app=self.app, tool="not_found",
+                                      args={"url": str(args.get("url", ""))[:300]}, plan_step=self.current_step,
+                                      outcome="404")
+                return {"error": (f"{args.get('url', '')} does not exist (404 page). Do not guess addresses. Use "
+                                  "only a URL from the project rules / recipes (filled with ids from values_so_far) "
+                                  "or a link on the page; otherwise open the screen through the menus.")}
             xsrf = self._note_xsrf(tool.name, args, text)
             if xsrf:
                 return {"error": xsrf}
@@ -972,7 +1005,19 @@ class TesterSession:
     def before_model(self, callback_context, llm_request):
         """Keep the model's history small: only the last KEEP_PAGE_READS browser results stay whole; older ones
         are replaced by a one-line placeholder (the tester can take a new snapshot)."""
-        prune_history(getattr(llm_request, "contents", None) or [], KEEP_PAGE_READS)
+        contents = getattr(llm_request, "contents", None)
+        prune_history(contents or [], KEEP_PAGE_READS)
+        note = TesterSession._new_guidance(self)
+        if note:                                     # the user's note reaches the model at its very next thought
+            self._guidance_notes = getattr(self, "_guidance_notes", []) + [note]
+            self.state.log_action(case_id=self.case_id, app=self.app, tool="guidance", args={},
+                                  plan_step=self.current_step, outcome="user guidance delivered")
+            self.state.checkpoint(f"{self.case_id} ({self.app}): guidance from the user delivered to the agent")
+        notes = getattr(self, "_guidance_notes", [])
+        if notes and contents is not None:           # ADK rebuilds the request each call: keep the notes in view
+            from google.genai import types as _gt
+            contents.append(_gt.Content(role="user", parts=[_gt.Part(
+                text="\n\n".join(notes) + "\nApply this now, in your current step, and keep following it.")]))
         return None
 
     def _check_page_site(self, tool_name: str, text: str) -> str | None:
@@ -1251,6 +1296,7 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
             sess = TesterSession(app, brief, state, policy, evidence, max_calls,
                                  settings.max_minutes_per_case, keep_emails=keep, memory=memory, ledger=Ledger(state),
                                  helpers=helpers, pack=pack, env=env, toolset=toolset)
+            sess.app_urls = {a: u for a, u in (urls or {}).items() if u}
             base_url = urls.get(app) or pack.url(app, env)
             if brief.get("discovery"):
                 instr = prompts.DISCOVERY.format(app_label=pack.apps[app].get("label", app), base_url=base_url, env=env)

@@ -71,6 +71,14 @@ def make_judge(settings: Settings, pack, memory=None):
             "steps_done": sorted({n for sr in step_results for n in sr.steps_done}),
             "page_text_at_steps": page_text(state, step_results),
         }
+        from ..invariants import computed_checks
+        checks = computed_checks((getattr(pack, "config", None) or {}).get("invariants") or [],
+                                 payload["values"], failure_text)
+        if checks:
+            payload["computed_checks"] = {
+                "note": "Computed by code from the recorded values. Use these results as they are; do not redo the "
+                        "arithmetic. Judge the case against its expected result with them.",
+                "results": checks}
         def to_result(data: dict) -> CaseResult:
             if not isinstance(data, dict):
                 raise ValueError("expected a JSON object")

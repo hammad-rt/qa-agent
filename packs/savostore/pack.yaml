@@ -95,8 +95,8 @@ data_prep:
   - id: shipping_only_order
     area: rewards
     when:
-      areas: [rewards]
-      any: ["shipping[- ]only", "pay by card", "stripe", "abandon", "invoice"]
+      areas: [rewards, portal]        # portal-area cases (B1, B3, B12, B15, B16) open an invoice too
+      any: ["shipping[- ]only", "pay by card", "stripe", "abandon", "invoice", "order-[a-z]+"]
       none: ["buy ?& ?ship"]
     app: crm
     value: test_order
@@ -130,7 +130,7 @@ data_prep:
   - id: buy_ship_order
     area: rewards
     when:
-      areas: [rewards]
+      areas: [rewards, portal]
       any: ["buy ?& ?ship"]
     app: crm
     value: test_quote
@@ -155,7 +155,7 @@ data_prep:
     area: rewards
     when:
       areas: [rewards]
-      any: ["paid order", "already paid", "new parcel", "additional parcel", "parcel (is )?added"]
+      any: ["already paid", "new parcel", "additional parcel", "parcel (is )?added"]     # not "paid order": E1 "Earn on a paid order" pays an unpaid one
     app: crm
     value: paid_order
     find: >-
@@ -169,7 +169,7 @@ data_prep:
   - id: wallet_topup
     area: rewards
     when:
-      areas: [rewards]
+      areas: [rewards, portal]
       any: ["max(imum)?", "full cap", "\\bcap\\b", "more than", "exceed"]
     envs: [staging, local]          # earning needs a payment, which never happens on pre-prod/production
     blocked_note: >-
@@ -177,10 +177,12 @@ data_prep:
       never does on pre-prod or production; top up the test client's wallet by hand and rerun
     app: crm
     value: wallet_ready
+    min_value: 0.01        # checked in code: a negative or zero wallet is never "ready"
     find: >-
       Open the CRM contact of the test client {client} and read Current Rewards. If it is at least the redeem cap of
       the order in values_so_far (test_order / test_quote; cap = 10% of unpaid shipping) plus $5, it is enough:
-      record_value('wallet_ready', '<Current Rewards>').
+      record_value('wallet_ready', '<Current Rewards>'). If it is negative, zero or less than that, it is not
+      enough: record_value('wallet_ready', 'none').
     create: >-
       Earn rewards: take a QA-AGENT TEST shipping-only order of {client}, pay it on the portal with the Stripe test
       card from the Payments facts (staging only), then move it to "Order Delivered" in the CRM so 5% is earned.
@@ -190,3 +192,12 @@ data_prep:
 stack:
   crm: {name: "SuiteCRM 7", docs: ["https://docs.suitecrm.com"]}
   portal: {name: "Next.js", docs: ["https://nextjs.org/docs"]}
+
+# Arithmetic checked in code and handed to the judge as facts (value names are matched by these patterns).
+invariants:
+  - name: wallet W = L - U
+    values:
+      W: "^w$|current_?(rewards|balance|wallet)|wallet_?balance|^current$"
+      L: "^l$|total_?(rewards|earned)|lifetime"
+      U: "^u$|used"
+    checks: ["W == L - U", "W >= 0", "U <= L"]

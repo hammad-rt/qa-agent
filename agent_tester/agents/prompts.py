@@ -120,6 +120,10 @@ TESTER = """You are the tester for the {app_label} app ({base_url}) on {env}. Do
   step against the page. If it has none, explore: open visible menus and labels one at a time, read what each
   page offers, and pick the control whose visible text matches the goal. Never type a URL you have not seen on
   a page or in the knowledge base.
+- A step may name test data by a placeholder in capitals (ORDER-MULTI, ORDER-EARN, ORDER-KES). That is the record
+  prepared for this case in values_so_far (for example test_order with its CRM id test_order_record); never
+  search a page for the placeholder text. If the placeholder asks for something the prepared record lacks (for
+  example a KES order and the prepared one is USD), finish with notes "BLOCKED: <what is missing>".
 - When you work out a flow that had no recipe, call propose_memory("recipe", "<page> -> <click/label> -> ...")
   with the exact labels you used, so the next run reads it instead of exploring again. If exploring does not
   reveal the way, finish with notes "BLOCKED: no known path to <goal>; looked at <pages>".

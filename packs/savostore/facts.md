@@ -61,6 +61,9 @@ CRM base https://staging5.rolustech.com:4220/index.php
 - A rewards balance of at least $100 or 50,000 KES is needed for the redemption cases.
 - Mandatory Shipment Protection (#180966) applies above a threshold set in the CRM. Production threshold: $150 (as of 30 Sep). Test at the threshold and just above it (150 and 151).
 
+- Test data placeholders in cases (ORDER-MULTI, ORDER-EARN, ORDER-KES...) mean the order prepared for the case: `test_order` (number) and `test_order_record` (CRM id) in values_so_far. On the portal open its invoice directly at `<portal URL>/shipping-only/invoice/<test_order_record>`; there is no `/payment/<number>` page (it is a 404). Buy & Ship: `test_quote`.
+- The wallet invariant (W = L - U, W >= 0, U <= L) is computed by code and given to the judge; a negative wallet with U > L is a FAIL even when W = L - U holds.
+
 ## Savo Rewards: CRM facts (verified 2026-10-12)
 - Earn/redeem config: CRM `index.php?module=Administration&action=saveRewardsPanel`; fields "Rewards Earned (Percentage)" (normal 5) and "Rewards Redeemed (Percentage)" (normal 10). Changing them is a settings change: needs approval, record the original, restore after.
 - Shipping-only orders are `AOS_Invoices` records; Buy & Ship orders are `AOS_Quotes`.

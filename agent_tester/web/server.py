@@ -394,7 +394,7 @@ class Handler(BaseHTTPRequestHandler):
                 d = self._run(parts[2])
                 if not d:
                     return self._send(404, {"error": "no such run"})
-                if parts[3] == "guide":            # a note for the agent while the run goes; read at its next tool call
+                if parts[3] == "guide":            # a note for the agent while the run goes; read at its next model call
                     from ..redact import redact, scrub_secrets
                     text = scrub_secrets(redact(str(b.get("text", "")).strip()))[:2000]
                     if not text:

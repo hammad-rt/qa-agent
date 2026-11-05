@@ -108,7 +108,7 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc);cursor:point
   <div class="tabs" role="tablist"><div class="tab on" data-p="live" role="tab" tabindex="0" data-i="live">Live</div><div class="tab" data-p="cases" role="tab" tabindex="0" data-i="list">Cases</div><div class="tab" data-p="shots" role="tab" tabindex="0" data-i="img">Screenshots</div><div class="tab" data-p="log" role="tab" tabindex="0" data-i="act">Actions</div><div class="tab" data-p="report" role="tab" tabindex="0" data-i="doc">Report</div><div class="tab" data-p="know" role="tab" tabindex="0" data-i="book">Knowledge</div><div class="tab" data-p="mem" role="tab" tabindex="0" data-i="db">Memory</div></div>
   <div id="live" class="pane on">
     <div id="askBox"></div>
-    <div id="guideRow" class="row rbar" style="display:none;gap:8px;align-items:flex-start;margin:0 0 10px"><textarea id="guideIn" rows="2" onkeydown="if(event.key=='Enter'&&(event.ctrlKey||event.metaKey))sendGuide()" style="flex:1" aria-label="Guidance for the agent" placeholder="Guide the agent, e.g. &quot;the phone field is under Contact details&quot;. It reads this at its next step. No passwords."></textarea><button onclick="sendGuide()">Send to agent</button><span id="guideMsg" class="mute" role="status"></span></div>
+    <div id="guideRow" class="row rbar" style="display:none;gap:8px;align-items:flex-start;margin:0 0 10px"><textarea id="guideIn" rows="2" onkeydown="if(event.key=='Enter'&&(event.ctrlKey||event.metaKey))sendGuide()" style="flex:1" aria-label="Guidance for the agent" placeholder="Guide the agent, e.g. &quot;the phone field is under Contact details&quot;. It reads this at its very next thought, in the current case. No passwords."></textarea><button onclick="sendGuide()">Send to agent</button><span id="guideMsg" class="mute" role="status"></span></div>
     <div id="consoleWrap" style="display:none"><div class="mute">Agent console</div><pre class="console" id="console"></pre></div>
     <div class="toolbar"><b>Steps</b><label><input type="checkbox" id="showReads" onchange="$('#events').classList.toggle('hideReads',!this.checked)"> show page reads</label><label><input type="checkbox" id="follow" checked> follow live</label></div><div id="events" class="hideReads"><div class="empty">No steps yet.</div></div>
   </div>
@@ -236,7 +236,7 @@ let curLive=false;function guideShow(){$('#guideRow').style.display=(curLive||(j
 async function sendGuide(){const t=$('#guideIn').value.trim();if(!t||!cur)return;
   try{const r=await fetch(`/api/runs/${cur}/guide`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:t})});const j=await r.json().catch(()=>({}));
     if(!r.ok){$('#guideMsg').textContent=j.error||'not sent';if(r.status==404)checkStale(true);return}
-    $('#guideIn').value='';$('#guideMsg').textContent='Sent. The agent reads it at its next step.';setTimeout(()=>$('#guideMsg').textContent='',6000)}
+    $('#guideIn').value='';$('#guideMsg').textContent='Sent. The agent reads it at its very next thought.';setTimeout(()=>$('#guideMsg').textContent='',6000)}
   catch(e){$('#guideMsg').textContent='not sent: '+e}}
 let picked=null;
 function nextCaseId(){const done=new Set(blocks.map(b=>b.id));const c=((lastPlan||{}).cases||[]).find(x=>!done.has(x.id)&&(!picked||picked.includes(x.id)));return c?c.id:'case '+(blocks.length)}

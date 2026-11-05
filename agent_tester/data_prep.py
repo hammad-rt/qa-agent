@@ -39,16 +39,12 @@ def matching_rules(case, rules: list[dict]) -> list[dict]:
 def client_label(name: str | None, user: str | None) -> str | None:
     """CRM contact label for prep find/create text.
 
-    The portal (or other client_login_app) account picked for THIS run always wins.
-    Pack ``test_client`` is only a staging/example hint when a login is also set — never
-    the primary lookup key, so a hard-coded name cannot override the run's email.
+    The portal (or other client_login_app) account picked for THIS run is the only identity
+    when set. Pack ``test_client`` names are ignored whenever a login/email is present so
+    env-bound contact names never override the run account.
     """
     if user:
-        base = f"the client whose login / email is {user}"
-        if name:
-            return (f"{base} (often named {name} on this env; look up by that email or by "
-                    f"the orders that login owns, never by name alone)")
-        return base
+        return f"the client whose login / email is {user}"
     return name
 
 

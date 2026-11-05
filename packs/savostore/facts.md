@@ -69,9 +69,8 @@ CRM base https://staging5.rolustech.com:4220/index.php
 - Shipping-only orders are `AOS_Invoices` records; Buy & Ship orders are `AOS_Quotes`.
 - Admin redemption: order DetailView > "Rewards Redeemed" subpanel > Create (name "Redeemed rewards by admin against <order>"; Redeemed Rewards editable, Applicable Rewards read-only).
 - Client / CRM contact for a run: always the contact that matches the portal login/email picked for THIS run
-  (look up by that email, or by the orders that login owns). Never use a hard-coded name from this file.
-  Staging example only: the usual staging portal test login maps to CRM contact Hammad Iqbal
-  (`hammad.iqbal@rolustech.com`), not "Sidney Test". Contact fields: Total Rewards, Current Rewards, Rewards Used.
+  (look up by that email, or by the orders that login owns). Never name a fixed CRM contact here for any env —
+  staging included. Contact fields: Total Rewards, Current Rewards, Rewards Used.
 - Earn happens only when the status CHANGES to Order Delivered; re-saving an order already at Order Delivered does
   nothing. To re-trigger, move it to another status, save, then set Order Delivered again. Shipping Only overwrites
   its single earn row on re-trigger; Buy & Ship earns once and never updates that row (code, 2026-11-04).
@@ -107,9 +106,7 @@ CRM base https://staging5.rolustech.com:4220/index.php
   redeemed on that order)). Earn % is the order's own field if set, else Admin Savo Rewards (normally 5). Portal
   Current must match CRM W1.
 - CRM contact for E0/E1 (every env): the contact for the portal login/email chosen at run start. Look it up by
-  that email or by the orders that login owns — never by a fixed name from KB. Staging example only: when the
-  staging portal login is the usual test account, that contact is Hammad Iqbal (`hammad.iqbal@rolustech.com`),
-  not "Sidney Test". On preprod/local/prod (or any run that picks a different portal email), use that email.
+  that email or by the orders that login owns — never by a fixed name from KB (any environment).
 - Payments for earn: Stripe test card 4242 only. Never M-Pesa.
 - Admin Savo Rewards earn %: change only with approval; record the original; restore and re-read after the case.
 - Admin pages (Repair, Savo Rewards): open from Administration index. A typed module URL gives an XSRF error.
@@ -153,7 +150,7 @@ rewards, cap(s) = R% x unpaid shipping s.
 - A refund reverts earned and redeemed rewards (hook exists in code; amounts not yet verified, so check, don't assume).
 - Switching an order's currency must not change the wallet's Total, Current or Used.
 - E0 must confirm the CRM contact whose wallet is read is the one for this run's portal login/email (match by
-  that email or by the orders it owns — never by a hard-coded name such as Hammad Iqbal).
+  that email or by the orders it owns — never by a hard-coded name).
 - Invariants, always: W = L - U (gap 0), portal wallet = CRM Current, no order balance below 0, paid + rewards = total,
   and no portal "against" Applied rows left on test orders at the end.
 - Build check: cases tied to the earlier report bugs (B1, B3, B6, B7, B8, B13, B15, B16, B19, A8, A14, C7) are expected

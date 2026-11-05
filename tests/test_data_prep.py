@@ -31,6 +31,23 @@ class DataPrep(unittest.TestCase):
         data_prep.after_case(case("then complete payment"), st, RULES)
         self.assertTrue(st.data["prep"]["o"]["consumed"])
 
+    def test_client_label_run_email_always_wins(self):
+        # No login: pack name only (legacy / blocked unless set).
+        self.assertEqual(data_prep.client_label("Hammad Iqbal", None), "Hammad Iqbal")
+        self.assertIsNone(data_prep.client_label(None, None))
+        # Preprod/local/prod: portal email alone — no hard-coded staging name.
+        pre = data_prep.client_label(None, "equipmentventures@gmail.com")
+        self.assertIn("equipmentventures@gmail.com", pre)
+        self.assertNotIn("Hammad", pre)
+        # Staging hint present: email still primary; name is example only.
+        both = data_prep.client_label("Hammad Iqbal", "equipmentventures@gmail.com")
+        self.assertTrue(both.startswith("the client whose login / email is equipmentventures@gmail.com"))
+        self.assertIn("often named Hammad Iqbal", both)
+        self.assertIn("never by name alone", both)
+        # Staging usual login can still mention Hammad as the hint without leading with it.
+        stg = data_prep.client_label("Hammad Iqbal", "hammad.iqbal@rolustech.com")
+        self.assertTrue(stg.startswith("the client whose login / email is hammad.iqbal@rolustech.com"))
+
     def test_no_client_for_env_blocks(self):
         r = data_prep.ensure_data(SimpleNamespace(env="prod"), case("a"), State(), {}, [{**RULES[0], "test_client": {"staging": "H"}}])
         self.assertEqual(r.verdict, "BLOCKED")

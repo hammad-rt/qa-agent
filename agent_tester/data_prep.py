@@ -125,7 +125,8 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
     try:
         sr = _turn(tester, plan, state, rule, app, text, False, f"PREP-{key}")
     except Exception as e:  # noqa: BLE001
-        return blocked(f"{type(e).__name__}: {e}")
+        from .logsetup import short_error
+        return blocked(short_error(e, f"data prep {key}"))
     rec = sr.values.get(value)
     if not rec:
         return blocked(sr.notes or "no record found or created")
@@ -145,7 +146,8 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
                     state.save()
                     return blocked(f"{rec} is not usable: {ok or vr.notes or 'check gave no answer'}")
             except Exception as e:  # noqa: BLE001
-                return blocked(f"check failed: {type(e).__name__}: {e}")
+                from .logsetup import short_error
+                return blocked("check failed: " + short_error(e, f"data prep {key} check"))
     store[key] = {"value": rec, "consumed": False, "for": case.id}
     state.values[value] = {"value": rec, "source": f"prep/{key}"}
     state.save()

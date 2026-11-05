@@ -14,3 +14,4 @@ packs/*/learned_logins.json
 agent_error.log
 models/
 .playwright-mcp/
+logs/

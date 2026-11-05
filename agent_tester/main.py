@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import sys
 from datetime import datetime
@@ -957,6 +958,8 @@ def _safe(what: str, fn, *a, **kw):
 
 
 def main(argv=None) -> int:
+    from . import logsetup
+    logsetup.setup()
     try:
         return _main(argv)
     except KeyboardInterrupt:
@@ -966,6 +969,7 @@ def main(argv=None) -> int:
         if not model_unreachable(e):
             if os.environ.get("AGENT_DEBUG"):
                 raise
+            logging.getLogger("agent_tester").error("command failed", exc_info=e)
             log = _save_trace(Path("agent_error.log"))
             print(f"\n{friendly_error(e)}\n(Details saved to {log}; rerun with AGENT_DEBUG=1 to see the traceback.)")
             return 1

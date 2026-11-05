@@ -1287,6 +1287,9 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
             prompt = "Your steps:\n" + json.dumps(brief, indent=1, default=str)
 
             async def go():
+                if not os.environ.get("AGENT_DEBUG"):
+                    from ..logsetup import quiet_libraries
+                    quiet_libraries()                 # LiteLLM/ADK add console handlers on first use
                 try:
                     await run_agent(agent, prompt, settings, trace_path=run_dir / "trace.jsonl",
                                     follow_up=lambda final: nudge_text(final) if not (sess.finished or sess.result.limit_hit) else None)

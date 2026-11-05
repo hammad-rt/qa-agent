@@ -272,8 +272,10 @@ def run_plan(plan: TestPlan, state: RunState, *args, **kwargs) -> dict[str, Case
         pidf.write_text(f"{os.getpid()}\n")
     except OSError:
         pass
+    from .logsetup import RunErrors
     try:
-        return _run_plan(plan, state, *args, **kwargs)
+        with RunErrors(state.dir):
+            return _run_plan(plan, state, *args, **kwargs)
     finally:
         try:
             if pidf.read_text().strip() == str(os.getpid()):

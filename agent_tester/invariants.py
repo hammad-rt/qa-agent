@@ -1,4 +1,4 @@
-"""Arithmetic the judge must not do itself: the pack's `invariants` (e.g. wallet W = L - U) are computed in code
+"""Arithmetic the judge must not do itself: the pack's `invariants` (e.g. balance = earned - used) are computed in code
 from the values a case recorded, and the result goes to the judge as a fact."""
 from __future__ import annotations
 

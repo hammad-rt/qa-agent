@@ -1,5 +1,5 @@
-"""Data preparation before a case: find a record the case can use (e.g. an unpaid shipping-only order),
-or create one, then check it is usable. Rules come from the pack's `data_prep` list. Staging/pre-prod only;
+"""Data preparation before a case: find a record the case can use (e.g. an unpaid order),
+or create one, then check it is usable. Generic: everything project-specific comes from the pack's rules. Rules come from the pack's `data_prep` list. Staging/pre-prod only;
 on production too (only for the pack test user; payments stay skipped there)."""
 from __future__ import annotations
 
@@ -41,25 +41,23 @@ def consumes(case, rule: dict) -> bool:
     return any(re.search(k, _case_text(case), re.I) for k in rule.get("consumed_by", []))
 
 
-_NO_REWARDS = r"without (any |the |savo )*rewards|no (savo )?rewards (applied|used)|(do not|don't|not) (apply|use) (any |savo )*rewards"
-
-
-def uses_rewards(case) -> bool:
-    """True when the case applies or redeems Savo Rewards; False for a plain card payment
-    (e.g. the case that pays without rewards to fill the wallet)."""
-    text = _case_text(case)
-    if re.search(_NO_REWARDS, text, re.I):
+def case_matches(case, cond: dict | None) -> bool:
+    """A pack condition on the case text: {when: [regex...], unless: [regex...]}. No condition = False."""
+    if not cond:
         return False
-    return bool(re.search(r"\breward|\bredeem|use up to|wallet", text, re.I))
+    text = _case_text(case)
+    if any(re.search(k, text, re.I) for k in cond.get("unless", [])):
+        return False
+    return any(re.search(k, text, re.I) for k in cond.get("when", []))
 
 
 def verify_text(case, v: dict) -> str:
-    """The check's text, with {rewards} filled for this case: the rewards-box condition only when the case
-    uses rewards."""
+    """The check's text with {condition} filled for this case from v['condition'] (then / else text)."""
     t = v["text"]
-    if "{rewards}" in t:
-        part = v.get("rewards" if uses_rewards(case) else "no_rewards", "")
-        t = t.replace("{rewards}", part.replace("{space}", " "))
+    c = v.get("condition") or {}
+    if "{condition}" in t:
+        part = c.get("then" if case_matches(case, c) else "else", "")
+        t = t.replace("{condition}", part.replace("{space}", " "))
     return t
 
 
@@ -86,7 +84,6 @@ def ensure_data(plan, case, state, testers: dict, rules: list[dict]) -> CaseResu
 
 
 _NONE = {"", "none", "no", "n/a", "na", "null", "not found", "nothing", "-"}
-_REWARDS_ONLY = re.compile(r"no savo rewards|rewards box|use up to|wallet|no rewards", re.I)
 
 
 def _is_none(v) -> bool:
@@ -139,7 +136,7 @@ def _call(tester, plan, state, rule, app, text, read_only, case_id, key):
 def _usable(rule, rec, used) -> bool:
     if _is_none(rec) or str(rec).strip() in {str(u) for u in used}:
         return False
-    if rule.get("min_value") is not None:                   # e.g. a wallet balance: negative or 0 is not enough
+    if rule.get("min_value") is not None:                   # e.g. a balance: negative or 0 is not enough
         n = _num(rec)
         return n is not None and n >= float(rule["min_value"])
     return True
@@ -153,7 +150,7 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
     key, value = rule["id"], rule["value"]
     have = store.get(key)
     if have and not have.get("consumed") and not _usable(rule, have.get("value"), []):
-        have = None                     # e.g. a resumed run that stored a negative wallet as "ready"
+        have = None                     # e.g. a resumed run that stored a negative balance as "ready"
     if have and not have.get("consumed"):
         state.values[value] = {"value": have["value"], "source": f"prep/{key}"}
         if have.get("record"):
@@ -169,20 +166,22 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
         return blocked(rule.get("blocked_note") or f"this preparation is not possible on {plan.env}")
     clients = rule.get("test_client")
     name = clients.get(plan.env) if isinstance(clients, dict) else clients
+    app = rule.get("app")
+    login_app = rule.get("client_login_app")       # whose picked login identifies the test client (e.g. the customer app)
     user = next((r.value for r in getattr(plan, "requirements", []) or []
-                 if r.key.startswith("account.portal.") and r.value), None)
+                 if r.value and (r.key.startswith(f"account.{login_app}.") if login_app
+                                 else r.key.startswith("account.") and not r.key.startswith(f"account.{app}."))), None)
     if not (name or user):
-        return blocked("no portal test user picked and no test client set for this environment; "
+        return blocked("no test user picked and no test client set for this environment; "
                        "the agent will not create orders for an unconfirmed account")
-    client = (f"{name} (the CRM client of portal login {user})" if name and user else name
-              or f"the CRM client whose portal login / email is {user}")
+    client = (f"{name} (the client of login {user})" if name and user else name
+              or f"the client whose login / email is {user}")
     for k in ("find", "create"):
         if rule.get(k):
             rule = {**rule, k: rule[k].replace("{client}", client or "")}
-    app = rule.get("app", "crm")
-    tester = testers.get(app)
+    tester = testers.get(app) if app else None
     if tester is None:
-        return blocked(f"no tester for {app}")
+        return blocked(f"no tester for {app}" if app else "this prep rule names no app")
     rejected = state.data.setdefault("prep_rejected", {}).setdefault(key, [])
     used = ([s["value"] for s in store.values() if s.get("consumed")] + [r["value"] for r in rejected]
             + list(rule.get("never_use", [])))
@@ -192,14 +191,14 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
     def rec_of(sr):
         return sr.values.get(value), sr.values.get(f"{value}_record")
 
+    hint = rule.get("record_hint") or "the record's id from the page URL"
     # 1. FIND: read-only, exact fit only. A near-fit is never edited to make it fit (that is what made prep loop).
     find = (f"FIND ONLY. This turn is read-only: open lists and records and read them; change nothing.\n"
             f"{rule['find']}\nDo not use: {skip or 'none'}.\n"
             f"Only an exact fit counts. Never edit, fix, re-status or add to a record to make it fit; a near-fit "
             f"is a 'none'. If one fits exactly, record_value('{value}', '<its number exactly as shown, with its "
-            f"letter prefix, e.g. A1142>') and record_value('{value}_record', '<the CRM record id from the page "
-            f"URL, the record=... part>'), then finish. An order with rewards still pending from an earlier run is "
-            f"still a fit (the check clears them). If none fits exactly, record_value('{value}', 'none') and finish. "
+            f"prefix, exactly as shown>') and record_value('{value}_record', '<{hint}>'), then finish. "
+            f"If none fits exactly, record_value('{value}', 'none') and finish. "
             f"Look at no more than the first two list pages.")
     sr = None
     try:
@@ -221,8 +220,8 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
             if not rule.get("create"):
                 return blocked(f"nothing fits and this rule has no create step. {(sr.notes or '') if sr else ''}".strip())
             create = (f"CREATE: {rule['create']}\nDo not reuse: {skip or 'none'}.\n"
-                      f"When it is done, record_value('{value}', '<the new number, with its letter prefix>') and "
-                      f"record_value('{value}_record', '<the CRM record id from the page URL, record=...>'), then "
+                      f"When it is done, record_value('{value}', '<the new number, exactly as shown>') and "
+                      f"record_value('{value}_record', '<{hint}>'), then "
                       f"finish. If you cannot finish it, call finish with notes starting 'BLOCKED:' saying where you "
                       f"stopped and the number of any record you created.")
             try:
@@ -242,12 +241,13 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
             break
         if verdict == "error":
             return blocked("check failed: " + why)
-        if verdict == "no" and uses_rewards(case) and _REWARDS_ONLY.search(why):
-            # the order is fine; it is the wallet that has nothing to redeem. Keep the order for other cases.
+        keep = (rule.get("verify") or {}).get("keep_record_if") or {}
+        if verdict == "no" and keep.get("reason") and re.search(keep["reason"], why, re.I) and (
+                not keep.get("only_when_condition") or case_matches(case, rule["verify"].get("condition"))):
+            # the record itself is fine; something else (named by the pack) is missing. Keep it for other cases.
             store[key] = {"value": rec, "record": record, "consumed": False, "for": case.id}
             state.save()
-            return blocked(f"{rec} is fine but the wallet has no usable rewards ({why}); the wallet needs a top-up "
-                           f"first (pay an order and deliver it, or add rewards by hand)")
+            return blocked(f"{rec} is fine but {keep.get('note', 'something else it needs is missing')} ({why})")
         rejected.append({"value": rec, "why": why or verdict})
         used.append(rec)
         skip = (skip + ", " if skip else "") + f"{rec} ({(why or verdict)[:80]})"
@@ -270,7 +270,8 @@ def _verify(plan, case, state, testers, rule, rec, record, key) -> tuple[str, st
     """Ask the check app whether the record is usable. ('yes'|'no'|'unclear'|'error', reason).
     An answer that is not a plain yes / no is asked once more."""
     v, value = rule["verify"], rule["value"]
-    vt = testers.get(v.get("app", "portal"))
+    check_app = v.get("app") or rule.get("app")
+    vt = testers.get(check_app)
     if vt is None:
         return "yes", ""
     text = (verify_text(case, v).replace("{value}", str(rec)).replace("{record}", str(record or "unknown")) +
@@ -278,7 +279,7 @@ def _verify(plan, case, state, testers, rule, rec, record, key) -> tuple[str, st
             f"Record exactly 'yes' or 'no: <why>' as {value}_ok, never a number or amount from the page.")
     for n in range(2):
         try:
-            vr = _call(vt, plan, state, rule, v.get("app", "portal"), text, True, f"PREP-{key}-check", key)
+            vr = _call(vt, plan, state, rule, check_app, text, True, f"PREP-{key}-check", key)
         except Exception as e:  # noqa: BLE001
             from .logsetup import short_error
             return "error", short_error(e, f"data prep {key} check")

@@ -34,7 +34,7 @@ class Step(BaseModel):
 
 
 class Requirement(BaseModel):
-    key: str                          # "env.staging.portal", "account.crm.admin", "data.rewards_balance"
+    key: str                          # "env.staging.portal", "account.crm.admin", "data.account_balance"
     kind: Literal["url", "account", "data", "config", "other"] = "other"
     needed_by: list[str] = Field(default_factory=list)
     must_have: list[str] = Field(default_factory=list)
@@ -52,7 +52,7 @@ class PlannedCase(BaseModel):
     id: str
     title: str
     type: CaseType = CaseType.UI
-    area: str | None = None           # memory area (rewards, parcels...) for loading lessons
+    area: str | None = None           # memory area (checkout, accounts...) for loading lessons
     preconditions: list[str] = Field(default_factory=list)
     depends_on: list[str] = Field(default_factory=list)
     steps: list[Step] = Field(default_factory=list)

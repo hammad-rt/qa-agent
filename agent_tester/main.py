@@ -8,7 +8,7 @@
   report <run_dir>                    rebuild report.html / report.pdf and bug drafts
   bugs <run_dir> [--post]             list bug drafts; --post asks before posting each one to Redmine
   correct <run_dir> <case_id> <VERDICT> "<why>" [--general]   save a lesson now and fix the result
-  memory list|pending|approve <ids>|retire <ids> [--project savostore]
+  memory list|pending|approve <ids>|retire <ids> [--project <pack>]
   leftovers <run_dir>                 test data and settings the run left behind
 """
 from __future__ import annotations
@@ -957,6 +957,18 @@ def _safe(what: str, fn, *a, **kw):
         return None
 
 
+def default_project(settings) -> str | None:
+    """QA_PROJECT, or the only pack in packs/ (the agent is generic; no project is built in)."""
+    if os.environ.get("QA_PROJECT"):
+        return os.environ["QA_PROJECT"]
+    try:
+        packs = [d.name for d in Path(settings.packs_dir).iterdir()
+                 if d.is_dir() and not d.name.startswith((".", "_")) and (d / "pack.yaml").exists()]
+    except OSError:
+        return None
+    return packs[0] if len(packs) == 1 else None
+
+
 def main(argv=None) -> int:
     from . import logsetup
     logsetup.setup()
@@ -1026,15 +1038,15 @@ def _main(argv=None) -> int:
     m = sub.add_parser("memory")
     m.add_argument("action", choices=["list", "pending", "approve", "retire"])
     m.add_argument("ids", nargs="*", type=int)
-    m.add_argument("--project", default="savostore")
+    m.add_argument("--project")
     ev = sub.add_parser("eval", help="replay self-test against past reports")
-    ev.add_argument("--project", default="savostore")
+    ev.add_argument("--project")
     ev.add_argument("--live", action="store_true", help="use the real judge (needs the LLM)")
     ev.add_argument("--rebuild", action="store_true", help="re-extract known answers from evals/source/*.pdf")
     ev.add_argument("--cases", help="only these case ids")
     hp = sub.add_parser("helpers", help="list helpers, or recipes worth turning into helpers")
     hp.add_argument("action", choices=["list", "candidates"])
-    hp.add_argument("--project", default="savostore")
+    hp.add_argument("--project")
     ob = sub.add_parser("onboard", help="draft a pack for a new project from Redmine")
     ob.add_argument("ref", help="Redmine issue id, project id or project identifier")
     ob.add_argument("--slug")
@@ -1080,6 +1092,11 @@ def _main(argv=None) -> int:
     if a.cmd == "web":
         from .web.server import serve
         return serve(a.host, a.port)
+    if hasattr(a, "project") and not a.project and a.cmd in ("memory", "eval", "helpers"):
+        a.project = default_project(settings)
+        if not a.project:
+            print("Error: say which project with --project <pack> (or set QA_PROJECT).", file=sys.stderr)
+            return 2
     if a.cmd == "report":
         return cmd_report(settings, a.run_dir, a.project)
     if a.cmd == "bugs":

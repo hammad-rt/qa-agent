@@ -114,9 +114,18 @@ def _intent_sig(name: str, args: dict) -> str | None:
     return None
 
 
-def _settle_seconds(app: str = "") -> float:
-    if app == "crm":                                  # CRM subpanels/wallet totals load ~8 s late
-        return float(os.environ.get("TESTER_SETTLE_SECONDS_CRM", "10"))
+def _settle_seconds(app: str = "", pack=None) -> float:
+    """Seconds to let a page settle after an action before reading it: TESTER_SETTLE_SECONDS_<APP>, else the
+    pack's apps.<app>.settle_seconds (slow back-office screens), else TESTER_SETTLE_SECONDS (default 4)."""
+    app = app if isinstance(app, str) else ""
+    name = re.sub(r"\W", "_", app).upper()
+    env = os.environ.get("TESTER_SETTLE_SECONDS_" + name) if app else None
+    if env:
+        return float(env)
+    apps = getattr(pack, "apps", None) if pack is not None else None
+    conf = apps.get(app) if isinstance(apps, dict) else None
+    if isinstance(conf, dict) and isinstance(conf.get("settle_seconds"), (int, float)):
+        return float(conf["settle_seconds"])
     return float(os.environ.get("TESTER_SETTLE_SECONDS", "4"))
 
 
@@ -395,9 +404,9 @@ class TesterSession:
         def record_value(name: str, raw_text: str, source: str) -> dict:
             """Record a value exactly as read on the page. raw_text is the text you saw, e.g. "$1,234.50"."""
             try:
-                # IDs like A1142 / B1465 stay text: only plain amounts become numbers
+                # IDs like A1142 / INV-0042 stay text: only plain amounts become numbers
                 v = raw_text.strip() if re.search(r"[A-Za-z]\d|\d[A-Za-z]|^[A-Za-z]{1,3}-?\d+$", raw_text.strip()) \
-                    and not re.match(r"^(USD|KES|EUR|GBP|PKR)\b", raw_text.strip(), re.I) else V.parse_money(raw_text)
+                    and not re.match(r"^[A-Z]{3}\s?[\d$]", raw_text.strip()) else V.parse_money(raw_text)
             except ValueError:
                 v = raw_text
             V.record(s.state.values, name, v, source=f"{s.case_id}/{s.app}: {source}")
@@ -560,7 +569,7 @@ class TesterSession:
             return out
 
         def recall_lessons(query: str) -> dict:
-            """Search saved lessons, recipes and known bugs for this project, e.g. "rewards apply button"."""
+            """Search saved lessons, recipes and known bugs for this project, e.g. "discount apply button"."""
             if s.memory is None:
                 return {"lessons": []}
             return {"lessons": [{"id": r["id"], "kind": r["kind"], "text": r["text"]} for r in s.memory.recall(query)]}
@@ -724,7 +733,7 @@ class TesterSession:
             self.state.checkpoint(f"{self.case_id} ({self.app}): guidance from the user delivered to the agent")
             return {"error": f"{note}\nYour {name} call was NOT run. Follow the guidance, then call it again "
                              "if it still fits."}
-        settle = _settle_seconds(getattr(self, "app", ""))
+        settle = _settle_seconds(getattr(self, "app", ""), getattr(self, "pack", None))
         now = time.monotonic()
         last_act, last_snap = getattr(self, "_last_act", 0.0), getattr(self, "_last_snap", 0.0)
         if name in ACTING_TOOLS:

@@ -4,17 +4,17 @@ PLANNER = """You plan QA test runs for a Redmine task. Output ONLY JSON matching
 
 Shape (use exactly these field names; omit fields you don't need, they have defaults):
 {{"task_id": 123, "cases": [
-  {{"id": "TC1", "title": "short title", "type": "ui|cross|numeric|setup|admin|not_ui", "area": "rewards",
+  {{"id": "TC1", "title": "short title", "type": "ui|cross|numeric|setup|admin|not_ui", "area": "checkout",
    "preconditions": ["..."], "depends_on": [], "expected": "the task's expected result",
-   "evidence_required": ["screenshot of ..."], "values_to_record": ["wallet_before"],
+   "evidence_required": ["screenshot of ..."], "values_to_record": ["balance_before"],
    "steps": [
-     {{"text": "Log in to the portal as the customer", "app": "portal", "inferred": true,
+     {{"text": "Log in to the web app as the customer", "app": "web", "inferred": true,
       "inferred_reason": "the task assumes a logged-in user", "inferred_source": "facts.md"}},
-     {{"text": "Apply 50 reward points at checkout", "app": "portal", "changes_data": true, "action_type": "apply_rewards"}}
+     {{"text": "Apply a 10% discount code at checkout", "app": "web", "changes_data": true, "action_type": "apply_discount"}}
    ]}}],
- "requirements": [{{"key": "env.staging.portal", "kind": "url", "needed_by": ["TC1"]}},
-                  {{"key": "account.portal.customer", "kind": "account", "needed_by": ["TC1"]}}],
- "preapprovable_actions": ["apply_rewards"]}}
+ "requirements": [{{"key": "env.staging.web", "kind": "url", "needed_by": ["TC1"]}},
+                  {{"key": "account.web.customer", "kind": "account", "needed_by": ["TC1"]}}],
+ "preapprovable_actions": ["apply_discount"]}}
 Keep step texts short. `requirements` is a LIST of objects with a `key`; never put URLs or usernames in it.
 
 Rules:
@@ -46,7 +46,7 @@ Rules:
 - requirements: list what the run needs, as keys:
     env.<env>.<app>         (URL of an app on an environment)
     account.<app>.<role>    (login with a role)
-    data.<name>             (test data, e.g. data.rewards_balance_100)
+    data.<name>             (test data, e.g. data.account_balance_100)
   The fixed code resolves them; do not guess values.
 - preapprovable_actions: action types this run will repeat (only from the list above).
 
@@ -113,17 +113,17 @@ TESTER = """You are the tester for the {app_label} app ({base_url}) on {env}. Do
 - If the app does not offer something a step needs (e.g. a currency, a payment method such as M-Pesa, a button that
   is not there for this order), do not keep trying: call finish(notes="BLOCKED: <what is missing and where you looked>").
 - After clicking or applying something, values can show wrong for a few seconds: take a fresh snapshot before
-  record_value, and if a value looks wrong (e.g. "no rewards"), reload once and read again before reporting it. In the CRM, an empty subpanel (e.g. Rewards Redeemed) or wallet total right after a change means it has not loaded yet: reload and read again before recording it.
+  record_value, and if a value looks wrong (e.g. "none" or 0), reload once and read again before reporting it. An empty list, subpanel or total right after a change usually means it has not loaded yet: reload and read again before recording it.
 - If a click or script leaves the page unchanged, never repeat it. Take a fresh snapshot, re-read the page and reach the step's goal another way (another button with the same purpose, a direct URL). Once that works, call propose_memory with the route as a recipe.
 - Never guess a flow, URL, field or button. Before each action, read the page (browser_snapshot) and act only on
   what is actually there. If the knowledge base has a recipe or UI map for this flow, follow it and check each
   step against the page. If it has none, explore: open visible menus and labels one at a time, read what each
   page offers, and pick the control whose visible text matches the goal. Never type a URL you have not seen on
   a page or in the knowledge base.
-- A step may name test data by a placeholder in capitals (ORDER-MULTI, ORDER-EARN, ORDER-KES). That is the record
-  prepared for this case in values_so_far (for example test_order with its CRM id test_order_record); never
-  search a page for the placeholder text. If the placeholder asks for something the prepared record lacks (for
-  example a KES order and the prepared one is USD), finish with notes "BLOCKED: <what is missing>".
+- A step may name test data by a placeholder in capitals (e.g. ORDER-A, USER-B). That is the record prepared for
+  this case in values_so_far (a value and its <name>_record id); never search a page for the placeholder text.
+  If the placeholder asks for something the prepared record lacks (for example another currency or type),
+  finish with notes "BLOCKED: <what is missing>".
 - When you work out a flow that had no recipe, call propose_memory("recipe", "<page> -> <click/label> -> ...")
   with the exact labels you used, so the next run reads it instead of exploring again. If exploring does not
   reveal the way, finish with notes "BLOCKED: no known path to <goal>; looked at <pages>".
@@ -174,7 +174,7 @@ values, messages, headings). Treat it as a real observation: e.g. a textbox show
 verifies masking, and an error/alert line verifies a validation message. Use it before calling a case NOT VERIFIED.
 
 Shape: {{"case_id": "TC1", "verdict": "FAIL", "known_bug": null, "expected": "...", "actual": "what really happened",
-"values": {{"wallet_after": 60}}, "evidence": ["TC1-01-wallet.png"], "note": "...", "lessons_applied": [],
+"values": {{"balance_after": 60}}, "evidence": ["TC1-01-balance.png"], "note": "...", "lessons_applied": [],
 "severity": "High", "bug_title": "one line"}}
 
 Verdicts: PASS, FAIL, PARTIAL, BLOCKED, NOT VERIFIED, SKIPPED, AGENT INCOMPLETE.

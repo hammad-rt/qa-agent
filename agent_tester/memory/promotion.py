@@ -16,7 +16,7 @@ from .store import MemoryStore
 def generalize(text: str, project_words: list[str] = ()) -> str:
     t = re.sub(r"#\d+", "the task", text)
     t = re.sub(r"\b[A-Z]{1,3}\d{3,}\b", "the record", t)
-    t = re.sub(r"(?:\$|KES\s?)\s?\d[\d,]*(?:\.\d+)?", "an amount", t)
+    t = re.sub(r"(?:\$|\b[A-Z]{3}\s?)\s?\d[\d,]*(?:\.\d+)?", "an amount", t)
     t = re.sub(r"\(verdict should be .*?\)", "", t)
     for w in project_words:
         if w:

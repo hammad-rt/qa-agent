@@ -149,6 +149,7 @@ rewards, cap(s) = R% x unpaid shipping s.
 **R3 Apply/remove rewards (portal):** type the amount, click Apply, wait 3-5 s before reading. Remove with the X, then wait again. An amount over the cap is rejected with a message that disappears after a few seconds (read it right away).
 **R4 Stripe (staging only):** Pay By Card -> `/shipping-only/stripe/<id>?appliedRewards=N` -> click the second "Pay by Card" -> on Stripe choose USD -> card 4242 4242 4242 4242, expiry 12/34, CVC 123, cardholder name (required). For B6, leave Stripe without paying and check the wallet did not drop.
 **R5 Wallet check:** portal wallet balance; CRM Contacts > <client> -> Total Rewards, Current Rewards, Rewards Used (wait ~10 s, reload if empty). Redemptions are in the order's Rewards Redeemed subpanel.
+- In the CRM, an empty Rewards Redeemed subpanel or wallet total right after a change means it has not loaded yet: reload and read again before recording it.
 **R6 Admin redemption:** CRM order -> Rewards Redeemed subpanel -> Create -> Redeemed Rewards <= Applicable Rewards -> Save. On A1142 this returned HTTP 500: after two failures take a screenshot and record FAIL.
 **R7 Earn rewards (staging only):** pay an order (R4) -> CRM: set it to Order Delivered (earn = 5% of shipping after rewards). To earn faster raise the earn % under Administration > Rewards panel, then restore 5% earn / 10% redeem.
 - Not verified: creating a brand-new order of either type. Explore it from the page and propose a recipe.

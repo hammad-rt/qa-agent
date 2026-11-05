@@ -73,11 +73,21 @@ class PrepSplit(unittest.TestCase):
         self.assertIn("not a yes or no", f.calls[-1][2])
 
     def test_empty_wallet_keeps_the_order(self):
-        r, st, f = run(RULE, {"find": [{"test_order": "A1"}],
+        rule = dict(RULE, verify=dict(RULE["verify"], condition={"when": ["rewards"]},
+                                      keep_record_if={"reason": "no savo rewards", "only_when_condition": True,
+                                                      "note": "the wallet is empty"}))
+        r, st, f = run(rule, {"find": [{"test_order": "A1"}],
                               "check": [{"test_order_ok": "no: you have no savo rewards at the moment"}]})
         self.assertEqual(r.verdict, "BLOCKED")
         self.assertIn("wallet", r.note)
         self.assertFalse(st.data["prep"]["o"]["consumed"])
+
+    def test_no_keep_rule_means_no_keep(self):
+        # without the pack's keep_record_if the agent has no project knowledge: a "no" is just a reject
+        r, st, f = run(RULE, {"find": [{"test_order": "A1"}, {"test_order": "none"}],
+                              "check": [{"test_order_ok": "no: you have no savo rewards at the moment"}],
+                              "create": [{"test_order": "none"}, {"test_order": "none"}]})
+        self.assertTrue(r is None or "wallet" not in (r.note or ""))
 
     def test_negative_wallet_is_not_ready(self):
         r, st, f = run(WALLET, {"find": [{"wallet_ready": "-0.22"}], "create": [{"wallet_ready": "12.5"}]})

@@ -86,6 +86,31 @@ CRM base https://staging5.rolustech.com:4220/index.php
 - Timing: apply/remove takes 3-5s; the rewards box shows a false "no rewards"/"up to $15.00" for 1-2s on load; CRM subpanels update ~8s late. Wait and recheck before any verdict.
 - Stripe path: Pay By Card > /shipping-only/stripe/<id>?appliedRewards=N > second "Pay by Card" > Stripe; choose USD; test card from the Payments section.
 
+## E0 and E1 (earn) — how to run them
+- Soft dependency (agent code, 2026-11-05): if E0 fails only as a known open bug still present (e.g. bug 4 wallet
+  drift), later cases including E1 still run. E1 is blocked only when E0 failed in a way that breaks E1's own
+  preconditions (login, wrong contact, or no readable W0).
+- Known bug 4 is pre-existing wallet drift: Total (L) and Used (U) disagree with Current (W), including U > L.
+  Portal Current matching CRM Current (W0) can still be true. That match meets E0's baseline expected; the drift
+  itself is PARTIAL / still-present bug 4, not a reason to skip earn cases.
+- E1 must check its own preconditions before the earn steps (do not assume E0 left them true):
+  1. Savo Rewards enabled on the CRM contact (`sav_rewards_enabled`).
+  2. A Shipping Only order (`AOS_Invoices`) that is fully paid (linked payment, balance <= 0). Prefer Shipping Only
+     over Buy & Ship: SO can re-earn on a later Order Delivered; B&S earns once and never again.
+  3. The order is not already at Order Delivered (or move it away, save, then set Order Delivered again).
+  If any of these is missing, finish with notes starting `BLOCKED:` and the missing precondition — do not call it FAIL.
+- Assert the wallet delta, not a guessed absolute: read L0, W0, U0 on the contact before the status change; after
+  Order Delivered, expect L1 = L0 + E and W1 = W0 + E where E = round_down_to_whole(earn% × (shipping − rewards
+  redeemed on that order)). Earn % is the order's own field if set, else Admin Savo Rewards (normally 5). Portal
+  Current must match CRM W1.
+- Stage client: portal login is the CRM contact Hammad Iqbal (`hammad.iqbal@rolustech.com`), never "Sidney Test".
+  Match by the orders the contact owns.
+- Payments for earn: Stripe test card 4242 only. Never M-Pesa.
+- Admin Savo Rewards earn %: change only with approval; record the original; restore and re-read after the case.
+- Admin pages (Repair, Savo Rewards): open from Administration index. A typed module URL gives an XSRF error.
+- After a deploy on staging: Admin → Repair → Quick Repair and Rebuild, clear browser cache, hard-reload each
+  EditView/DetailView before the first earn or rewards case. Stale JS has hidden new code (#184813).
+
 ## Savo Rewards: expected behaviour (#165177, #165348, #183737; from the rewards cases file, 2026-11-04)
 Notation: E% earn %, R% redeem cap %, FX USD to KES rate, W / L / U = the contact's Current / Total (lifetime) / Used
 rewards, cap(s) = R% x unpaid shipping s.
@@ -162,7 +187,7 @@ rewards, cap(s) = R% x unpaid shipping s.
 1. [Critical] Portal rewards are committed (Used, wallet deducted) when Stripe checkout opens, not after payment. Abandoning checkout burns rewards.
 2. [High] "You can use up to" and the replacement limit are computed on the rewards-reduced amount: $60 applied on $1,000 shows $34 (expected $40); $15 on $400 unpaid shows $23.50 (expected $25). Confirmed real by the user.
 3. [High] CRM admin Rewards Redeemed saves as Applied; wallet not deducted on save; Used never incremented; status never becomes Used.
-4. [High] Pre-existing wallet drift: Current balance below Total minus Used (20.50, grew to 120.50).
+4. [High] Pre-existing wallet drift: Current (W) disagrees with Total minus Used (L − U), including cases where Used > Total (e.g. L=1.25, U=1.47, W=0). Portal Current may still match CRM Current.
 5. [Medium] Portal apply does not persist when an admin redemption already exists on the order.
 6. [Medium] Stale values on the first reload after apply.
 7. [Medium] Buy & Ship: only M-Pesa offered, the exact decimal maximum is rejected, the total label does not update.

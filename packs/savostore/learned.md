@@ -69,3 +69,7 @@ Edit or delete freely; wrong lines are worse than none.
 ## portal:portal
 - Behaviour: Desktop field order: The field order matches the expectation: Recipient's Name -> Phone Number | Recipient's email -> Warning paragraph -> Street | Nearest Landmark -> City | County/State -> Postal Code | Country. (2026-11-04, 184815.TC2)
 - Route: open / (2026-11-04, 184815.TC2 reached)
+
+## rewards:crm
+- Behaviour: E0 known bug 4 (L/U drift) does not block E1; continue with W0 from Current and assert the earn delta after Order Delivered. (2026-11-05, facts)
+- Behaviour: E1 setup: before Order Delivered, confirm sav_rewards_enabled on the contact, a fully paid Shipping Only order (balance <= 0), and status not already Order Delivered. Assert delta E = whole(earn% x (shipping - redeemed)) on Total and Current. Prefer SO over B&S because SO can re-earn. (2026-11-05, facts)

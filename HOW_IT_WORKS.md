@@ -63,23 +63,24 @@ math, reports and approval gates. The agent never guesses field names, labels or
 
 ## 4. Memory and knowledge base
 
+Three kinds of memory (detail: `docs/stack/redmine-memory.md`):
+
+| Kind | Where | Notes |
+|---|---|---|
+| Stable rules (`fact`) | SQLite, project scope for app rules | Date + who decided (`source` / `decided_by`). Agent-proposed rules need approval. |
+| Lessons (`lesson` / `recipe`) | SQLite (`core` or `project:<slug>`) | Lasting after user confirm or ≥2 run confirmations. |
+| Per-run log | Run folder + `memory/run-history/` | Ledger original→changed→restored; never lasting facts. |
+
 | Store | What | Who maintains it |
 |---|---|---|
 | `packs/<project>/facts.md`, `pack.yaml` | How the app works, business rules, known bugs, stack | People, edited in git. The AI only reads them. |
-| `memory/memory.db` (SQLite) | Long-term memory: facts, lessons, recipes, known bugs, bugs it found, saved answers | Code. New items wait for approval. |
-| `packs/<project>/learned.md` | Routes to each screen and behaviours checked, by area of the app | Written by code after every run. Editable. Wrong lines should be deleted. |
+| `memory/memory.db` (SQLite) | Source of truth for lasting facts, lessons, recipes, bugs | Code. Proposals wait for approval (or ≥2 confirmations for lessons/recipes). |
+| `packs/<project>/learned.md` | Routes / Stuck / Discovery only (scrubbed of env details) | Written by code. Not dumped into the LLM — only a few ranked lines for the current area. |
 | `packs/<project>/docs/<app>.md` | Passages from the official stack docs it looked up | Saved the first time it needs them and read offline after that. |
 
-**How memory.db works**
-- Each row applies either to all projects or to one project. It carries its kind, source, linked ticket, status (active, proposed, needs recheck, retired), and counts of how often it worked or failed.
-- **Search:** by keyword with SQLite full-text search. If `nomic-embed-text` is available in Ollama, it also searches by meaning.
-- **Before a run:** the matching lessons are loaded into the tester's and judge's instructions, up to a size limit.
-- **How items are added:**
-  - `agent_tester correct <run> <case> <VERDICT> "why"` turns a corrected verdict into a lesson.
-  - Items found during a run are saved as *proposed*, and you approve them at the end of the run or with `agent_tester memory pending|approve|retire`.
-  - A lesson is shared across all projects only with approval, after names specific to the project are removed.
-- **Keeping it current:** a bug linked to a Redmine ticket is flagged for a recheck once that ticket is closed. Wrong items are retired, not deleted.
-- **Backup:** after each run it's exported to a plain-text file so it can be kept in git. Secrets are never stored, only the names of the environment variables.
+**Lean injection:** each turn gets a small ranked memory block (`MEMORY_TURN_TOKEN_BUDGET`, default ~1200 tokens), cached per area:app for the run. More detail is on-demand via `recall_lessons`. Retrieval is code-side (no extra LLM). End-of-run retrospective is built from the action log in code.
+
+**Env details** (emails, logins, URLs, record ids, passwords) are refused at write time and never kept as lasting memory; URLs/accounts come from pack / `.env` / this run’s answers.
 
 **Test data ledger:** every data change a run makes (the record and its old and new values) is written to the run's ledger, so it can be restored at the end.
 

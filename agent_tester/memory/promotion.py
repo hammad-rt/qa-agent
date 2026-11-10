@@ -2,13 +2,14 @@
 
 A lesson becomes a candidate when the user marked it general, or a similar lesson exists in another
 project. Project business rules (kind `fact`) are never promoted. The core text drops project
-numbers, order IDs, money amounts and names.
+numbers, order IDs, money amounts and names. Env details are refused at promote time.
 """
 from __future__ import annotations
 
 import re
 
 from .embed import cosine
+from .env_guard import assert_safe_lasting
 from .service import jaccard
 from .store import MemoryStore
 
@@ -52,4 +53,6 @@ def promote(store: MemoryStore, mid: int, approved_text: str) -> int:
     src = store.get(mid)
     if src is None or src["kind"] not in ("lesson", "recipe"):
         raise ValueError("only lessons and recipes can be promoted")
-    return store.add(src["kind"], "core", approved_text, f"promotion:{mid}", area=src["area"], applies_when=None)
+    text = assert_safe_lasting(approved_text, context="promotion")
+    return store.add(src["kind"], "core", text, f"promotion:{mid}", area=src["area"], applies_when=None,
+                     status="active", confirm_count=1)

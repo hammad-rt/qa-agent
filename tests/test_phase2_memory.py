@@ -68,7 +68,10 @@ class StoreTests(Base):
     def test_preload_cap(self):
         for i in range(50):
             self.store.add("lesson", "project:savostore", f"lesson {i} " + "x" * 200, "user_correction")
-        self.assertLess(len(self.mem.preload(char_cap=1000)), 10)
+        rows = self.mem.preload(char_cap=1000)
+        self.assertLess(len(rows), 10)
+        from agent_tester.memory.retrieve import tokens_of
+        self.assertLessEqual(tokens_of(self.mem.as_prompt(rows)), 1000 // 4 + 50)
 
     def test_export(self):
         self.store.add("lesson", "core", "a", "user_correction")
@@ -134,31 +137,38 @@ class LearningTests(Base):
 
 
 class ResourceTests(Base):
-    def test_gap_answers_saved_and_stale(self):
+    def test_gap_urls_not_lasting_memory(self):
+        """URLs are confirmed for this run only — never written as lasting memory values."""
+        import tempfile
+        from agent_tester.memory.prefs import RunPrefs
+        prefs_dir = Path(self.tmp.name)
+        # Patch prefs path used by gap_resolver via env-free temp file: monkey by writing default after.
         ctx = G.GapContext(pack=self.pack, env="uat", memory=self.mem, wiki_texts={}, task_text="",
-                           url_checker=lambda u: True, allow_hosts=[])
+                           url_checker=lambda u: True, allow_hosts=["uat.example.com"])
         r = G.resolve([Requirement(key="env.uat.portal")], ctx)[0]
         G.apply_answers([r], {"env.uat.portal": "https://uat.example.com/"}, ctx, None, lambda *a: None)
-        self.assertEqual(self.mem.get("project:savostore", "env.uat.portal")["value"], "https://uat.example.com/")
-        # URL stops responding: memory row goes to needs_recheck and the user is asked again
-        ctx.url_checker = lambda u: False
-        r2 = G.resolve([Requirement(key="env.uat.portal")], ctx)[0]
-        self.assertNotEqual(r2.status, "resolved")
-        self.assertIsNone(self.mem.get("project:savostore", "env.uat.portal"))
-        self.assertIsNotNone(r2.question)
+        self.assertEqual(r.status, "resolved")
+        self.assertEqual(r.value, "https://uat.example.com/")
+        # No lasting URL value in SQLite
+        row = self.mem.get("project:savostore", "env.uat.portal")
+        self.assertTrue(row is None or row.get("value") in (None, ""))
 
-    def test_secret_never_stored(self):
+    def test_secret_env_name_only(self):
         self.mem.put("project:savostore", "account.crm.admin", "maria.tariq", "user", secret_env="SAVOSTORE_CRM_PASSWORD")
         g = self.mem.get("project:savostore", "account.crm.admin")
         self.assertEqual(g["secret_env"], "SAVOSTORE_CRM_PASSWORD")
+        self.assertIsNone(g["value"])
 
-    def test_import_json(self):
+    def test_import_json_drops_values(self):
         import json
         p = Path(self.tmp.name) / "resources.json"
-        p.write_text(json.dumps([{"scope": "project:savostore", "key": "env.uat.crm", "value": "https://u/", "source": "user"}]))
+        p.write_text(json.dumps([{"scope": "project:savostore", "key": "env.uat.crm", "value": "https://u/",
+                                  "source": "user", "secret_env": "X"}]))
         self.assertEqual(self.mem.import_resources_json(p), 1)
         self.assertFalse(p.exists())
-        self.assertEqual(self.mem.get("project:savostore", "env.uat.crm")["value"], "https://u/")
+        g = self.mem.get("project:savostore", "env.uat.crm")
+        self.assertIsNone(g["value"])
+        self.assertEqual(g["secret_env"], "X")
 
 
 class PromotionTests(Base):

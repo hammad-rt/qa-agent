@@ -154,8 +154,14 @@ class GapTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.mem = ResourceMemory(Path(self.tmp.name) / "res.json")
         self.pack = load_pack(PACK)
+        self._old_prefs = os.environ.get("MEMORY_PREFS_PATH")
+        os.environ["MEMORY_PREFS_PATH"] = str(Path(self.tmp.name) / "prefs.json")
 
     def tearDown(self):
+        if self._old_prefs is None:
+            os.environ.pop("MEMORY_PREFS_PATH", None)
+        else:
+            os.environ["MEMORY_PREFS_PATH"] = self._old_prefs
         self.tmp.cleanup()
 
     def ctx(self, env="staging", wiki=None, task="", checker=lambda u: True, pack=None):
@@ -184,33 +190,40 @@ class GapTests(unittest.TestCase):
         G.apply_answers([r], {"env.uat.portal": "https://uat.example.com/"}, ctx, None, lambda *a: None)
         self.assertEqual(r.status, "resolved")
         self.assertIn("uat.example.com", ctx.allow_hosts)
-        # next run finds it in memory
+        # URLs are not lasting memory — the next resolve asks again (or uses pack/wiki).
         r2 = G.resolve([Requirement(key="env.uat.portal")], ctx)[0]
-        self.assertEqual(r2.status, "resolved")
-        self.assertTrue(r2.source.startswith("memory"))
+        self.assertEqual(r2.status, "missing")
+        self.assertIsNotNone(r2.question)
 
     def test_account_secret_flow(self):
         os.environ.pop("SAVOSTORE_CRM_PASSWORD", None)
         ctx = self.ctx()
         r = G.resolve([Requirement(key="account.crm.admin")], ctx)[0]
         self.assertEqual(r.status, "missing")
-        self.assertEqual(r.secret_env, "SAVOSTORE_CRM_PASSWORD__ADMIN")
+        # ask-each-run: default from pack.yaml username (admin on staging)
+        self.assertEqual(r.default, "admin")
         self.assertEqual(r.must_have, ["Admin"])
         stored = {}
 
         def write(name, val):
             stored[name] = val
             os.environ[name] = val
-        G.apply_answers([r], {}, ctx, secret_prompt=lambda p: "s3cret", write_secret=write)
+        G.apply_answers([r], {"account.crm.admin": "admin"}, ctx,
+                        secret_prompt=lambda p: "s3cret", write_secret=write)
         self.assertEqual(r.status, "resolved")
-        self.assertNotIn("s3cret", (Path(self.tmp.name) / "res.json").read_text())
+        # Password goes to .env via write_secret; never into lasting memory / prefs JSON.
+        prefs = Path(self.tmp.name) / "prefs.json"
+        self.assertNotIn("s3cret", prefs.read_text() if prefs.exists() else "")
+        self.assertIn("s3cret", stored.values())  # write_secret received it (as .env would)
         os.environ.pop("SAVOSTORE_CRM_PASSWORD", None)
+        os.environ.pop("SAVOSTORE_CRM_PASSWORD__ADMIN", None)
 
     def test_data_requirement(self):
         ctx = self.ctx()
         r = G.resolve([Requirement(key="data.rewards_balance_100")], ctx)[0]
         self.assertEqual(r.status, "missing")
-        G.apply_answers([r], {"data.rewards_balance_100": "customer sidney has $120"}, ctx, None, lambda *a: None)
+        # data.* answers live in local prefs for this machine, not lasting SQLite facts
+        G.apply_answers([r], {"data.rewards_balance_100": "customer has enough balance"}, ctx, None, lambda *a: None)
         self.assertEqual(G.resolve([Requirement(key="data.rewards_balance_100")], ctx)[0].status, "resolved")
 
 

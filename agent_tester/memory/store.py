@@ -1,8 +1,14 @@
-"""Long-term memory in SQLite (tech spec section 7). Rows are scoped `core` or `project:<slug>`.
+"""Long-term memory in SQLite. Rows are scoped `core` or `project:<slug>`.
 
-Kinds: fact | lesson | recipe | known_bug | open_bug_found | resource
-Status: active | proposed | needs_recheck | retired   (proposed = waiting for approval at end of run)
-Secrets are never stored: resources keep only the env var name in secret_env.
+Three lasting kinds of knowledge (see docs):
+  - fact   — stable rules (project scope for app rules; date + source/decided_by)
+  - lesson / recipe — lessons from runs; lasting once confirmed (≥2 runs) or user-approved
+  - known_bug / open_bug_found — bugs
+
+`resource` may only store secret_env *names*, never env values (URLs, logins, ids).
+Per-run logs and retrospectives live with the run, never as standing facts.
+
+Status: active | proposed | needs_recheck | retired
 """
 from __future__ import annotations
 
@@ -14,6 +20,7 @@ from pathlib import Path
 
 from ..redact import redact, scrub_secrets
 from .embed import Embedder, cosine, pack_vec, unpack_vec
+from .env_guard import EnvDetailError, assert_safe_lasting, is_env_resource_key, scrub_env_details
 
 KINDS = {"fact", "lesson", "recipe", "known_bug", "open_bug_found", "resource"}
 STATUSES = {"active", "proposed", "needs_recheck", "retired"}
@@ -41,6 +48,12 @@ CREATE TRIGGER IF NOT EXISTS mem_au AFTER UPDATE OF text, area, applies_when ON 
 END;
 """
 
+_EXTRA_COLS = {
+    "confirm_count": "INTEGER NOT NULL DEFAULT 0",
+    "env_at_confirm": "TEXT",
+    "decided_by": "TEXT",
+}
+
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -57,39 +70,101 @@ class MemoryStore:
         self.db = sqlite3.connect(self.path)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        self._migrate()
         self.embedder = embedder
+
+    def _migrate(self) -> None:
+        have = {r[1] for r in self.db.execute("PRAGMA table_info(memories)")}
+        for col, decl in _EXTRA_COLS.items():
+            if col not in have:
+                self.db.execute(f"ALTER TABLE memories ADD COLUMN {col} {decl}")
+        self.db.commit()
 
     # ---- write -------------------------------------------------------------------
     def add(self, kind: str, scope: str, text: str, source: str, *, area: str | None = None,
             applies_when: str | None = None, key: str | None = None, value_or_ref: str | None = None,
             secret_env: str | None = None, linked_issue: int | None = None, evidence: str | None = None,
-            status: str = "active") -> int:
+            status: str = "active", decided_by: str | None = None,
+            confirm_count: int = 0, env_at_confirm: str | None = None,
+            skip_env_guard: bool = False) -> int:
         assert kind in KINDS and status in STATUSES, (kind, status)
         assert scope == "core" or scope.startswith("project:"), scope
         text = _clean(text)
+
+        # Resources must never hold env values (URLs, logins, record ids) as lasting memory.
+        if kind == "resource":
+            value_or_ref = None
+            if secret_env:
+                text = f"{key or 'resource'} (secret in env var {secret_env})"
+            else:
+                text = f"{key or 'resource'} (value from run settings each run; not stored)"
+            text = _clean(text)
+        elif not skip_env_guard and kind in ("fact", "lesson", "recipe"):
+            try:
+                text = assert_safe_lasting(text, context=f"memory.{kind}")
+            except EnvDetailError:
+                # Soft-scrub then re-check; still refuse if substance was only env noise.
+                text = assert_safe_lasting(scrub_env_details(text), context=f"memory.{kind}")
+
         vec = self.embedder.embed(text) if self.embedder else None
+        confirmed = now() if status == "active" else None
         cur = self.db.execute(
             """INSERT INTO memories(kind, scope, area, applies_when, key, text, value_or_ref, secret_env, source,
-               linked_issue, evidence, status, created_at, last_confirmed_at, embedding)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               linked_issue, evidence, status, created_at, last_confirmed_at, embedding,
+               confirm_count, env_at_confirm, decided_by)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (kind, scope, area, applies_when, key, text, _clean(value_or_ref) if value_or_ref else None, secret_env,
-             source, linked_issue, evidence, status, now(), now() if status == "active" else None, pack_vec(vec)))
+             source, linked_issue, evidence, status, now(), confirmed, pack_vec(vec),
+             confirm_count, env_at_confirm, decided_by or (source if source.startswith("user") else None)))
         self.db.commit()
         return cur.lastrowid
 
-    def set_status(self, mid: int, status: str) -> None:
+    def set_status(self, mid: int, status: str, *, env_at_confirm: str | None = None) -> None:
         assert status in STATUSES
-        extra = ", last_confirmed_at = ?" if status == "active" else ""
-        args = (status, now(), mid) if extra else (status, mid)
-        self.db.execute(f"UPDATE memories SET status = ?{extra} WHERE id = ?", args)
+        if status == "active":
+            self.db.execute(
+                "UPDATE memories SET status = ?, last_confirmed_at = ?, env_at_confirm = COALESCE(?, env_at_confirm) WHERE id = ?",
+                (status, now(), env_at_confirm, mid))
+        else:
+            self.db.execute("UPDATE memories SET status = ? WHERE id = ?", (status, mid))
         self.db.commit()
 
     def bump(self, mid: int, ok: bool) -> dict:
         col = "success_count" if ok else "failure_count"
-        self.db.execute(f"UPDATE memories SET {col} = {col} + 1" + (", last_confirmed_at = ?" if ok else "") + " WHERE id = ?",
-                        (now(), mid) if ok else (mid,))
+        if ok:
+            self.db.execute(
+                f"UPDATE memories SET {col} = {col} + 1, last_confirmed_at = ?, confirm_count = confirm_count + 1 WHERE id = ?",
+                (now(), mid))
+        else:
+            self.db.execute(f"UPDATE memories SET {col} = {col} + 1 WHERE id = ?", (mid,))
         self.db.commit()
         return self.get(mid)
+
+    def bump_confirm(self, mid: int, *, env_fp: str | None = None) -> dict:
+        """Another run confirmed the same lesson; may activate provisional (proposed) lessons/recipes."""
+        self.db.execute(
+            "UPDATE memories SET confirm_count = confirm_count + 1, last_confirmed_at = ?, "
+            "env_at_confirm = COALESCE(?, env_at_confirm) WHERE id = ?",
+            (now(), env_fp, mid))
+        self.db.commit()
+        row = self.get(mid)
+        if row and row["kind"] in ("lesson", "recipe") and row["status"] == "proposed" and row["confirm_count"] >= 2:
+            self.set_status(mid, "active", env_at_confirm=env_fp)
+            row = self.get(mid)
+        return row
+
+    def update_text(self, mid: int, text: str) -> None:
+        """Update text; re-embed only when the cleaned text actually changed."""
+        row = self.get(mid)
+        if not row:
+            return
+        text = assert_safe_lasting(_clean(text), context="memory.update")
+        if text == row["text"]:
+            return
+        vec = self.embedder.embed(text) if self.embedder else None
+        self.db.execute("UPDATE memories SET text = ?, embedding = ? WHERE id = ?",
+                        (text, pack_vec(vec), mid))
+        self.db.commit()
 
     # ---- read --------------------------------------------------------------------
     def get(self, mid: int) -> dict | None:
@@ -131,6 +206,46 @@ class MemoryStore:
                                (fts, k * 4)).fetchall()
         out = [dict(ids[h["rowid"]], score=round(-h["s"], 3)) for h in hits if h["rowid"] in ids]
         return out[:k]
+
+    def prune_duplicates(self, scopes: list[str] | None = None, threshold: float = 0.9) -> list[int]:
+        """Merge near-duplicate active/proposed rows: keep the oldest, retire the rest, sum counts."""
+        from .service import jaccard
+        scopes = scopes or [r[0] for r in self.db.execute("SELECT DISTINCT scope FROM memories")]
+        retired = []
+        for scope in scopes:
+            rows = self.query([scope], statuses=("active", "proposed", "needs_recheck"))
+            rows.sort(key=lambda r: r["id"])
+            kept: list[dict] = []
+            for r in rows:
+                twin = next((k for k in kept if k["kind"] == r["kind"] and jaccard(k["text"], r["text"]) >= threshold), None)
+                if twin is None:
+                    kept.append(r)
+                    continue
+                self.db.execute(
+                    "UPDATE memories SET success_count = success_count + ?, failure_count = failure_count + ?, "
+                    "confirm_count = confirm_count + ?, status = 'retired' WHERE id = ?",
+                    (r["success_count"], r["failure_count"], r.get("confirm_count") or 0, r["id"]))
+                retired.append(r["id"])
+        self.db.commit()
+        return retired
+
+    def scrub_env_resources(self) -> int:
+        """Retire resource rows that stored env values; clear value_or_ref. Returns rows touched."""
+        n = 0
+        for r in self.query(
+            [x[0] for x in self.db.execute("SELECT DISTINCT scope FROM memories")],
+            ["resource"], statuses=tuple(STATUSES),
+        ):
+            if r.get("value_or_ref") or is_env_resource_key(r.get("key")):
+                text = (f"{r.get('key') or 'resource'} (secret in env var {r['secret_env']})"
+                        if r.get("secret_env") else
+                        f"{r.get('key') or 'resource'} (value from run settings each run; not stored)")
+                self.db.execute(
+                    "UPDATE memories SET value_or_ref = NULL, text = ?, status = CASE WHEN status = 'active' THEN 'retired' ELSE status END WHERE id = ?",
+                    (text, r["id"]))
+                n += 1
+        self.db.commit()
+        return n
 
     def close(self) -> None:
         self.db.close()

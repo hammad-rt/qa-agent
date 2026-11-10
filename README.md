@@ -15,15 +15,14 @@ General rules: `core/core-testing-spec.md`. Project packs: `packs/<slug>/` (Savo
   Playwright MCP browser, judge. The coordinator is plain code and runs one case at a time.
 
 ## Phase 2: memory
-- SQLite store at `memory/memory.db` (keyword search built in; optional Ollama `nomic-embed-text` embeddings).
-  Scopes: `core` for every project, `project:<slug>` for one. Kinds: fact, lesson, recipe, known_bug,
-  open_bug_found, resource. Text is redacted and env secret values are scrubbed before saving.
-- The planner gets a short preload of lessons for the task's areas; testers can `recall_lessons` and
-  `propose_memory` (proposals wait for approval at the end of the run). The judge gets lessons and
-  likely known-bug matches from the pack.
-- `correct` saves your verdict correction as an active lesson right away. Recipes that fail twice and
-  lessons linked to a now-closed Redmine bug are set to needs_recheck. Lessons go to core only with your
-  approval, after project details are stripped. A readable copy is exported to `memory/memory-export.json`.
+- SQLite is the source of truth for lasting knowledge (facts, lessons, recipes, bugs). Scopes: `core` or
+  `project:<slug>`. `learned.md` holds only pack-local Routes/Stuck/Discovery (never dumped wholesale).
+- **Lean turns:** each case/turn injects a ranked slice under `MEMORY_TURN_TOKEN_BUDGET` (~1200 tokens);
+  cached per area:app; more via `recall_lessons`. Env details (URLs, logins, record ids) are refused on write
+  and are not lasting `resource` values — they come from pack/`.env`/this run.
+- Lessons become lasting after user approval or ≥2 run confirmations; agent-proposed **facts** always need
+  approval. End-of-run retrospective is code-built; core promotion still needs your OK.
+- See `docs/stack/redmine-memory.md`. Export: `memory/memory-export.json`.
 
 ## Phase 3: safety and reliability
 - Run-level pre-approval of action types, always-ask actions, prod read-only, masked secrets, redaction

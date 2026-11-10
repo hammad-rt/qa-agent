@@ -1,9 +1,10 @@
 """Gap resolution (RDP FR-40..46, tech spec section 16).
 
-For every requirement: pack -> memory -> Redmine wiki -> task text and comments -> ask the user.
-Found values are checked (URL in allowlist and reachable, secret present). Everything still open
-is asked in ONE batch at the plan gate. Secrets go through a masked prompt into .env; memory keeps
-only the env var name. Confirmed answers are saved as resource memory with their source.
+For every requirement: pack -> Redmine wiki -> task text and comments -> ask the user.
+Env values (URLs, logins, record ids) come from pack.yaml / .env / this run's answers — never from
+lasting SQLite memory. A local gitignored prefs file may remember last-used account names as a
+default for the ask-each-run prompt. Secrets go through a masked prompt into .env; lasting memory
+may keep only the env var *name*.
 """
 from __future__ import annotations
 
@@ -16,6 +17,11 @@ from urllib.parse import urlparse
 from ..models import Requirement
 from ..redact import redact
 from .redmine import find_urls
+
+
+def _prefs():
+    from ..memory.prefs import RunPrefs
+    return RunPrefs()
 
 
 @dataclass
@@ -67,7 +73,6 @@ def _check_url(req: Requirement, url: str, ctx: GapContext) -> None:
 
 
 def resolve_url(req: Requirement, app: str, ctx: GapContext) -> Requirement:
-    sc = scope(ctx.pack)
     label = ctx.pack.apps.get(app, {}).get("label", app)
 
     url = ctx.pack.url(app, ctx.env)
@@ -78,17 +83,8 @@ def resolve_url(req: Requirement, app: str, ctx: GapContext) -> Requirement:
         if req.status == "resolved":
             return req
 
-    req.sources_checked.append("memory")
-    row = ctx.memory.get(sc, req.key)
-    if row:
-        req.value, req.source = row["value"], f"memory ({row['source']})"
-        _check_url(req, row["value"], ctx)
-        if req.status == "resolved":
-            if ctx.allow_hosts is not None and _host(row["value"]) not in ctx.allow_hosts:
-                ctx.allow_hosts.append(_host(row["value"]))
-            return req
-        if req.status == "failed_check" and hasattr(ctx.memory, "mark_stale"):
-            ctx.memory.mark_stale(sc, req.key)      # comes back as a question (tech spec 7.5)
+    # URLs are never lasting memory — find them fresh from wiki / task / user each run.
+    req.sources_checked.append("memory(skipped:env)")
 
     words = [ctx.env, app, label] + label.split()
     for title, text in ctx.wiki_texts.items():
@@ -144,12 +140,13 @@ def ask_accounts_each_run(pack) -> bool:
 
 def resolve_account(req: Requirement, app: str, role: str, ctx: GapContext) -> Requirement:
     sc = scope(ctx.pack)
+    prefs = _prefs()
     if ask_accounts_each_run(ctx.pack):
         acct = ctx.pack.accounts(app).get(role) or {}
-        row = ctx.memory.get(sc, f"{req.key}.{ctx.env}.last_used")
+        last = prefs.get(sc, f"{req.key}.{ctx.env}.last_used")
         label = ctx.pack.apps.get(app, {}).get("label", app)
         req.sources_checked += ["asked each run"]
-        req.default = (row or {}).get("value") or (acct.get("username") if ctx.env == "staging" else None)
+        req.default = last or (acct.get("username") if ctx.env == "staging" else None)
         req.value, req.status = None, "missing"
         req.secret_env = acct.get("password_env") or f"{ctx.pack.slug.upper()}_{app.upper()}_{role.upper()}_PASSWORD"
         req.must_have = req.must_have or list(acct.get("role_markers", []))
@@ -160,10 +157,11 @@ def resolve_account(req: Requirement, app: str, role: str, ctx: GapContext) -> R
     acct = ctx.pack.accounts(app).get(role)
     req.sources_checked.append("pack")
     if not acct:
-        row = ctx.memory.get(sc, req.key)
-        req.sources_checked.append("memory")
-        if row:
-            acct = {"username": row["value"], "password_env": row.get("secret_env")}
+        # Pointer only: which secret_env name was used — username still comes from the user this run.
+        row = ctx.memory.get(sc, req.key) if ctx.memory else None
+        req.sources_checked.append("memory(pointer)")
+        if row and row.get("secret_env"):
+            req.secret_env = row["secret_env"]
             req.source = f"memory ({row['source']})"
     else:
         req.source = "pack"
@@ -171,7 +169,7 @@ def resolve_account(req: Requirement, app: str, role: str, ctx: GapContext) -> R
     if not acct:
         req.status = "missing"
         req.question = f"Which {role} account should I use on {label} ({ctx.env})? (username; I'll ask for the password in a masked prompt)"
-        req.secret_env = f"{ctx.pack.slug.upper()}_{app.upper()}_{role.upper()}_PASSWORD"
+        req.secret_env = req.secret_env or f"{ctx.pack.slug.upper()}_{app.upper()}_{role.upper()}_PASSWORD"
         return req
     req.value = acct.get("username")
     req.secret_env = acct.get("password_env")
@@ -186,10 +184,13 @@ def resolve_account(req: Requirement, app: str, role: str, ctx: GapContext) -> R
 
 
 def resolve_other(req: Requirement, ctx: GapContext) -> Requirement:
-    row = ctx.memory.get(scope(ctx.pack), req.key)
-    req.sources_checked += ["pack", "memory"]
-    if row:
-        req.value, req.source, req.status = row["value"], f"memory ({row['source']})", "resolved"
+    """Non-URL/account gaps: prefer this run's prefs, never lasting env values in SQLite."""
+    sc = scope(ctx.pack)
+    prefs = _prefs()
+    req.sources_checked += ["pack", "prefs"]
+    val = prefs.get(sc, req.key)
+    if val:
+        req.value, req.source, req.status = val, "prefs", "resolved"
         return req
     req.status = "missing"
     req.question = req.question or f"I need {req.key.split('.', 1)[-1].replace('_', ' ')} for this run. What should I use?"
@@ -257,7 +258,7 @@ def apply_answers(reqs: list[Requirement], answers: dict[str, str], ctx: GapCont
             r.value, r.status, r.source = url, "resolved", f"user (was {r.source or 'none'})"
             if ctx.allow_hosts is not None and _host(url) not in ctx.allow_hosts:
                 ctx.allow_hosts.append(_host(url))
-            ctx.memory.put(sc, r.key, url, source=r.source)
+            # URL stays on the plan for this run only — not lasting memory.
         elif r.kind == "account":
             if a:
                 r.value = a
@@ -272,7 +273,7 @@ def apply_answers(reqs: list[Requirement], answers: dict[str, str], ctx: GapCont
                     if r.key.count(".") >= 2 else None
                 r.secret_env = ((pack_env or base) if r.value == pack_user and ctx.env == "staging"
                                 else password_env_for(base, r.value, ctx.env))
-                ctx.memory.put(sc, f"{r.key}.{ctx.env}.last_used", r.value, source="user")
+                _prefs().put(sc, f"{r.key}.{ctx.env}.last_used", r.value)
             if r.secret_env and not os.environ.get(r.secret_env) and secret_prompt:
                 secret = secret_prompt(f"Password for {r.value} ({r.secret_env}): ")
                 if secret:
@@ -280,11 +281,13 @@ def apply_answers(reqs: list[Requirement], answers: dict[str, str], ctx: GapCont
             if r.value and r.secret_env and os.environ.get(r.secret_env):
                 r.status, r.source = "resolved", r.source or "user"
                 if not ask_accounts_each_run(ctx.pack):
-                    ctx.memory.put(sc, r.key, r.value, source="user", secret_env=r.secret_env)
+                    # Lasting memory: secret env var name only (no username/password value).
+                    ctx.memory.put(sc, r.key, "", source="user", secret_env=r.secret_env)
         else:
             if a:
                 r.value, r.status, r.source = redact(a), "resolved", "user"
-                ctx.memory.put(sc, r.key, r.value, source="user")
+                # data.* and similar stay in local prefs for this machine, not lasting SQLite facts.
+                _prefs().put(sc, r.key, r.value)
     return reqs
 
 

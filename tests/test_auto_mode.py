@@ -73,11 +73,32 @@ class AutoMode(unittest.TestCase):
     def test_load_dotenv_skipped_under_qa_test(self):
         with tempfile.TemporaryDirectory() as d:
             env_path = Path(d) / ".env"
-            env_path.write_text("SHOULD_NOT_LOAD=1\n")
+            env_path.write_text(
+                "SHOULD_NOT_LOAD=1\n"
+                "MEMORY_DB=memory/memory.db\n"
+                "SAVOSTORE_CRM_PASSWORD=fake-from-dotenv\n"
+                "REDMINE_API_KEY=fake-redmine\n"
+            )
             with mock.patch.dict(os.environ, {"QA_TEST": "1"}, clear=False):
                 os.environ.pop("SHOULD_NOT_LOAD", None)
+                os.environ.pop("SAVOSTORE_CRM_PASSWORD", None)
                 load_dotenv(env_path)
                 self.assertNotIn("SHOULD_NOT_LOAD", os.environ)
+                self.assertNotIn("SAVOSTORE_CRM_PASSWORD", os.environ)
+
+    def test_settings_load_never_uses_repo_memory_db(self):
+        """Even with a laptop MEMORY_DB in the environment, Settings.load stays on a temp DB."""
+        from agent_tester.config import ROOT, Settings, _REAL_MEMORY_DB
+        with mock.patch.dict(os.environ, {
+            "QA_TEST": "1",
+            "MEMORY_DB": str(ROOT / "memory" / "memory.db"),
+            "SAVOSTORE_CRM_PASSWORD": "should-be-cleared",
+        }, clear=False):
+            s = Settings.load()
+            self.assertNotEqual(s.memory_db.resolve(), _REAL_MEMORY_DB)
+            self.assertNotIn("memory/memory.db", str(s.memory_db.resolve()))
+            self.assertTrue("qa-test-mem-" in str(s.memory_db) or s.memory_db != _REAL_MEMORY_DB)
+            self.assertNotIn("SAVOSTORE_CRM_PASSWORD", os.environ)
 
 
 if __name__ == "__main__":

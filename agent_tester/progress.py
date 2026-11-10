@@ -13,9 +13,11 @@ class Progress:
         self.log = state.dir / "progress.log"
 
     def _write(self, line: str) -> None:
-        self.out(line)
+        from .redact import for_user
+        safe = for_user(line)
+        self.out(safe)
         with self.log.open("a") as f:
-            f.write(f"{datetime.now().isoformat(timespec='seconds')} {line}\n")
+            f.write(f"{datetime.now().isoformat(timespec='seconds')} {safe}\n")
 
     def started(self, label: str) -> None:
         self._write(f"Started {label}: {self.total} case(s)" + (f", {self.done} already done" if self.done else ""))

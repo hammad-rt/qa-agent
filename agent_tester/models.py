@@ -106,6 +106,7 @@ class StepResult(BaseModel):
     limit_hit: bool = False
     loop: bool = False                # stopped because the same call repeated without progress
     needs_login: str | None = None    # tester hit a CAPTCHA/robot check at login: a person has to log in once
+    not_found: bool = False           # prep/find finished with nothing usable (never a success)
 
 
 class CaseResult(BaseModel):

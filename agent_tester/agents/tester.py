@@ -65,6 +65,7 @@ PASTE_JS = r"""async (page) => {
   return JSON.stringify({value: await el.inputValue(), how});
 }"""
 _SAVE = re.compile(r"\b(save|submit|update|apply|confirm)\b", re.I)
+_SUBMIT = re.compile(r"\b(save|submit|update|apply|confirm|continue|next|create|finish|send)\b", re.I)
 RELOAD_HINT = ("You already saved/searched here and the expected message did not appear. Do not save or search "
                "again. Check the real result: reload the page (browser_navigate to the same address, or reopen it by "
                "its route), read the stored value with browser_snapshot and record_value it, then mark_step. "
@@ -489,13 +490,36 @@ class TesterSession:
         s = self
 
         def record_value(name: str, raw_text: str, source: str) -> dict:
-            """Record a value exactly as read on the page. raw_text is the text you saw, e.g. "$1,234.50"."""
+            """Record a value exactly as read on the page. raw_text is the text you saw, e.g. "$1,234.50".
+
+            Rejects placeholder words (none/null/not found), literal tokens (ORDER-MULTI), and redaction
+            markers. Re-asks once; never stores a bad value in state/memory/routes.
+            """
+            from ..tools.value_kind import kind_map_from_pack, placeholder_tokens, validate_value
+            pack_cfg = (s.state.data.get("pack_cfg") if s.state else None) or {}
+            kinds = kind_map_from_pack(pack_cfg)
+            tokens = placeholder_tokens(pack_cfg)
+            check = validate_value(name, raw_text, pack_kinds=kinds, tokens=tokens)
+            if not check["ok"]:
+                retried = getattr(s, "_value_retries", None)
+                if retried is None:
+                    s._value_retries = {}
+                    retried = s._value_retries
+                if check.get("not_found"):
+                    s.result.not_found = True
+                if not retried.get(name):
+                    retried[name] = True
+                    return {"error": check["reason"], "retry": True,
+                            "hint": (f"Read the real {check['kind']} from the page and call record_value again. "
+                                     f"Do not store none/null/not found/ORDER-* or [KEY] markers.")}
+                return {"error": check["reason"], "rejected": True, "not_found": bool(check.get("not_found"))}
+            text = str(check["value"])
             try:
                 # IDs like A1142 / INV-0042 stay text: only plain amounts become numbers
-                v = raw_text.strip() if re.search(r"[A-Za-z]\d|\d[A-Za-z]|^[A-Za-z]{1,3}-?\d+$", raw_text.strip()) \
-                    and not re.match(r"^[A-Z]{3}\s?[\d$]", raw_text.strip()) else V.parse_money(raw_text)
+                v = text if re.search(r"[A-Za-z]\d|\d[A-Za-z]|^[A-Za-z]{1,3}-?\d+$", text) \
+                    and not re.match(r"^[A-Z]{3}\s?[\d$]", text) else V.parse_money(text)
             except ValueError:
-                v = raw_text
+                v = text
             V.record(s.state.values, name, v, source=f"{s.case_id}/{s.app}: {source}")
             s.result.values[name] = v
             s.state.save()
@@ -646,8 +670,19 @@ class TesterSession:
             """Call when your steps are done, or when you are stuck and cannot continue.
             A final proof screenshot is taken automatically."""
             await s.auto_shot("final", tool_context)
-            s.result.notes, s.result.stuck, s.finished = redact(notes), stuck, True
-            return {"ok": True}
+            from ..redact import for_user
+            from ..finish_sanity import classify_finish
+            clean = for_user(notes or "")
+            kind = classify_finish(clean, stuck=stuck,
+                                   data_prep=bool(s.brief.get("data_prep")),
+                                   find_budget=bool(s.brief.get("find_budget")),
+                                   not_found_flag=bool(getattr(s.result, "not_found", False)))
+            s.result.notes = clean
+            s.result.stuck = kind["stuck"]
+            s.result.not_found = kind["not_found"]
+            s.result.limit_hit = s.result.limit_hit or kind.get("limit_hit", False)
+            s.finished = True
+            return {"ok": True, "outcome": kind["outcome"]}
 
         def ask_user(question: str, why: str = "") -> dict:
             """Ask the person running the test when you are genuinely unsure and the page cannot tell you
@@ -659,6 +694,7 @@ class TesterSession:
                 return {"error": "question limit reached for this case; decide from the page or finish(stuck=True)"}
             if re.search(r"password|passcode|otp|one.time|2fa|secret|token", question, re.I):
                 return {"error": "never ask for passwords or codes; use run_helper login_form or needs_manual_login"}
+            from ..redact import scrub_user_answer
             q = redact(question)
             if is_auto() and os.environ.get("QA_WEB") != "1" and not (sys.stdin and sys.stdin.isatty()):
                 ans = ""
@@ -668,7 +704,9 @@ class TesterSession:
                                    + "\n  Your answer (Enter = let it decide): ").strip()
                 except EOFError:
                     ans = ""
-            s.state.log_action(case_id=s.case_id, app=s.app, tool="ask_user", args={"question": q, "answer": ans},
+            safe_ans = scrub_user_answer(ans)
+            s.state.log_action(case_id=s.case_id, app=s.app, tool="ask_user",
+                               args={"question": q, "answer": safe_ans},
                                plan_step=getattr(s, "current_step", None), inferred=False, deviation=None)
             return {"answer": ans} if ans else {"answer": "", "note": "no answer; decide from the page and say so in notes"}
 
@@ -1145,6 +1183,37 @@ class TesterSession:
             clicky = name in ("browser_click", "browser_run_code_unsafe", "browser_evaluate")
             warn_at, stop_at = (2, 4) if clicky else (LOOP_WARN, LOOP_STOP)   # a page click that did nothing: rethink at once
             cycling = _is_cycle(self._recent)
+            # Continue/Submit with no page change: surface validation/required markers once before loop counting.
+            submit_label = str(args.get("element") or args.get("name") or "")
+            if (clicky and name == "browser_click" and _SUBMIT.search(submit_label)
+                    and n >= warn_at and not cycling):
+                fed = getattr(self, "_submit_validation_fed", None)
+                if fed is None:
+                    self._submit_validation_fed = set()
+                    fed = self._submit_validation_fed
+                key = intent or sig
+                if key not in fed:
+                    from ..page_state import form_validation_messages
+                    page = getattr(self, "_page_state", "") or (
+                        self.last_snapshot if isinstance(self.last_snapshot, str) else "")
+                    msgs = form_validation_messages(page or "")
+                    fed.add(key)
+                    # Do not treat this click as a loop yet — give the model the form errors first.
+                    self._sigs[sig] = max(0, self._sigs.get(sig, 1) - 1)
+                    if intent:
+                        self._sigs[intent] = max(0, self._sigs.get(intent, 1) - 1)
+                    if msgs:
+                        joined = "; ".join(msgs[:6])
+                        return {"error": (
+                            f"Your {submit_label!r} click left the page unchanged. Visible validation / "
+                            f"required-field messages: {joined}. Fix those fields (do not click {submit_label!r} "
+                            f"again until they are cleared), then continue."
+                        )}
+                    return {"error": (
+                        f"Your {submit_label!r} click left the page unchanged and no step progressed. "
+                        f"Take a fresh browser_snapshot and look for required-field markers, red text, or "
+                        f"alert/status messages near the form before clicking {submit_label!r} again."
+                    )}
             if (n >= stop_at or cycling) and not getattr(self, "_explored", False):
                 return self._start_exploring(name, "the same actions kept repeating" if cycling else
                                              f"{name} was repeated {n} times")
@@ -1240,6 +1309,8 @@ class TesterSession:
             self.state.save()
             return None
         from ..auto import ask_line
+        import uuid
+        ask_id = f"stuck-{self.case_id}-{uuid.uuid4().hex[:8]}"
         ans = ""
         try:
             # Best-effort timeout: alarm is Unix-only; without it, ask_line blocks until answer/EOF.
@@ -1255,7 +1326,9 @@ class TesterSession:
             except (ValueError, AttributeError, OSError):
                 old = None
             try:
-                ans = ask_line(f"\n{q}").strip()
+                # ask_line flushes buffered stdin and tags the prompt so a prior stuck-ask answer
+                # (e.g. CONTACT-*) cannot auto-answer PREP-*-create.
+                ans = ask_line(f"\n{q}", ask_id=ask_id).strip()
             finally:
                 try:
                     signal.alarm(0)
@@ -1265,16 +1338,17 @@ class TesterSession:
                     pass
         except (EOFError, TimeoutError):
             ans = ""
+        from ..redact import scrub_user_answer
+        safe_ans = scrub_user_answer(ans)[:500]
         self.state.log_action(case_id=self.case_id, app=self.app, tool="stuck_ask",
-                              args={"why": why, "question": q[:500], "answer": ans[:500]},
+                              args={"why": why, "question": q[:500], "answer": safe_ans, "ask_id": ask_id},
                               plan_step=self.current_step, outcome="answered" if ans else "timeout")
         self.state.data.setdefault("notes", []).append(
-            f"Stuck ask on {self.case_id}: {why}; answer={ans[:200] or '(none)'}")
+            f"Stuck ask on {self.case_id}: {why}; ask_id={ask_id}; answer={safe_ans[:200] or '(none)'}")
         self.state.save()
         if not ans:
             return None  # fall through to normal block
-        low = ans.lower()
-        # Parse 1:/2:/3: or bare keywords.
+        # Parse 1:/2:/3: or bare keywords off the raw answer (not the scrubbed display form).
         kind, rest = "guidance", ans
         m = re.match(r"^\s*([123])\s*[:.\-\s]\s*(.*)$", ans, re.S)
         if m:

@@ -59,7 +59,9 @@ def now() -> str:
 
 
 def _clean(text: str) -> str:
-    return scrub_secrets(redact(text or ""))
+    # Store scrubbed form; strip leftover [KEY] markers so recalled lessons never show scrubber tokens.
+    from ..redact import strip_redaction_tokens
+    return strip_redaction_tokens(scrub_secrets(redact(text or "")))
 
 
 class MemoryStore:

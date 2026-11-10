@@ -169,3 +169,60 @@ def result_already_has_page(text: str) -> bool:
     # Playwright MCP often returns a snapshot after click/navigate.
     refs = len(re.findall(r"\[ref=", t))
     return refs >= 8 and ("Page URL:" in t or "- " in t)
+
+
+_VAL_LINE = re.compile(
+    r"(?i)(?:alert|alertdialog|status|error|warning|invalid|required|helper|"
+    r"validation|toast|message|banner)\b"
+)
+_VAL_TEXT = re.compile(
+    r"(?i)(is required|are required|required field|this field is required|please (?:enter|fill|select|provide)|"
+    r"must (?:be|enter|select|provide)|cannot be (?:empty|blank)|invalid (?:email|value|input|format)|"
+    r"fill out this field|missing (?:required )?field|enter a value|"
+    r"field is (?:required|empty|missing)|error[:\s].{3,120})"
+)
+_REQUIRED_MARK = re.compile(
+    r"(?i)(?:\[(?:required|aria-required|invalid)[^\]]*\]|\*\s*$|required=\"true\"|aria-invalid)"
+)
+
+
+def form_validation_messages(snapshot: str, *, limit: int = 8) -> list[str]:
+    """Pull visible validation / required-field messages from an accessibility snapshot.
+
+    Used when Continue/Submit is clicked again with no page change — feed these to the model
+    before treating the click as a loop.
+    """
+    if not snapshot:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    lines = (snapshot or "").splitlines()
+    for i, ln in enumerate(lines):
+        plain = re.sub(r"\[ref=[^\]]*\]", "", ln)
+        plain = re.sub(r"\s+", " ", plain).strip(" -*\t")
+        hit = None
+        if _VAL_LINE.search(ln) or _VAL_TEXT.search(plain) or _REQUIRED_MARK.search(ln):
+            # Prefer quoted text on the line, else the cleaned line.
+            m = re.search(r'"([^"]{3,200})"', plain)
+            hit = (m.group(1) if m else plain)[:200]
+            # If the line is only a role, look at the next short line for the message.
+            if hit and len(hit) < 12 and i + 1 < len(lines):
+                nxt = re.sub(r"\[ref=[^\]]*\]", "", lines[i + 1])
+                m2 = re.search(r'"([^"]{3,200})"', nxt)
+                if m2:
+                    hit = m2.group(1)[:200]
+                elif _VAL_TEXT.search(nxt):
+                    hit = re.sub(r"\s+", " ", nxt).strip(" -*\t")[:200]
+        if not hit or len(hit) < 3:
+            continue
+        key = hit.lower()
+        if key in seen:
+            continue
+        # Skip chrome / generic role-only labels.
+        if key in {"alert", "error", "warning", "status", "required", "invalid"}:
+            continue
+        seen.add(key)
+        out.append(hit)
+        if len(out) >= limit:
+            break
+    return out

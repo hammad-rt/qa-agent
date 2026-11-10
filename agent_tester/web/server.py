@@ -192,7 +192,9 @@ class Job:
                     except ValueError:
                         q = {"prompt": line[len(ASK_MARK):], "secret": False}
                     q["secret"] = bool(q.get("secret"))      # the CLI knows which questions are secret; trust it
+                    # A new prompt invalidates any prior pending answer — only a fresh reply for this ask_id counts.
                     self.pending = q
+                    self._answered_ask_ids = getattr(self, "_answered_ask_ids", set())
                     if self.out and not self.out.endswith("\n"):
                         self.out += "\n"
                     self.out += str(q.get("prompt", "")) + " "
@@ -213,27 +215,50 @@ class Job:
         with self.lock:
             text = self.out
         running = self.proc.poll() is None
+        ask_id = ""
         if self.pending and running:
             waiting, prompt, secret = True, str(self.pending.get("prompt", "")), bool(self.pending.get("secret"))
+            ask_id = str(self.pending.get("ask_id") or "")
         else:  # fallback for any prompt that did not come through ask_line
             tail = text.rstrip().splitlines()[-1] if text.strip() else ""
             waiting = running and not text.endswith("\n") and bool(tail)
             prompt, secret = (tail if waiting else ""), waiting and any(w in tail.lower() for w in SECRET_WORDS)
         return {"id": self.id, "args": self.args, "started": self.started, "running": self.proc.poll() is None,
                 "code": self.proc.poll(), "out": text[since:], "len": len(text), "waiting": waiting,
-                "secret": secret, "prompt": prompt,
+                "secret": secret, "prompt": prompt, "ask_id": ask_id,
                 "run_dir": _run_dir_from(text) or self.run_hint}
 
-    def answer(self, text: str):
+    def answer(self, text: str, ask_id: str | None = None):
+        """Send one answer for the current pending prompt only.
+
+        Answers whose ask_id does not match the pending prompt are ignored (stale double-submit /
+        leftover from a previous stuck-ask). The line written to the agent includes ask_id so the
+        CLI can also reject mismatches after a stdin flush.
+        """
         if self.proc.poll() is None:
-            info = self.info()
-            secret = info["secret"]
-            self.proc.stdin.write((text + "\n").encode())
+            with self.lock:
+                pending = dict(self.pending) if self.pending else None
+            if not pending:
+                return False
+            pending_id = str(pending.get("ask_id") or "")
+            if ask_id and pending_id and ask_id != pending_id:
+                return False  # stale answer for a previous prompt
+            if pending_id and pending_id in getattr(self, "_answered_ask_ids", set()):
+                return False  # already consumed this prompt
+            secret = bool(pending.get("secret"))
+            use_id = pending_id or (ask_id or "")
+            payload = json.dumps({"ask_id": use_id, "text": text}) if use_id else text
+            self.proc.stdin.write((payload + "\n").encode())
             self.proc.stdin.flush()
             with self.lock:
+                if use_id:
+                    self._answered_ask_ids = getattr(self, "_answered_ask_ids", set())
+                    self._answered_ask_ids.add(use_id)
                 self.pending = None
                 self.out += ("********" if secret and text else text) + "\n"
             self._persist()
+            return True
+        return False
 
     def stop(self):
         if self.proc.poll() is None:
@@ -395,8 +420,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not d:
                     return self._send(404, {"error": "no such run"})
                 if parts[3] == "guide":            # a note for the agent while the run goes; read at its next model call
-                    from ..redact import redact, scrub_secrets
-                    text = scrub_secrets(redact(str(b.get("text", "")).strip()))[:2000]
+                    from ..redact import for_user
+                    text = for_user(str(b.get("text", "")).strip())[:2000]
                     if not text:
                         return self._send(400, {"error": "write something for the agent first"})
                     if not _live(d):
@@ -531,7 +556,9 @@ class Handler(BaseHTTPRequestHandler):
                 if not j:
                     return self._send(404, {"error": "no job"})
                 if parts[3] == "input":
-                    j.answer(str(b.get("text", "")))
+                    ok = j.answer(str(b.get("text", "")), ask_id=str(b.get("ask_id") or "") or None)
+                    if not ok and j.proc.poll() is None:
+                        return self._send(409, {"error": "stale answer: this prompt was already answered or ask_id does not match"})
                 elif parts[3] == "stop":
                     j.stop()
                 return self._send(200, j.info(len(j.out)))

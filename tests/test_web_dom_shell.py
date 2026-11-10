@@ -21,6 +21,14 @@ class WebDomShell(unittest.TestCase):
         self.assertIn('data-p="live"', markup)
         self.assertIn('data-p="know"', markup)
         self.assertIn('data-p="mem"', markup)
+        # Classic tabs stay at the top of main (outside panes), always available on a stuck live run.
+        for tab in ("cases", "shots", "report", "know", "mem"):
+            self.assertIn(f'data-p="{tab}"', markup)
+        self.assertRegex(markup, r'data-p="cases"[^>]*>\s*Cases')
+        self.assertRegex(markup, r'data-p="shots"[^>]*>\s*Screenshots')
+        self.assertRegex(markup, r'data-p="report"[^>]*>\s*Report')
+        self.assertRegex(markup, r'data-p="mem"[^>]*>\s*Memory')
+        self.assertRegex(markup, r'data-p="know"[^>]*>\s*Knowledge')
         # Tabs and guide must appear before any pane.on / pane blocks as siblings under main.
         main = re.search(r"<main>([\s\S]*)</main>", markup)
         self.assertIsNotNone(main)
@@ -38,6 +46,11 @@ class WebDomShell(unittest.TestCase):
         self.assertIn('id="nowDoing"', markup)
         self.assertIn("100dvh", self.html)
         self.assertIn("min-height:0", self.html.replace(" ", ""))
+        # Guidance input is always present (not gated by a pane).
+        self.assertIn('id="guideIn"', markup)
+        self.assertIn('id="resumeBtn"', markup)
+        self.assertIn("stuckAct('go')", self.html)
+        self.assertIn(" Continue</button>", self.html)
 
     def test_css_shell_overflow_rules(self):
         css = self.html.split("</style>", 1)[0]

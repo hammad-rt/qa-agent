@@ -138,9 +138,9 @@ async def run_json(agent, prompt: str, settings: Settings, *, validate=None, lab
                     on_attempt(n, attempts, last_err, raw or "")
                 except Exception:  # noqa: BLE001
                     pass
-            else:
-                why = empty or last_err
-                print(f"{label}: attempt {n}/{attempts} failed ({why})")
+            elif empty or label == "planner":
+                # Keep non-planner jobs quiet (old behaviour); planner empty/{} stalls must be visible.
+                print(f"{label}: attempt {n}/{attempts} failed ({empty or last_err})")
             if raw_dir:
                 from pathlib import Path
                 Path(raw_dir).mkdir(parents=True, exist_ok=True)

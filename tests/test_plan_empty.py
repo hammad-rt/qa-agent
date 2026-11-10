@@ -68,6 +68,31 @@ class PlanEmptyOutput(unittest.TestCase):
         self.assertIn("empty plan", buf.getvalue())
         self.assertIn("retrying with", buf.getvalue())
 
+    def test_fewer_cases_than_asked_counts_as_failure(self):
+        """Real-shaped partial plan (subset of asked ids) must fail and split/retry."""
+        calls = []
+
+        async def partial(settings, pack, text, tid, env, only_case=None, repair=True, **kw):
+            ids = only_case.split(",")
+            calls.append(list(ids))
+            if len(ids) > 1:
+                return _plan(tid, env, ids[:1])  # fewer than asked
+            return _plan(tid, env, ids)
+
+        text = "### A1\nbody\n### A2\nbody\n### A3\nbody\n### A4\nbody\n"
+        ids = ["A1", "A2", "A3", "A4"]
+        buf = io.StringIO()
+        with mock.patch.object(P, "plan_task", partial), \
+                mock.patch.object(P, "PLAN_BATCH_TOKENS", 10_000), \
+                mock.patch.object(P, "PLAN_CONCURRENCY", 1), \
+                mock.patch.object(P, "PLAN_EMPTY_RETRIES", 2), \
+                mock.patch.object(P, "PLAN_MAX_ATTEMPTS", 10), \
+                redirect_stdout(buf):
+            plan = asyncio.run(P.plan_in_batches(None, None, text, 1, "staging", ids, repair=False))
+        self.assertEqual(sorted(c.id for c in plan.cases), ids)
+        self.assertTrue(any(len(c) == 1 for c in calls), calls)
+        self.assertIn("empty plan", buf.getvalue())
+
     def test_batch_gives_up_with_resume_hint(self):
         async def always_empty(settings, pack, text, tid, env, only_case=None, repair=True, **kw):
             raise L.LLMOutputError("planner: the reply was an empty object {}")

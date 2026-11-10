@@ -21,9 +21,16 @@ _NO_PAY_ENVS = frozenset({"preprod", "pre-prod", "production", "prod"})
 
 
 def _case_text(case) -> str:
-    parts = [case.title or "", " ".join(case.preconditions or []), case.expected or ""]
-    parts += [s.text for s in case.steps]
-    return " ".join(parts).lower()
+    from .field_text import field_text
+    parts = [
+        field_text(getattr(case, "title", None), sep=" "),
+        field_text(getattr(case, "preconditions", None), sep=" "),
+        field_text(getattr(case, "expected", None), sep=" "),
+        field_text(getattr(case, "notes", None), sep=" "),
+        field_text(getattr(case, "acceptance", None), sep=" "),
+        *(field_text(s, sep=" ") for s in (getattr(case, "steps", None) or [])),
+    ]
+    return " ".join(p for p in parts if p).lower()
 
 
 def matching_rule(case, rules: list[dict]) -> dict | None:

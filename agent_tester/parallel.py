@@ -49,7 +49,12 @@ def case_is_parallel_safe(case, pack_cfg: dict | None = None) -> bool:
     # Heuristic fallback (still conservative).
     if any(getattr(s, "changes_data", False) or getattr(s, "costs_money", False) for s in case.steps):
         return False
-    blob = " ".join([case.title or "", case.expected or ""] + [s.text for s in case.steps])
+    from .field_text import field_text
+    blob = " ".join(p for p in [
+        field_text(getattr(case, "title", None), sep=" "),
+        field_text(getattr(case, "expected", None), sep=" "),
+        *(field_text(s, sep=" ") for s in (case.steps or [])),
+    ] if p)
     if _REWARDS_SESSION.search(blob):
         return False
     if _MUTATE.search(blob):
@@ -59,11 +64,16 @@ def case_is_parallel_safe(case, pack_cfg: dict | None = None) -> bool:
 
 def shared_placeholders(case, pack_cfg: dict | None = None) -> set[str]:
     """Order/session placeholder tokens this case touches (ORDER-*, CUSTOMER, Wallet, …)."""
+    from .field_text import field_text
     pat = ((pack_cfg or {}).get("placeholders") or {}).get("token_pattern")
     rx = re.compile(pat) if pat else re.compile(
         r"(?i)\b(?:ORDER-[A-Z][A-Z0-9_-]*|CUSTOMER|Wallet|test_order|order_\w+)\b")
-    blob = " ".join([case.title or "", " ".join(case.preconditions or []), case.expected or ""]
-                    + [s.text for s in case.steps])
+    blob = " ".join(p for p in [
+        field_text(getattr(case, "title", None), sep=" "),
+        field_text(getattr(case, "preconditions", None), sep=" "),
+        field_text(getattr(case, "expected", None), sep=" "),
+        *(field_text(s, sep=" ") for s in (getattr(case, "steps", None) or [])),
+    ] if p)
     return {m.group(0).upper() if m.group(0).upper().startswith("ORDER") else m.group(0)
             for m in rx.finditer(blob)}
 

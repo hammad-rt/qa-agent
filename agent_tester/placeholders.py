@@ -48,11 +48,18 @@ def scan_tokens(text: str, pattern: re.Pattern | None = None) -> list[str]:
 
 
 def _case_blob(case) -> str:
-    parts = [getattr(case, "title", "") or "", " ".join(getattr(case, "preconditions", None) or []),
-             getattr(case, "expected", "") or ""]
+    from .field_text import field_text
+
+    parts = [
+        field_text(getattr(case, "title", None), sep=" "),
+        field_text(getattr(case, "preconditions", None), sep=" "),
+        field_text(getattr(case, "expected", None), sep=" "),
+        field_text(getattr(case, "notes", None), sep=" "),
+        field_text(getattr(case, "acceptance", None), sep=" "),
+    ]
     for s in getattr(case, "steps", None) or []:
-        parts.append(getattr(s, "text", None) or (s.get("text") if isinstance(s, dict) else "") or "")
-    return " ".join(parts)
+        parts.append(field_text(s, sep=" "))
+    return " ".join(p for p in parts if p)
 
 
 def tokens_in_case(case, pattern: re.Pattern | None = None) -> list[str]:

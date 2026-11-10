@@ -202,8 +202,11 @@ def ensure_account_requirements(plan, pack, env: str | None = None) -> list[str]
     asked each run) its accounts listed, even if the planner forgot them. Returns the keys it added."""
     env = env or plan.env
     have = {r.key for r in plan.requirements}
+    from ..field_text import field_text
     text = " ".join([r.key for r in plan.requirements] + [
-        f"{c.title} " + " ".join(f"{s.app} {s.text}" for s in c.steps) for c in plan.cases]).lower()
+        f"{field_text(c.title, sep=' ')} " + " ".join(
+            f"{s.app} {field_text(s, sep=' ')}" for s in c.steps)
+        for c in plan.cases]).lower()
     added = []
     for app, cfg in pack.apps.items():
         names = {app.lower(), str(cfg.get("label", "")).lower().split(" (")[0]} - {""}

@@ -281,21 +281,27 @@ def has_change_signal(text: str, checklist_item: str) -> bool:
 
 def ticket_case_blob(plan, case) -> str:
     """Deterministic text used for change-signal regex (ticket + case + steps)."""
+    from .field_text import field_text
+
     parts: list[str] = []
     for attr in ("description", "subject", "title", "summary"):
-        v = getattr(plan, attr, None)
+        v = field_text(getattr(plan, attr, None))
         if v:
-            parts.append(str(v))
-    notes = getattr(plan, "notes", None) or getattr(plan, "ticket_text", None)
+            parts.append(v)
+    notes = field_text(getattr(plan, "notes", None) or getattr(plan, "ticket_text", None))
     if notes:
-        parts.append(str(notes))
+        parts.append(notes)
     # Feature mode may stash ticket texts on the plan/state elsewhere; include case fields.
+    # Fields may be list/dict after resume or raw JSON — coerce via field_text.
     if case is not None:
-        parts.append(getattr(case, "title", "") or "")
-        parts.append(getattr(case, "expected", "") or "")
-        parts.append(getattr(case, "preconditions", "") or "")
+        for attr in ("title", "expected", "preconditions", "notes", "acceptance"):
+            v = field_text(getattr(case, attr, None))
+            if v:
+                parts.append(v)
         for s in getattr(case, "steps", None) or []:
-            parts.append(getattr(s, "text", None) or (s.get("text") if isinstance(s, dict) else "") or "")
+            v = field_text(s)
+            if v:
+                parts.append(v)
     return "\n".join(parts)
 
 

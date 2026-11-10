@@ -96,7 +96,11 @@ def _hard_stop_in(e: BaseException) -> bool:
     return False
 
 
-LOOP_WARN, LOOP_STOP = 3, 5          # same call repeated this often without progress: warn, then stop
+# Same call / target / validation error without progress: warn once, then at STUCK_MAX_ATTEMPTS
+# go straight to the stuck lookup ladder (memory → code → docs → web → explore → ask).
+STUCK_MAX_ATTEMPTS = max(1, int(os.environ.get("STUCK_MAX_ATTEMPTS", "3")))
+LOOP_WARN = max(1, STUCK_MAX_ATTEMPTS - 1)   # e.g. 2 when max is 3
+LOOP_STOP = STUCK_MAX_ATTEMPTS               # e.g. 3: ladder, not a longer silent retry
 IDLE_READS = 8                       # page reads in a row with nothing done in between: stalled, not working
 EXPLORE_ACTIONS = 15                 # extra actions for one exploration of a screen when a step is stuck
 STUCK_ASK_TIMEOUT_SEC = int(os.environ.get("STUCK_ASK_TIMEOUT_SEC", "600"))
@@ -989,6 +993,15 @@ class TesterSession:
         if name == "mark_step" and args.get("n") not in self.result.steps_done:
             self.since_progress, self._sigs, self.saves, self.misses = 0, {}, 0, 0          # real progress: fresh per-step allowance
             self._explored, self._recent, self._reads = False, [], 0
+        # Hard denies before the stuck-attempt budget so known-bad URLs don't burn attempts.
+        if name == "browser_navigate":
+            url = args.get("url", "") or ""
+            key = _url_nav_key(url)
+            if key and key in self._xsrf_urls:
+                return self._deny(
+                    name, args,
+                    "this URL already returned an XSRF / acceptable-referer page; "
+                    "open the screen via the discovery menu path instead of deep-linking again")
         limit = self._budget_check(name, args)
         if limit:
             return limit
@@ -1015,12 +1028,6 @@ class TesterSession:
             try:
                 if name == "browser_navigate":
                     url = args.get("url", "") or ""
-                    key = _url_nav_key(url)
-                    if key and key in self._xsrf_urls:
-                        return self._deny(
-                            name, args,
-                            "this URL already returned an XSRF / acceptable-referer page; "
-                            "open the screen via the discovery menu path instead of deep-linking again")
                     other = _other_app(url, getattr(self, "app_urls", {}), self.app)
                     if other:
                         return self._deny(name, args, (
@@ -1181,12 +1188,13 @@ class TesterSession:
                 self._field_vals = vals
             self._recent = (getattr(self, "_recent", []) + [intent or sig])[-12:]
             clicky = name in ("browser_click", "browser_run_code_unsafe", "browser_evaluate")
-            warn_at, stop_at = (2, 4) if clicky else (LOOP_WARN, LOOP_STOP)   # a page click that did nothing: rethink at once
+            # Same 3-attempt cap for clicks and other actions (STUCK_MAX_ATTEMPTS / LOOP_*).
+            warn_at, stop_at = LOOP_WARN, LOOP_STOP
             cycling = _is_cycle(self._recent)
-            # Continue/Submit with no page change: surface validation/required markers once before loop counting.
+            # Continue/Submit with no page change: surface validation once, and count it as an attempt.
             submit_label = str(args.get("element") or args.get("name") or "")
             if (clicky and name == "browser_click" and _SUBMIT.search(submit_label)
-                    and n >= warn_at and not cycling):
+                    and n >= warn_at and not cycling and n < stop_at):
                 fed = getattr(self, "_submit_validation_fed", None)
                 if fed is None:
                     self._submit_validation_fed = set()
@@ -1198,21 +1206,20 @@ class TesterSession:
                         self.last_snapshot if isinstance(self.last_snapshot, str) else "")
                     msgs = form_validation_messages(page or "")
                     fed.add(key)
-                    # Do not treat this click as a loop yet — give the model the form errors first.
-                    self._sigs[sig] = max(0, self._sigs.get(sig, 1) - 1)
-                    if intent:
-                        self._sigs[intent] = max(0, self._sigs.get(intent, 1) - 1)
+                    # Validation errors fed to the model still count toward STUCK_MAX_ATTEMPTS.
                     if msgs:
                         joined = "; ".join(msgs[:6])
                         return {"error": (
                             f"Your {submit_label!r} click left the page unchanged. Visible validation / "
                             f"required-field messages: {joined}. Fix those fields (do not click {submit_label!r} "
-                            f"again until they are cleared), then continue."
+                            f"again until they are cleared), then continue. "
+                            f"(Attempt {n}/{stop_at} on this control.)"
                         )}
                     return {"error": (
                         f"Your {submit_label!r} click left the page unchanged and no step progressed. "
                         f"Take a fresh browser_snapshot and look for required-field markers, red text, or "
-                        f"alert/status messages near the form before clicking {submit_label!r} again."
+                        f"alert/status messages near the form before clicking {submit_label!r} again. "
+                        f"(Attempt {n}/{stop_at} on this control.)"
                     )}
             if (n >= stop_at or cycling) and not getattr(self, "_explored", False):
                 return self._start_exploring(name, "the same actions kept repeating" if cycling else

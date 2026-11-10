@@ -233,16 +233,50 @@ class FindBudgetCreate(unittest.TestCase):
         self.assertIsNone(r)
         self.assertEqual([c[1] for c in f.calls if c[0] == "create"], ["portal", "crm"])
 
-    def test_pay_create_blocked_on_preprod(self):
+    def test_pay_create_allowed_on_preprod(self):
         rule = dict(self.rule, create=[
             {"app": "portal", "text": "pay with Stripe 4242 for {client}"},
         ])
         r, st, f = self._run({
             "find": [{"test_order": "none"}],
             "create": [{"test_order": "A9"}],
+            "check": [{"test_order_ok": "yes"}],
         }, rule=rule, env="preprod")
+        self.assertIsNone(r)
+        self.assertTrue(any(c[0] == "create" for c in f.calls))
+
+    def test_pay_create_blocked_on_production(self):
+        rule = dict(self.rule, create=[
+            {"app": "portal", "text": "pay with Stripe 4242 for {client}"},
+        ])
+        r, st, f = self._run({
+            "find": [{"test_order": "none"}],
+            "create": [{"test_order": "A9"}],
+        }, rule=rule, env="prod")
         self.assertEqual(r.verdict, "BLOCKED")
         self.assertIn("payment", r.note.lower())
+
+    def test_mpesa_create_blocked_without_phone(self):
+        rule = dict(self.rule, create=[
+            {"app": "portal", "text": "pay with M-Pesa for {client}"},
+        ])
+        r, st, f = self._run({
+            "find": [{"test_order": "none"}],
+            "create": [{"test_order": "A9"}],
+        }, rule=rule, env="staging")
+        self.assertEqual(r.verdict, "BLOCKED")
+        self.assertRegex(r.note.lower(), r"m-?pesa|phone")
+
+    def test_mpesa_create_allowed_with_phone(self):
+        rule = dict(self.rule, create=[
+            {"app": "portal", "text": "pay with M-Pesa phone +254712345678 for {client}"},
+        ])
+        r, st, f = self._run({
+            "find": [{"test_order": "none"}],
+            "create": [{"test_order": "A9"}],
+            "check": [{"test_order_ok": "yes"}],
+        }, rule=rule, env="staging")
+        self.assertIsNone(r)
 
 
 if __name__ == "__main__":

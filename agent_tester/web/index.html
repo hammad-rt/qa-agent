@@ -97,8 +97,9 @@ button.ghost{background:transparent;border-color:transparent;color:var(--mute)}b
 .attempts .att.cur{border-color:var(--acc);color:var(--text)}
 .casehist{font-size:12px;color:var(--mute);margin-top:4px}
 pre.console{background:#020617;border:1px solid var(--line);border-radius:var(--r);padding:12px;white-space:pre-wrap;max-height:42vh;overflow:auto;margin:0 0 12px;font:12.5px/1.55 var(--mono);color:#E2E8F0}
-.guide{display:none;gap:8px;align-items:flex-start;margin:0 0 12px;padding:12px;border:1px dashed var(--line2);border-radius:var(--r);background:#0B1220}
-.guide.on{display:flex}.guide textarea{flex:1;min-height:64px}
+.guide{display:flex;gap:8px;align-items:flex-start;margin:0 0 12px;padding:12px;border:1px dashed var(--line2);border-radius:var(--r);background:#0B1220}
+.guide textarea{flex:1;min-height:64px}
+.guide .hint{font-size:12.5px;color:var(--mute);margin-top:4px}
 .ev{border-left:2px solid var(--line2);padding:6px 12px;margin-left:6px;font-size:14px}
 .ev.step{border-color:var(--acc)}.ev.fin{border-color:var(--ok)}.ev.err{border-color:var(--bad);background:#2a1012}
 .ev .who{color:var(--mute);font-size:12px;font-family:var(--mono)}code{background:#0B1220;border:1px solid var(--line);padding:1px 5px;border-radius:5px;font:12.5px var(--mono);word-break:break-all}
@@ -158,9 +159,9 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc);cursor:point
   <div id="phaseBar" class="phasebar" aria-label="Run phase" style="display:none"></div>
   <div id="promptPin" class="prompt-pin" aria-live="assertive"></div>
   <div id="subwrap" class="subwrap" style="display:none"><div id="waitBanner" class="wait-banner" role="status"></div><div id="sub"></div></div>
+  <div id="guideRow" class="guide" aria-label="Guidance for the agent" style="margin:10px 20px 0"><div style="flex:1;display:flex;flex-direction:column;gap:4px;min-width:0"><textarea id="guideIn" rows="2" onkeydown="if(event.key=='Enter'&&(event.ctrlKey||event.metaKey))sendGuide()" aria-label="Guidance for the agent" placeholder="Guide the agent, e.g. &quot;the phone field is under Contact details&quot;. No passwords."></textarea><div id="guideHint" class="hint"></div></div><div style="display:flex;flex-direction:column;gap:6px"><button class="pri" onclick="sendGuide()">Send to agent</button><span id="guideMsg" class="mute" role="status"></span></div></div>
   <div class="tabs" role="tablist"><div class="tab on" data-p="live" role="tab" tabindex="0" aria-selected="true" data-i="live">Live</div><div class="tab" data-p="cases" role="tab" tabindex="0" data-i="list">Cases</div><div class="tab" data-p="shots" role="tab" tabindex="0" data-i="img">Screenshots</div><div class="tab" data-p="log" role="tab" tabindex="0" data-i="act">Actions</div><div class="tab" data-p="report" role="tab" tabindex="0" data-i="doc">Report</div><div class="tab" data-p="know" role="tab" tabindex="0" data-i="book">Knowledge</div><div class="tab" data-p="mem" role="tab" tabindex="0" data-i="db">Memory</div></div>
   <div id="live" class="pane on">
-    <div id="guideRow" class="guide"><textarea id="guideIn" rows="2" onkeydown="if(event.key=='Enter'&&(event.ctrlKey||event.metaKey))sendGuide()" aria-label="Guidance for the agent" placeholder="Guide the agent, e.g. &quot;the phone field is under Contact details&quot;. It reads this at its very next thought, in the current case. No passwords."></textarea><div style="display:flex;flex-direction:column;gap:6px"><button class="pri" onclick="sendGuide()">Send to agent</button><span id="guideMsg" class="mute" role="status"></span></div></div>
     <div id="consoleWrap" style="display:none"><div class="mute">Agent console</div><pre class="console" id="console"></pre></div>
     <div class="toolbar"><b>Steps</b><label><input type="checkbox" id="showReads" onchange="$('#events').classList.toggle('hideReads',!this.checked)"> show page reads</label><label><input type="checkbox" id="follow" checked> follow live</label></div><div id="events" class="hideReads"><div class="empty">No steps yet.</div></div>
   </div>
@@ -350,11 +351,25 @@ function addEvent(e){const who=`<span class="who">${esc((e.at||'').slice(11,19))
   else if(!openBlock||openBlock.closed||openBlock.id=='plan'){ensure(nextCaseId())}
   if(e.calls)openBlock.html+=e.calls.map(c=>callHtml(c,who)).join('');
   else if(e.text){const t=clean(e.text);if(t)openBlock.html+=`<div class="say">${t.length>700?`${esc(t.slice(0,700))}<details class="more"><summary>show the rest</summary>${esc(t.slice(700))}</details>`:esc(t)}</div>`}}
-let curLive=false;function guideShow(){const on=!!(curLive||(job&&job.running&&job.run_dir===cur));$('#guideRow').classList.toggle('on',on)}
+let curLive=false;
+function guideShow(){
+  // Always visible on the run page. Live → applied next thought; idle → stored for next resume/rerun.
+  const live=!!(curLive||(job&&job.running&&job.run_dir===cur));
+  const hint=$('#guideHint');
+  if(!cur){hint.textContent='Open a run to send guidance.';return}
+  hint.textContent=live
+    ? 'Live: the agent reads this at its very next thought, in the current case.'
+    : 'Run not running, guidance will be applied on the next rerun/resume';
+}
 async function sendGuide(){const t=$('#guideIn').value.trim();if(!t||!cur)return;
   try{const r=await fetch(`/api/runs/${cur}/guide`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:t})});const j=await r.json().catch(()=>({}));
     if(!r.ok){$('#guideMsg').textContent=j.error||'not sent';if(r.status==404)checkStale(true);return}
-    $('#guideIn').value='';$('#guideMsg').textContent='Sent. The agent reads it at its very next thought.';setTimeout(()=>{$('#guideMsg').textContent=''},6000)}
+    const live=!!(curLive||(job&&job.running&&job.run_dir===cur));
+    $('#guideIn').value='';
+    $('#guideMsg').textContent=live
+      ? 'Sent. The agent reads it at its very next thought.'
+      : 'Saved. Applied on the next resume/rerun.';
+    setTimeout(()=>{$('#guideMsg').textContent=''},6000)}
   catch(e){$('#guideMsg').textContent='not sent: '+e}}
 let picked=null;
 function nextCaseId(){const done=new Set(blocks.map(b=>b.id));const c=((lastPlan||{}).cases||[]).find(x=>!done.has(x.id)&&(!picked||picked.includes(x.id)));return c?c.id:'case '+(blocks.length)}
@@ -388,7 +403,7 @@ function render(d){const res=d.results||{};d.shots=d.shots||[];d.reports=d.repor
  setHTML('#cases',((d.plan||{}).cases||[]).map(c=>{const r=res[c.id]||{};return `<div class="case"><h2><span>${esc(c.id)}</span><span class="grow">${esc(c.title)}</span> ${r.verdict?vpill(r.verdict):'<span class="pill pending">pending</span>'} <button class="sm" onclick="rerun({cases:'${esc(c.id)}'})" title="Rerun only this case in the same run window">${ic('redo')}Rerun</button></h2>
  ${caseHistHtml(c.id,d.previous_attempts||{})}
  <ol>${(c.steps||[]).map(st=>typeof st=='string'?`<li>${esc(st)}</li>`:`<li>[${esc(st.app)}] ${esc(st.text)} ${st.inferred?'<span class="inf">inferred</span>':''} ${st.changes_data?'<span class="chg">changes data</span>':''}</li>`).join('')}</ol>
- <div><b>Expected:</b> ${esc(c.expected)}</div>${r.actual?`<div><b>Actual:</b> ${esc(r.actual)}</div>`:''}${r.note?`<div><b>Notes:</b> ${esc(r.note)}</div>`:''}
+ <div><b>Expected:</b> ${esc(typeof c.expected==='string'?c.expected:JSON.stringify(c.expected||''))}</div>${r.actual?`<div><b>Actual:</b> ${esc(r.actual)}</div>`:''}${r.note?`<div><b>Notes:</b> ${esc(r.note)}</div>`:''}
  ${r.values&&Object.keys(r.values).length?`<div><b>Values:</b> ${Object.entries(r.values).map(([k,v])=>`${esc(k)}=<code>${esc(typeof v=='object'?v.value??JSON.stringify(v):v)}</code>`).join(' ')}</div>`:''}</div>`}).join('')||'<div class="empty">No plan yet.</div>');
  setHTML('#shots',d.shots.length?`<div class="shots">${d.shots.slice().reverse().map(n=>`<div class="shotbox"><img loading="lazy" alt="Screenshot ${esc(n)}" src="/api/runs/${cur}/file?path=shots/${encodeURIComponent(n)}" onclick="zoom(this.src)"><button class="x sm icon dan" title="Delete screenshot" aria-label="Delete screenshot" onclick="delShot('${esc(n)}')">${ic('trash')}</button><div class="mute">${esc(n)}</div></div>`).join('')}</div>`:'<div class="empty">No screenshots yet. Evidence appears here as the agent captures pages.</div>');
  setHTML('#log',(d.action_log||[]).length?`<table><thead><tr><th>#</th><th>Case</th><th>App</th><th>Action</th><th>Step</th><th>Approval</th><th>Outcome</th></tr></thead><tbody>${d.action_log.slice().reverse().map(a=>`<tr><td>${a.seq}</td><td><code>${esc(a.case_id)}</code></td><td>${esc(a.app)}</td><td><code>${esc(a.tool)}</code> ${a.inferred?'<span class="inf">inferred</span>':''}<div class="mute">${esc(JSON.stringify(a.args||{}).slice(0,140))}</div></td><td>${esc(a.plan_step??'')}</td><td>${esc(a.approval)}</td><td>${esc(a.outcome)}${a.deviation?`<div class="mute">${esc(a.deviation)}</div>`:''}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">No actions yet.</div>');

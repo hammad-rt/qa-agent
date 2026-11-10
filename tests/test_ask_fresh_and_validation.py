@@ -124,6 +124,7 @@ Page URL: https://portal/shipping
         self.assertTrue(any("fill out" in m.lower() or "required" in m.lower() for m in msgs))
 
     def test_submit_repeat_feeds_validation_before_loop(self):
+        import agent_tester.agents.tester as T
         st = RunState(Path(tempfile.mkdtemp()) / "run")
         pol = from_pack(load_pack(PACK), "staging", approver=lambda *a: False)
         s = TesterSession(
@@ -137,13 +138,17 @@ Page URL: https://portal/shipping
         )
         s._explored = False
         outs = []
-        for _ in range(3):
+        for _ in range(T.STUCK_MAX_ATTEMPTS):
             outs.append(s._budget_check("browser_click", {"element": "Continue", "ref": "e9"}))
-        # Second Continue (warn_at=2) should surface validation, not loop_detected.
+        # At warn_at, feed validation (still counts as an attempt); at max → lookup ladder / explore.
         self.assertTrue(any(o and "Package weight is required" in o.get("error", "") for o in outs))
+        self.assertTrue(any(o and "Explore before you act" in o.get("error", "") for o in outs))
         self.assertFalse(s.result.loop)
         self.assertFalse(any(
             a.get("tool") == "loop_detected" for a in st.data["action_log"]))
+        self.assertTrue(any(
+            a.get("tool") == "stuck_lookup" or a.get("tool") == "explore"
+            for a in st.data["action_log"]))
 
 
 class WebAnswerAskId(unittest.TestCase):

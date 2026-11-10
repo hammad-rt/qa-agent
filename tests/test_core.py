@@ -346,15 +346,18 @@ class TesterCallbacks(unittest.TestCase):
         self.assertTrue(any("re-reading" in e for e in errs))
 
     def test_loop_warn_then_stop(self):
+        import agent_tester.agents.tester as T
         self.s.max_calls = 100
         args = {"expression": "1+1"}
-        rs = [self.s.before_tool(self.t("calculate"), dict(args), None) for _ in range(5)]
-        self.assertIsNone(rs[0]); self.assertIsNone(rs[1])
-        self.assertIn("did not move", rs[2]["error"])
-        self.assertIn("Explore before you act", rs[4]["error"])      # first stall: explore, don't stop
+        # STUCK_MAX_ATTEMPTS=3 → warn at 2, ladder/explore at 3.
+        n = T.STUCK_MAX_ATTEMPTS
+        rs = [self.s.before_tool(self.t("calculate"), dict(args), None) for _ in range(n)]
+        self.assertIsNone(rs[0])
+        self.assertIn("did not move", rs[n - 2]["error"])
+        self.assertIn("Explore before you act", rs[n - 1]["error"])  # first stall: lookup ladder + explore
         self.assertFalse(self.s.result.limit_hit)
-        rs = [self.s.before_tool(self.t("calculate"), dict(args), None) for _ in range(5)]
-        self.assertIn("Stop now", rs[4]["error"])                    # same loop after exploring: stop
+        rs = [self.s.before_tool(self.t("calculate"), dict(args), None) for _ in range(n)]
+        self.assertIn("Stop now", rs[n - 1]["error"])                # same loop after exploring: stop
         self.assertTrue(self.s.result.loop and self.s.result.limit_hit)
 
     def test_idle_rereads_explore_then_stop(self):
@@ -380,7 +383,9 @@ class TesterCallbacks(unittest.TestCase):
         self.assertFalse(T._is_cycle(["a", "b", "c", "d", "e", "f"]))
         self.s.max_calls = 100
         r = [self.s.before_tool(self.t("calculate"), {"expression": e}, None) for e in ["1", "2"] * 3]
-        self.assertIn("Explore before you act", r[-1]["error"])
+        # STUCK_MAX_ATTEMPTS may warn on a repeated expression before the A/B cycle completes;
+        # either path must enter the lookup ladder / explore.
+        self.assertTrue(any(x and "Explore before you act" in x.get("error", "") for x in r), r)
 
     def test_label_from_snapshot(self):
         import agent_tester.agents.tester as T

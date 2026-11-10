@@ -1088,6 +1088,12 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
     blocked = _deps_block(case, state)
     if blocked is not None:
         return blocked
+    # M-Pesa only when the case asks for it AND a phone is provided; otherwise SKIPPED with reason.
+    from .data_prep import case_calls_for_mpesa, mpesa_gate
+    if case_calls_for_mpesa(case):
+        why = mpesa_gate(case=case, state=state)
+        if why:
+            return CaseResult(case_id=case.id, verdict="SKIPPED", expected=case.expected, note=why)
     from .placeholders import inject_placeholders
     results: list[StepResult] = []
     for app, steps in app_turns(case):

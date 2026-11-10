@@ -26,12 +26,26 @@ from .config import ROOT, Settings
 
 def open_memory(settings: Settings, pack):
     from .memory.embed import Embedder
+    from .memory.seeds import ensure_seeds
     from .memory.service import Memory
     from .memory.store import MemoryStore
-    mem = Memory(MemoryStore(settings.memory_db, Embedder()), pack.slug)
+    store = MemoryStore(settings.memory_db, Embedder())
+    # One-time scrub of env values previously stored as lasting resources.
+    if not (ROOT / "memory" / ".env-resources-scrubbed").exists():
+        n_scrub = store.scrub_env_resources()
+        (ROOT / "memory" / ".env-resources-scrubbed").write_text(
+            f"scrubbed_resources={n_scrub}\n"
+            "Env URLs/logins/record ids are no longer lasting memory; see docs/stack/redmine-memory.md.\n"
+        )
+        if n_scrub:
+            print(f"Scrubbed {n_scrub} resource row(s) that held env values (now run-settings only).")
+    mem = Memory(store, pack.slug)
     n = mem.import_resources_json(ROOT / "memory" / "resources.json")
     if n:
-        print(f"Moved {n} saved answer(s) from resources.json into memory.db.")
+        print(f"Moved {n} saved answer(s) from resources.json into memory.db (values dropped; secret_env kept).")
+    seeded = ensure_seeds(store, pack.slug)
+    if seeded["core"] or seeded["project"]:
+        print(f"Seeded memory lessons: core+{seeded['core']}, project+{seeded['project']}.")
     return mem
 
 
@@ -287,16 +301,17 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
             print(f"Continuing from the plan drafted in {draft_src.name} (plan only); no new planning.")
             plan = draft
         else:
+          _plan_lessons = lessons_mem.retriever().for_planner().prompt
           if feature:
             plan = asyncio.run(F.plan_feature(settings, pack, feature, task_id, env, tc_prefix,
-                                              lessons=lessons_mem.as_prompt(lessons_mem.preload()),
+                                              lessons=_plan_lessons,
                                               trace_path=state.dir / "trace.jsonl",
                                               preapprovable=list(pack.config.get("preapprovable_actions", []))))
             for ln in F.summary(feature, plan):
                 print("  " + ln)
           else:
             plan = asyncio.run(plan_task(settings, pack, task_text, task_id, env, only_case=",".join(only) or None,
-                                     lessons=lessons_mem.as_prompt(lessons_mem.preload()), trace_path=state.dir / "trace.jsonl", generate=generate,
+                                     lessons=_plan_lessons, trace_path=state.dir / "trace.jsonl", generate=generate,
                                      preapprovable=list(pack.config.get("preapprovable_actions", [])),
                                      batch_ids=file_ids))
     except LLMOutputError as e:
@@ -333,14 +348,15 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
     if user_answers and draft is None:
         print("\nUpdating the plan with your answers...")
         try:
+            _replan_lessons = memory.retriever().for_planner().prompt
             if feature:
                 new = asyncio.run(F.plan_feature(settings, pack, feature, task_id, env, tc_prefix,
-                                                 lessons=memory.as_prompt(memory.preload()),
+                                                 lessons=_replan_lessons,
                                                  trace_path=state.dir / "trace.jsonl", answers=user_answers,
                                                  preapprovable=list(pack.config.get("preapprovable_actions", []))))
             else:
                 new = asyncio.run(plan_task(settings, pack, task_text, task_id, env, only_case=",".join(only) or None,
-                                        lessons=memory.as_prompt(memory.preload()), trace_path=state.dir / "trace.jsonl",
+                                        lessons=_replan_lessons, trace_path=state.dir / "trace.jsonl",
                                         generate=generate, answers=user_answers,
                                         preapprovable=list(pack.config.get("preapprovable_actions", [])),
                                         batch_ids=file_ids))

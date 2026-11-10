@@ -647,10 +647,13 @@ class TesterSession:
             return out
 
         def recall_lessons(query: str) -> dict:
-            """Search saved lessons, recipes and known bugs for this project, e.g. "discount apply button"."""
+            """Search saved lessons, recipes and known bugs for this project, e.g. "discount apply button".
+            On-demand only — keeps the turn light; results are truncated to the memory budget."""
             if s.memory is None:
                 return {"lessons": []}
-            return {"lessons": [{"id": r["id"], "kind": r["kind"], "text": r["text"]} for r in s.memory.recall(query)]}
+            from ..memory.retrieve import truncate_row_text
+            rows = s.memory.recall(query, k=5, area=s.brief.get("area"), app=s.app, state=s.state)
+            return {"lessons": [{"id": r["id"], "kind": r["kind"], "text": truncate_row_text(r["text"])} for r in rows]}
 
         def propose_memory(kind: str, text: str, area: str = "") -> dict:
             """Suggest a lesson, recipe or fact worth keeping (e.g. a workaround that worked). The user approves it at the end."""
@@ -1467,14 +1470,22 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
                               "from facts.md; if it cannot be done, stop and report BLOCKED with the reason.\n" + rules + "\n")
             if brief.get("read_only") and not brief.get("discovery"):
                 instr += "\nThis turn is READ-ONLY: log in and read values only. Never change anything."
-            recipes = brief.get("recipes") or []
-            disco_notes = (brief.get("discovery_notes") or "").strip()
+            # Budgeted memory block (ranked rows + few stuck/route hints). Never dump learned.md.
+            mem_prompt = (brief.get("memory_prompt") or "").strip()
+            if mem_prompt and mem_prompt != "(no saved lessons for this turn)":
+                instr += ("\nMemory for this turn (hints only — verify on the live page; "
+                          "call recall_lessons if you need more):\n" + mem_prompt + "\n")
+            stats = brief.get("memory_stats") or {}
+            if stats.get("tokens"):
+                instr += f"(memory inject ~{stats.get('tokens')} tokens)\n"
+            recipes = (brief.get("recipes") or [])[:6]
+            disco_notes = (brief.get("discovery_notes") or "").strip()[:800]
             if recipes or disco_notes:
                 if brief.get("discovery"):
                     instr += ("\nPrior recipes / learned routes are HINTS only — verify on the live page; "
                               "ignore stale paths; map real menus, search and screens for this environment:\n")
                 else:
-                    instr += "\nUI map from discovery / memory (follow menu/label paths; do not re-explore from scratch):\n"
+                    instr += "\nUI map from discovery (follow menu/label paths; do not re-explore from scratch):\n"
                 instr += ("On an XSRF / acceptable-referer page, return via Home/menu — never retry the same "
                           "Administration deep-link with browser_navigate.\n")
                 for r in recipes:

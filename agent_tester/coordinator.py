@@ -89,19 +89,32 @@ def discovery_key(area: str | None, app: str) -> str:
     return f"{area or 'general'}:{app}"
 
 
-def recipes_covering(memory, area: str | None, app: str) -> list[str]:
-    """Active/proposed recipe texts that cover this case area (and a light app recall fallback)."""
+def recipes_covering(memory, area: str | None, app: str, state=None, title: str = "",
+                     pack_root=None) -> list[str]:
+    """Few ranked recipe/lesson hints for this area:app — budgeted, never a dump of learned.md."""
+    from .memory.retrieve import learned_hints_for
+    pack_hints = learned_hints_for(pack_root, area, app, title) if pack_root else []
     if memory is None:
-        return []
-    areas = [area] if area else None
-    rows = memory.preload(areas)
-    texts = [r["text"] for r in rows if r.get("kind") == "recipe" and r.get("text")]
-    if texts:
-        return texts
-    q = " ".join(x for x in (area, app) if x).strip()
-    if not q:
-        return []
-    return [r["text"] for r in memory.recall(q, k=5) if r.get("kind") == "recipe" and r.get("text")]
+        return pack_hints
+    # Tests (and thin fakes) may only implement preload/recall — keep that path working.
+    if not hasattr(memory, "retriever"):
+        areas = [area] if area else None
+        rows = memory.preload(areas) if hasattr(memory, "preload") else []
+        texts = [r["text"] for r in rows if r.get("kind") == "recipe" and r.get("text")]
+        if not texts:
+            q = " ".join(x for x in (area, app, title) if x).strip()
+            if q and hasattr(memory, "recall"):
+                texts = [r["text"] for r in memory.recall(q, k=5)
+                         if r.get("kind") == "recipe" and r.get("text")]
+        return list(dict.fromkeys(texts + pack_hints))
+    tr = memory.retriever(state=state)
+    res = tr.retrieve(area=area, app=app or "", query=title or (area or app or ""),
+                      title=title, pack_root=pack_root, include_learned=True)
+    texts = [r["text"] for r in res.rows if r.get("kind") == "recipe" and r.get("text")]
+    texts += list(res.learned_hints or [])
+    if not texts:
+        texts = [r["text"] for r in res.rows if r.get("text")]
+    return list(dict.fromkeys(texts + pack_hints))
 
 
 def env_fingerprint(plan, apps: list[str] | None = None) -> str:
@@ -164,8 +177,9 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory) -> dict
         (state.data.get("discovery_stale") or {}).pop(key, None)
 
     from . import learned
-    pack_routes = learned.read(state.data.get("pack_root"), case.area, app, case.title or "")
-    hints = pack_routes + recipes_covering(memory, case.area, app)
+    # Lean hints only (ranked + budgeted). learned.md is never injected wholesale.
+    hints = recipes_covering(memory, case.area, app, state=state, title=case.title or "",
+                             pack_root=state.data.get("pack_root"))
     tester = testers.get(app)
     if tester is None:
         entry = {"source": "skipped", "recipes": list(hints), "hints": list(hints),
@@ -285,16 +299,38 @@ def _has_admin_deeplink(texts) -> bool:
     return any(_ADMIN_DEEPLINK in (t or "") for t in texts)
 
 
-def inject_discovery(brief: dict, entry: dict) -> dict:
+def inject_discovery(brief: dict, entry: dict, *, max_recipes: int = 6, max_note_chars: int = 800) -> dict:
+    """Attach a small slice of discovery hints — never the whole recipe list or learned.md."""
     brief = dict(brief)
-    recipes = list(entry.get("recipes") or [])
-    notes = entry.get("notes") or ""
+    recipes = list(entry.get("recipes") or [])[:max_recipes]
+    notes = (entry.get("notes") or "")[:max_note_chars]
     brief["recipes"] = recipes
     brief["discovery_notes"] = notes
     # Soft-sanitize: keep recipe text intact for memory diffs; warn this run's brief only.
     if _has_admin_deeplink(recipes) or _ADMIN_DEEPLINK in notes:
         if _ADMIN_DEEPLINK_WARN not in notes:
             brief["discovery_notes"] = (notes + "\n" if notes else "") + _ADMIN_DEEPLINK_WARN
+    return brief
+
+
+def inject_memory(brief: dict, memory, state, app: str) -> dict:
+    """Select and attach a budgeted memory block for this turn; log injected size."""
+    if memory is None or not hasattr(memory, "retriever"):
+        brief["memory_prompt"] = ""
+        brief["memory_stats"] = {"tokens": 0, "chars": 0}
+        return brief
+    tr = memory.retriever(state=state)
+    res = tr.retrieve(
+        area=brief.get("area"), app=app, query=brief.get("title") or brief.get("case_id") or "",
+        title=brief.get("title") or "", pack_root=state.data.get("pack_root"),
+        include_learned=True,
+    )
+    brief["memory_prompt"] = res.prompt
+    brief["memory_stats"] = {"tokens": res.tokens, "chars": res.chars, "cache_hit": res.cache_hit,
+                             "rows": len(res.rows), "hints": len(res.learned_hints)}
+    # Prefer retrieve's ranked learned hints over a raw dump already in recipes.
+    if res.learned_hints and not brief.get("recipes"):
+        brief["recipes"] = list(res.learned_hints)[:4]
     return brief
 
 
@@ -435,6 +471,7 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
             return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected, note=f"no tester for app '{app}'")
         disco = ensure_discovery(plan, case, app, state, testers, memory)
         brief = inject_discovery(brief_for(plan, case, steps, state), disco)
+        brief = inject_memory(brief, memory, state, app)
         attempt = outages = 0
         while True:
             log_mark = len(state.data["action_log"])

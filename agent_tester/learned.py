@@ -1,16 +1,27 @@
-"""The pack's own knowledge base, written by every run: packs/<slug>/learned.md.
+"""Pack-local navigation notes: packs/<slug>/learned.md.
 
-Fixed code (not the model) records how a tester actually reached a screen, built from the action log, and what
-discovery found. Later cases in the same run and every later run read it back, so a route is found once.
-Record ids (order numbers, record= values) are stripped: records change, routes don't."""
+Split of responsibilities:
+  - learned.md  — Routes, Stuck, Discovery only (operational hints for this pack). Scrubbed of env details.
+  - SQLite      — lasting facts / lessons / recipes / bugs (source of truth for preload/recall).
+
+Behaviour and lasting recipes are proposed into SQLite; a short Behaviour line may still be
+appended here as a pack hint but never carries emails, URLs, logins, or record ids.
+"""
 from __future__ import annotations
 
 import re
 from datetime import date
 from pathlib import Path
 
-HEADER = ("# What the agent learned\n\nWritten by the agent after each run (routes, recipes, how the app behaves, and where it got stuck).\n"
-          "Edit or delete freely; wrong lines are worse than none.\n")
+from .memory.env_guard import EnvDetailError, assert_safe_lasting, scrub_env_details
+
+HEADER = (
+    "# What the agent learned\n\n"
+    "Pack-local navigation notes (routes, stuck, discovery). Lasting lessons and recipes live in "
+    "SQLite memory — this file is not dumped wholesale into the LLM.\n"
+    "Edit or delete freely; wrong lines are worse than none. Env details (emails, URLs, logins, "
+    "record ids) are stripped on write.\n"
+)
 _NAV_TOOLS = {"browser_navigate", "browser_click", "browser_select_option"}
 
 
@@ -24,6 +35,7 @@ def scrub(text: str) -> str:
     t = re.sub(r"/\d{2,}(?=/|$|\?)", "/<id>", t)
     t = re.sub(r"\b[A-Z]{1,3}\d{3,}\b", "<a record>", t)
     t = re.sub(r"https?://[^/\s]+", "", t)      # host differs per env; keep the path
+    t = scrub_env_details(t)
     return re.sub(r"\s+", " ", t).strip()
 
 
@@ -73,6 +85,7 @@ def _words(s: str) -> set[str]:
 
 
 def read(pack_root, area: str | None, app: str, title: str = "") -> list[str]:
+    """Return matching lines for area:app. Callers must still budget/truncate before LLM inject."""
     p = path_for(pack_root)
     if not p or not p.is_file():
         return []
@@ -88,10 +101,23 @@ def read(pack_root, area: str | None, app: str, title: str = "") -> list[str]:
 
 
 def add(pack_root, area: str | None, app: str, line: str) -> bool:
-    """Append one line under '## <area>:<app>'. Skips near-duplicates. Returns True if written."""
+    """Append one line under '## <area>:<app>'. Skips near-duplicates and env-only noise."""
     p = path_for(pack_root)
     line = (line or "").strip().replace("\n", " ")
     if not p or not line:
+        return False
+    line = scrub(line)
+    try:
+        # Allow short route lines; assert_safe_lasting rejects empty-after-scrub env noise.
+        body_for_guard = re.sub(r"\s*\(\d{4}-\d\d-\d\d.*?\)$", "", line)
+        if body_for_guard.lower().startswith(("route:", "stuck", "discovery:", "behaviour:", "recipe")):
+            # Structural prefixes are fine; guard the substance after the prefix.
+            substance = body_for_guard.split(":", 1)[-1].strip() if ":" in body_for_guard else body_for_guard
+            if substance:
+                assert_safe_lasting(substance, context="learned.md")
+        else:
+            assert_safe_lasting(body_for_guard, context="learned.md")
+    except EnvDetailError:
         return False
     text = p.read_text() if p.is_file() else HEADER
     key = f"{area or 'general'}:{app}"
@@ -120,9 +146,8 @@ BEHAVIOUR_PREFIX = "Behaviour: "
 
 
 def record_behaviour(pack_root, area, app, text: str, case_id: str) -> str | None:
-    """How the app reacts (silent rejects, new tabs, values that need a reload). Written next to the routes so
-    later cases read it before they start. Record ids are stripped like routes."""
-    body = scrub(text)[:600]
+    """Short pack hint of how the app reacts. Env details stripped. Lasting rules go to SQLite separately."""
+    body = scrub(text)[:400]
     if len(body) < 12:
         return None
     line = f"{BEHAVIOUR_PREFIX}{body} ({date.today().isoformat()}, {case_id})"
@@ -130,19 +155,17 @@ def record_behaviour(pack_root, area, app, text: str, case_id: str) -> str | Non
 
 
 def record_recipe(pack_root, area, app, what: str, actions: list[dict]) -> str | None:
-    """A procedure that worked end to end (e.g. creating test data), data-changing steps included, so the next
-    case or run follows it instead of working it out again."""
+    """Operational recipe hops for the pack file. Lasting recipes should also be proposed to SQLite."""
     hops = route_from_actions(actions, app, limit=30, changes=True)
     if len(hops) < 2:
         return None
     line = f"Recipe ({scrub(what)}): " + " -> ".join(hops) + f" ({date.today().isoformat()})"
     return line if add(pack_root, area, app, line) else None
 
+
 def record_stuck(pack_root, area, app, case_id: str, why: str, notes: str,
                  actions: list[dict] | None = None) -> str | None:
-    """What went wrong on a failed or stuck turn: so the next run of the same area reads it before it starts
-    and does not repeat the same dead end. Includes the last route, what explore said was already tried, and
-    the tester's own note. Record ids are stripped like routes."""
+    """What went wrong on a failed or stuck turn — read back only for the same area (budgeted)."""
     hops = route_from_actions(actions or [], app, limit=12, changes=True)
     tried: list[str] = []
     for a in reversed(actions or []):
@@ -161,3 +184,25 @@ def record_stuck(pack_root, area, app, case_id: str, why: str, notes: str,
     parts.append("Next time: do not repeat the same clicks; pick a route that was not tried, or finish stuck if none.")
     line = ". ".join(parts) + f" ({date.today().isoformat()}, {case_id})"
     return line if add(pack_root, area, app, line) else None
+
+
+def scrub_file(pack_root) -> int:
+    """Rewrite learned.md scrubbing env details in place. Returns number of lines changed."""
+    p = path_for(pack_root)
+    if not p or not p.is_file():
+        return 0
+    text = p.read_text()
+    changed = 0
+    out_lines = []
+    for line in text.splitlines():
+        if line.startswith("- "):
+            cleaned = scrub(line[2:])
+            new = f"- {cleaned}"
+            if new != line:
+                changed += 1
+            out_lines.append(new)
+        else:
+            out_lines.append(line)
+    if changed:
+        p.write_text("\n".join(out_lines) + ("\n" if text.endswith("\n") else ""))
+    return changed

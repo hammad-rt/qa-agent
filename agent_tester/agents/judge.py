@@ -62,7 +62,12 @@ def make_judge(settings: Settings, pack, memory=None):
         failure_text = brief.get("title", "") + " " + brief.get("expected", "") + " " + json.dumps(
             {k: v for sr in step_results for k, v in sr.values.items()})
         payload = {
-            "lessons": memory.preload([brief["area"]] if brief.get("area") else None) if memory else [],
+            "lessons": (
+                memory.retriever(state=state).retrieve(
+                    area=brief.get("area"), app="", query=failure_text[:200],
+                    title=brief.get("title") or "", include_learned=False,
+                ).rows if memory else []
+            ),
             "known_bug_candidates": memory.known_bug_candidates(failure_text, pack.known_bugs) if memory else [],
             "unrestored_settings": unrestored,
             "brief": brief, "action_log": actions,

@@ -46,12 +46,17 @@ def ctx(env="staging", mem=None):
 
 class AccountsAskedEachRun(unittest.TestCase):
     def setUp(self):
+        import tempfile
+        from pathlib import Path
         self.saved = dict(os.environ)
         for k in list(os.environ):
             if k.startswith(("SAVO", "SAVOSTORE")):
                 del os.environ[k]
+        self._prefs_tmp = tempfile.TemporaryDirectory()
+        os.environ["MEMORY_PREFS_PATH"] = str(Path(self._prefs_tmp.name) / "prefs.json")
 
     def tearDown(self):
+        self._prefs_tmp.cleanup()
         os.environ.clear()
         os.environ.update(self.saved)
 
@@ -59,7 +64,7 @@ class AccountsAskedEachRun(unittest.TestCase):
         os.environ["SAVOSTORE_CRM_PASSWORD"] = "x"
         r = G.resolve_account(Requirement(key="account.crm.admin"), "crm", "admin", ctx())
         self.assertEqual(r.status, "missing")
-        self.assertEqual(r.default, "maria.tariq")
+        self.assertEqual(r.default, "maria.tariq")  # FakePack staging username
         self.assertIn("[Enter = maria.tariq]", r.question)
 
     def test_enter_keeps_default_and_reuses_existing_password(self):
@@ -84,6 +89,7 @@ class AccountsAskedEachRun(unittest.TestCase):
         self.assertEqual(r.secret_env, "SAVOSTORE_CRM_PASSWORD__HAMMAD_IQBAL")
         self.assertEqual(list(written), ["SAVOSTORE_CRM_PASSWORD__HAMMAD_IQBAL"])
         self.assertEqual(r.must_have, ["Admin"])
+        # last-used lives in local prefs (not lasting SQLite memory)
         r2 = G.resolve_account(Requirement(key="account.crm.admin"), "crm", "admin", ctx(mem=mem))
         self.assertEqual(r2.default, "hammad.iqbal")
 

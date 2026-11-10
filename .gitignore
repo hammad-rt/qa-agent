@@ -5,6 +5,9 @@ memory/*.json
 !memory/memory-export.json
 memory/*.db
 memory/*.db-*
+memory/run-prefs.json
+memory/run-history/
+memory/.env-resources-scrubbed
 __pycache__/
 *.pyc
 # Stray Playwright screenshots saved to the repo root instead of runs/<run>/shots/

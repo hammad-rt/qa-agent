@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -16,7 +17,9 @@ class RunState:
         self.data: dict = json.loads(self.path.read_text()) if self.path.exists() else {
             "status": "new", "plan": None, "approved": False, "preapproved": [],
             "results": {}, "values": {}, "action_log": [], "checkpoints": [], "notes": [],
+            "attempt": 1,
         }
+        self.data.setdefault("attempt", 1)
 
     @classmethod
     def new(cls, runs_dir: Path, task_id: int) -> "RunState":
@@ -71,12 +74,57 @@ class RunState:
         for cid in case_ids:
             old = self.data["results"].pop(cid, None)
             if old:
-                prev.setdefault(cid, []).append(old)
+                # Tag which attempt produced this result (for the UI history strip).
+                tagged = dict(old)
+                tagged.setdefault("attempt", int(self.data.get("attempt") or 1))
+                prev.setdefault(cid, []).append(tagged)
             floors[cid] = len(self.data["action_log"])
             for key in ("entered_values", "save_clicks"):
                 (self.data.get(key) or {}).pop(cid, None)
         self.data["status"] = "running"
         self.checkpoint(f"rerunning {', '.join(case_ids)} in this run")
+
+    def archive_attempt(self) -> int:
+        """Snapshot the current attempt under attempts/<n>/ (results, shots, report, trace) before a same-run rerun.
+
+        Returns the attempt number that was archived. Bumps state.data['attempt'] to n+1.
+        """
+        n = int(self.data.get("attempt") or 1)
+        dest = self.dir / "attempts" / str(n)
+        dest.mkdir(parents=True, exist_ok=True)
+        verdicts = {
+            cid: {"verdict": (r or {}).get("verdict"), "note": (r or {}).get("note"),
+                  "actual": (r or {}).get("actual"), "bug_title": (r or {}).get("bug_title")}
+            for cid, r in (self.data.get("results") or {}).items()
+        }
+        meta = {
+            "attempt": n,
+            "archived_at": datetime.now().isoformat(timespec="seconds"),
+            "status": self.data.get("status"),
+            "results": self.data.get("results") or {},
+            "verdicts": verdicts,
+            "data_reuse": self.data.get("data_reuse"),
+            "checkpoints": list(self.data.get("checkpoints") or [])[-20:],
+        }
+        (dest / "results.json").write_text(json.dumps(meta, indent=2, default=str))
+        # Evidence files (best-effort copies).
+        for name in ("report.html", "report.pdf", "trace.jsonl", "console.log", "progress.log"):
+            src = self.dir / name
+            if src.is_file():
+                shutil.copy2(src, dest / name)
+        shots = self.dir / "shots"
+        if shots.is_dir():
+            out = dest / "shots"
+            if out.exists():
+                shutil.rmtree(out)
+            shutil.copytree(shots, out)
+        hist = self.data.setdefault("attempt_history", [])
+        hist.append({"attempt": n, "dir": f"attempts/{n}", "verdicts": verdicts,
+                     "archived_at": meta["archived_at"]})
+        self.data["attempt"] = n + 1
+        self.checkpoint(f"archived attempt {n} → attempts/{n}")
+        self.save()
+        return n
 
     def checkpoint(self, label: str, status: str | None = None) -> None:
         from .redact import for_user

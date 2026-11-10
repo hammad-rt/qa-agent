@@ -686,8 +686,14 @@ def cmd_leftovers(run_dir: Path) -> int:
 
 
 def cmd_rerun(settings: Settings, task_id: int, cases: str | None, src_run: str | None = None,
-              failed: bool = False) -> int:
-    """Rerun selected cases from the latest approved plan. Goes through the plan gate again."""
+              failed: bool = False, new_run: bool = False) -> int:
+    """Rerun selected cases from an approved plan.
+
+    With --from (and without --new-run): continue in the same run folder — archive the current
+    attempt, re-verify data-plan items, reopen the chosen cases (plus dependents).
+    With --new-run / Start fresh, or when no --from / repair case was added to an old plan:
+    open a new run folder and go through the plan gate again.
+    """
     from . import gate
     from .modes import filter_plan, latest_plan, parse_cases
     from .plan_checks import check_plan
@@ -732,7 +738,8 @@ def cmd_rerun(settings: Settings, task_id: int, cases: str | None, src_run: str 
     except ValueError as e:
         print(e)
         return 1
-    if src_run and (failed or cases) and len(plan.cases) < len(old.cases) and not repair_added:
+    # Same-run whenever we have a concrete --from folder (web Rerun / CLI --from), unless Start fresh.
+    if src_run and not new_run and not repair_added:
         return _rerun_in_place(settings, src, [c.id for c in plan.cases])
     pack = _pack_for_run(settings, plan)
     state = RunState.new(settings.runs_dir, task_id)
@@ -777,8 +784,9 @@ def cmd_rerun(settings: Settings, task_id: int, cases: str | None, src_run: str 
 
 
 def _rerun_in_place(settings: Settings, run_dir: Path, case_ids: list[str]) -> int:
-    """"Rerun not passed" / one case: continue the same run folder, redo only these cases, keep the passes."""
+    """Continue in the same run folder: archive attempt, reverify data plan, reopen cases + dependents."""
     from . import gate
+    from .rerun_prep import prepare_same_run_rerun
     from .run_state import RunState
     from .tools.policy import from_pack
     state = RunState(run_dir)
@@ -786,9 +794,20 @@ def _rerun_in_place(settings: Settings, run_dir: Path, case_ids: list[str]) -> i
     if not plan or not state.data.get("approved"):
         print("This run has no approved plan; start it again with `test`.")
         return 1
-    print(f"Rerunning {', '.join(case_ids)} in the same run; passed cases are kept. Run folder: {run_dir}")
-    state.reopen_cases(case_ids)
     pack = _pack_for_run(settings, plan)
+    pack_cfg = state.data.get("pack_cfg") or pack.config
+    summary = prepare_same_run_rerun(state, plan, pack_cfg, case_ids, lookup=None, archive=True)
+    reused = [t for t, i in (summary.get("data_reuse") or {}).items() if i.get("action") == "reuse"]
+    recreated = [t for t, i in (summary.get("data_reuse") or {}).items() if i.get("action") == "recreate"]
+    print(
+        f"Attempt {summary['attempt']} in {run_dir.name}: "
+        f"rerunning {', '.join(summary['cases'])}"
+        + (f"; archived attempt {summary['archived_attempt']}" if summary.get("archived_attempt") else "")
+    )
+    if reused:
+        print(f"  Reusing data: {', '.join(reused)}")
+    if recreated:
+        print(f"  Recreating data: {', '.join(recreated)}")
     policy = from_pack(pack, plan.env, approver=gate.console_approver())
     policy.preapprove(state.data.get("preapproved", []))
     run_sites(policy, plan)
@@ -1138,6 +1157,8 @@ def _main(argv=None) -> int:
     rr.add_argument("--cases", default=None, help="default: all cases of the plan")
     rr.add_argument("--from", dest="src_run", default=None, help="run folder whose plan to rerun (default: latest approved)")
     rr.add_argument("--failed", action="store_true", help="only the cases that did not PASS in --from")
+    rr.add_argument("--new-run", action="store_true",
+                    help="open a new run folder instead of continuing in --from (Start fresh)")
     rr.add_argument("--headed", action="store_true", help="show the testers' browser windows")
     wp = sub.add_parser("web", help="open the web UI (runs, live steps, reports)")
     wp.add_argument("--port", type=int, default=8765)
@@ -1212,7 +1233,7 @@ def _main(argv=None) -> int:
                         fresh_plan=a.fresh_plan, draft_run=a.draft_run, subtasks=a.subtasks,
                         cases_file=a.cases_file, rediscover=bool(getattr(a, "rediscover", False)))
     if a.cmd == "rerun":
-        return cmd_rerun(settings, a.task_id, a.cases, a.src_run, a.failed)
+        return cmd_rerun(settings, a.task_id, a.cases, a.src_run, a.failed, getattr(a, "new_run", False))
     if a.cmd == "web":
         from .web.server import serve
         return serve(a.host, a.port)

@@ -8,12 +8,14 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import re
 import signal
 import subprocess
 import sys
 import threading
 import time
 import uuid
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -120,6 +122,232 @@ def knowledge() -> list[dict]:
 STATIC = Path(__file__).with_name("index.html")
 JOBS: dict[str, "Job"] = {}
 SECRET_WORDS = ("password", "secret", "token", "api key")
+PRE_CASE_RE = re.compile(r"^(DISCO-|CONTACT-|PREP-)")
+DEFAULT_STUCK_ASK_TIMEOUT = int(os.environ.get("STUCK_ASK_TIMEOUT_SEC", "600"))
+
+
+def classify_prompt(prompt: str) -> dict:
+    """Read-only: classify a stdin/ASK prompt so the web UI can pin the right panel.
+
+    Returns kind, optional timeout_sec (stuck-ask), and a short title for the banner.
+    """
+    p = (prompt or "").strip()
+    if not p:
+        return {"kind": "none", "timeout_sec": None, "title": ""}
+    stuck = bool(re.search(r"(?i)options:\s*\(1\)\s*give guidance", p)
+                 or re.search(r"(?i)reply with\s*1:<text>", p)
+                 or re.search(r"(?i)^stuck on\s+\S+", p))
+    if stuck:
+        m = re.search(r"(?i)wait up to\s+(\d+)\s*s", p)
+        return {"kind": "stuck_ask", "timeout_sec": int(m.group(1)) if m else DEFAULT_STUCK_ASK_TIMEOUT,
+                "title": "Stuck — waiting for your answer"}
+    if re.search(r"(?i)token to edit|correct any create part|data plan", p) and not re.search(r"\[y/N\]", p):
+        return {"kind": "data_plan", "timeout_sec": None, "title": "Data plan — your input"}
+    if re.search(r"\[y/N\]", p):
+        if re.search(r"(?i)start the run", p):
+            return {"kind": "start_run", "timeout_sec": None, "title": "Start the run?"}
+        if re.search(r"(?i)pre-approve", p):
+            return {"kind": "preapprove", "timeout_sec": None, "title": "Pre-approve actions?"}
+        if re.search(r"(?i)approve this tool|new tool|-{5}\s*script\s*-{5}", p):
+            return {"kind": "tool_approve", "timeout_sec": None, "title": "Approve new tool?"}
+        if re.search(r"(?i)test on production", p):
+            return {"kind": "prod_confirm", "timeout_sec": None, "title": "Production confirm"}
+        if re.search(r"(?i)approval needed|allow\?", p):
+            return {"kind": "approval", "timeout_sec": None, "title": "Approval needed"}
+        return {"kind": "confirm", "timeout_sec": None, "title": "Confirm"}
+    return {"kind": "question", "timeout_sec": None, "title": "Question for you"}
+
+
+def _parse_iso(s: str | None) -> float | None:
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00").split("+")[0]).timestamp()
+    except ValueError:
+        return None
+
+
+def _fmt_action(a: dict) -> str:
+    tool = str(a.get("tool") or "")
+    args = a.get("args") or {}
+    if tool == "run_helper":
+        return f"helper {args.get('name') or ''}".strip()
+    if tool.startswith("browser_"):
+        bit = args.get("element") or args.get("url") or args.get("text") or args.get("key") or ""
+        return f"{tool.replace('browser_', '')} {bit}".strip()[:80]
+    if tool in ("finish", "mark_step", "stuck_ask", "ask_user"):
+        return tool
+    return (tool + (" " + json.dumps(args, default=str)[:60] if args else "")).strip()[:80]
+
+
+def derive_pre_tasks(st: dict, *, live: bool = False, now: float | None = None) -> list[dict]:
+    """Group DISCO-/CONTACT-/PREP-* rows from action_log (read-only). Elapsed uses checkpoints when possible."""
+    now = time.time() if now is None else now
+    # state.status "running" still means "this was the live phase" when the process pid is gone.
+    seeming_live = live or (st.get("status") == "running")
+    log = st.get("action_log") or []
+    cps = st.get("checkpoints") or []
+    by: dict[str, list[dict]] = {}
+    for a in log:
+        cid = str(a.get("case_id") or "")
+        if PRE_CASE_RE.match(cid):
+            by.setdefault(cid, []).append(a)
+    if not by:
+        return []
+    last_cid = str((log[-1] or {}).get("case_id") or "") if log else ""
+    out = []
+    for cid, acts in by.items():
+        if cid.startswith("DISCO-"):
+            kind = "discovery"
+        elif cid.startswith("CONTACT-"):
+            kind = "contact"
+        else:
+            kind = "prep"
+        key = cid.split("-", 1)[-1]
+        # Status: running when this is the latest activity and the run still looks live.
+        running = seeming_live and last_cid == cid
+        failed = any(
+            str(a.get("outcome") or "").lower() in ("error", "denied", "failed", "blocked")
+            or "fail" in str(a.get("deviation") or "").lower()
+            for a in acts)
+        later = False
+        for a in log[::-1]:
+            if a.get("case_id") == cid:
+                break
+            if a.get("case_id"):
+                later = True
+                break
+        done_cp = any(
+            (kind == "discovery" and "discovery done" in str(c.get("label") or "").lower()
+             and key.split("-")[0].lower() in str(c.get("label") or "").lower())
+            or (kind == "contact" and "contact lookup" in str(c.get("label") or "").lower()
+                and "fail" not in str(c.get("label") or "").lower())
+            or (kind == "prep" and f"data prep {key.split('-')[0]}".lower() in str(c.get("label") or "").lower()
+                and any(w in str(c.get("label") or "").lower() for w in ("using ", "saved how", "failed")))
+            for c in cps)
+        if running:
+            status = "running"
+        elif failed and not later:
+            status = "failed"
+        elif later or done_cp:
+            status = "done" if not failed else "failed"
+        elif seeming_live:
+            status = "pending"
+        else:
+            status = "done" if not failed else "failed"
+        # Elapsed from run-started / first related checkpoint to done checkpoint (or now if running).
+        start_ts = _parse_iso(cps[0].get("at")) if cps else None
+        end_ts = None
+        for c in cps:
+            lab = str(c.get("label") or "").lower()
+            ts = _parse_iso(c.get("at"))
+            if ts is None:
+                continue
+            if kind == "discovery" and "discovery done" in lab and key.split("-")[0].lower() in lab:
+                end_ts = ts
+            if kind == "contact" and "contact lookup" in lab and "fail" not in lab:
+                end_ts = ts
+            if kind == "prep" and f"data prep {key.split('-')[0]}".lower() in lab and (
+                    "using " in lab or "saved how" in lab or "failed" in lab):
+                end_ts = ts
+        if running:
+            # Prefer wall-clock only when the run start is recent; otherwise last checkpoint delta.
+            if start_ts is not None and (now - start_ts) < 36 * 3600:
+                end_ts = now
+            else:
+                end_ts = _parse_iso((cps[-1] or {}).get("at")) if cps else now
+        elif end_ts is None and cps:
+            end_ts = _parse_iso(cps[-1].get("at"))
+        elapsed = int(max(0, end_ts - start_ts)) if (start_ts is not None and end_ts is not None) else None
+        last = acts[-1]
+        out.append({
+            "id": cid, "kind": kind, "status": status,
+            "actions": len(acts), "current_action": _fmt_action(last),
+            "app": last.get("app") or "", "elapsed_sec": elapsed,
+            "outcome": last.get("outcome") or "",
+        })
+    order = {"discovery": 0, "contact": 1, "prep": 2}
+    out.sort(key=lambda r: (order.get(r["kind"], 9), r["id"]))
+    return out
+
+
+def derive_phase(st: dict, *, live: bool = False, has_report: bool = False) -> dict:
+    """Read-only run phase for the stepper: planning → discovery → prep → cases → report."""
+    plan = st.get("plan") or {}
+    results = st.get("results") or {}
+    log = st.get("action_log") or []
+    status = st.get("status") or "unknown"
+    seeming_live = live or status == "running"
+    cases = plan.get("cases") or []
+    case_ids = {c.get("id") for c in cases if c.get("id")}
+    last_cid = str((log[-1] or {}).get("case_id") or "") if log else ""
+    pre = derive_pre_tasks(st, live=live)
+    has_disco = any(p["kind"] == "discovery" for p in pre)
+    has_prep = any(p["kind"] in ("contact", "prep") for p in pre)
+    case_started = any(str(a.get("case_id") or "") in case_ids for a in log) or bool(results)
+    finished = status in ("finished", "done", "dry_run") or (
+        not seeming_live and bool(results) and len(results) >= len(cases) and cases)
+
+    steps = [
+        {"id": "planning", "label": "Planning"},
+        {"id": "discovery", "label": "Discovery"},
+        {"id": "prep", "label": "Test data setup"},
+        {"id": "cases", "label": "Cases"},
+        {"id": "report", "label": "Report"},
+    ]
+    # Active phase
+    if not plan.get("cases"):
+        active = "planning"
+    elif seeming_live and PRE_CASE_RE.match(last_cid):
+        active = "discovery" if last_cid.startswith("DISCO-") else "prep"
+    elif seeming_live and (case_started or last_cid in case_ids):
+        active = "cases"
+    elif seeming_live and not case_started:
+        # Between plan and first case: prefer discovery/prep if those tasks exist and aren't all done
+        if has_disco and any(p["status"] == "running" or p["status"] == "pending" for p in pre if p["kind"] == "discovery"):
+            active = "discovery"
+        elif has_prep and any(p["status"] in ("running", "pending") for p in pre if p["kind"] in ("contact", "prep")):
+            active = "prep"
+        elif has_disco and not any(p["status"] == "done" for p in pre if p["kind"] == "discovery"):
+            active = "discovery"
+        elif has_prep and not all(p["status"] in ("done", "failed") for p in pre if p["kind"] in ("contact", "prep")):
+            active = "prep"
+        else:
+            active = "cases" if case_started else "discovery" if has_disco else "prep" if has_prep else "cases"
+    elif finished or has_report or status in ("finished", "done"):
+        active = "report"
+    elif case_started:
+        active = "cases"
+    elif has_prep:
+        active = "prep"
+    elif has_disco:
+        active = "discovery"
+    else:
+        active = "planning"
+
+    order = [s["id"] for s in steps]
+    ai = order.index(active)
+    for i, s in enumerate(steps):
+        if i < ai:
+            s["state"] = "done"
+        elif i == ai:
+            s["state"] = "active"
+        else:
+            s["state"] = "todo"
+    # Mark skipped discovery/prep when never present and we're past them
+    if not has_disco and ai > order.index("discovery"):
+        steps[order.index("discovery")]["state"] = "skipped"
+    if not has_prep and ai > order.index("prep"):
+        steps[order.index("prep")]["state"] = "skipped"
+    current_case = None
+    if active == "cases" and seeming_live:
+        current_case = next((c.get("id") for c in cases if c.get("id") not in results
+                             and (not (st.get("mode") or {}).get("cases")
+                                  or c.get("id") in (st.get("mode") or {}).get("cases"))), None)
+        if last_cid in case_ids:
+            current_case = last_cid
+    return {"active": active, "steps": steps, "pre_tasks": pre, "current_case": current_case,
+            "case_started": case_started}
 
 
 class Job:
@@ -131,6 +359,7 @@ class Job:
         self.started = time.time()
         self.out = ""
         self.pending: dict | None = None      # the question the run is waiting on (from an ASK marker line)
+        self.waiting_since: float | None = None
         self._buf = ""
         self._saved = 0                       # how much of out is already in runs/<run>/console.log
         # resume doesn't print "Run folder:", but its run is the argument
@@ -194,6 +423,7 @@ class Job:
                     q["secret"] = bool(q.get("secret"))      # the CLI knows which questions are secret; trust it
                     # A new prompt invalidates any prior pending answer — only a fresh reply for this ask_id counts.
                     self.pending = q
+                    self.waiting_since = time.time()
                     self._answered_ask_ids = getattr(self, "_answered_ask_ids", set())
                     if self.out and not self.out.endswith("\n"):
                         self.out += "\n"
@@ -214,6 +444,7 @@ class Job:
     def info(self, since: int = 0) -> dict:
         with self.lock:
             text = self.out
+            waiting_since = self.waiting_since
         running = self.proc.poll() is None
         ask_id = ""
         if self.pending and running:
@@ -223,9 +454,16 @@ class Job:
             tail = text.rstrip().splitlines()[-1] if text.strip() else ""
             waiting = running and not text.endswith("\n") and bool(tail)
             prompt, secret = (tail if waiting else ""), waiting and any(w in tail.lower() for w in SECRET_WORDS)
+            if waiting and waiting_since is None:
+                waiting_since = time.time()
+        meta = classify_prompt(prompt) if waiting else {"kind": "none", "timeout_sec": None, "title": ""}
         return {"id": self.id, "args": self.args, "started": self.started, "running": self.proc.poll() is None,
                 "code": self.proc.poll(), "out": text[since:], "len": len(text), "waiting": waiting,
                 "secret": secret, "prompt": prompt, "ask_id": ask_id,
+                "prompt_kind": meta.get("kind") or "none",
+                "prompt_title": meta.get("title") or "",
+                "prompt_timeout_sec": meta.get("timeout_sec"),
+                "waiting_since": waiting_since if waiting else None,
                 "run_dir": _run_dir_from(text) or self.run_hint}
 
     def answer(self, text: str, ask_id: str | None = None):
@@ -255,6 +493,7 @@ class Job:
                     self._answered_ask_ids = getattr(self, "_answered_ask_ids", set())
                     self._answered_ask_ids.add(use_id)
                 self.pending = None
+                self.waiting_since = None
                 self.out += ("********" if secret and text else text) + "\n"
             self._persist()
             return True
@@ -296,11 +535,34 @@ def run_summary(d: Path) -> dict:
             counts[v] = counts.get(v, 0) + 1
     cps = st.get("checkpoints") or []
     live = _live(d)
+    has_report = (d / "report.html").exists() or (d / "report.pdf").exists()
+    phase = derive_phase(st, live=live, has_report=has_report)
+    started = cps[0]["at"] if cps else None
+    elapsed_sec = None
+    ts0 = _parse_iso(started)
+    if ts0 is not None:
+        if live and (time.time() - ts0) < 36 * 3600:
+            end = time.time()
+        else:
+            end = _parse_iso((cps[-1] or {}).get("at")) or d.stat().st_mtime
+        elapsed_sec = int(max(0, end - ts0))
+    current = phase.get("current_case")
+    if current is None and live:
+        current = next((c.get("id") for c in plan.get("cases") or [] if c.get("id") not in results
+                        and (not (st.get("mode") or {}).get("cases")
+                             or c.get("id") in (st.get("mode") or {}).get("cases"))), None)
+    # Prefer a running pre-task id when still in discovery/prep so the list isn't blank.
+    if live and phase.get("active") in ("discovery", "prep"):
+        running_pre = next((p["id"] for p in phase.get("pre_tasks") or [] if p.get("status") == "running"), None)
+        if running_pre:
+            current = running_pre
     return {"id": d.name, "task": plan.get("task_id") or d.name.split("-")[0], "env": plan.get("env"),
             "status": "running" if live else st.get("status", "unknown"), "cases": len(plan.get("cases") or []),
             "done": len(results), "counts": counts,
-            "current": next((c.get("id") for c in plan.get("cases") or [] if c.get("id") not in results
-                             and (not (st.get("mode") or {}).get("cases") or c.get("id") in (st.get("mode") or {}).get("cases"))), None) if live else None, "started": cps[0]["at"] if cps else None,
+            "current": current, "started": started, "elapsed_sec": elapsed_sec,
+            "phase": phase.get("active"), "phase_steps": phase.get("steps"),
+            "pre_tasks": phase.get("pre_tasks") or [],
+            "attempt": int(st.get("attempt") or 1),
             "last": cps[-1]["label"] if cps else None, "mtime": d.stat().st_mtime,
             "label": (d / "label.txt").read_text().strip() if (d / "label.txt").exists() else "",
             "report": next((f.name for f in (d / "report.html", d / "report.pdf") if f.exists()), None)}
@@ -312,10 +574,19 @@ def run_detail(d: Path) -> dict:
         if (d / "shots").exists() else []
     progress = (d / "progress.log").read_text() if (d / "progress.log").exists() else ""
     reports = [f.name for f in d.iterdir() if f.name.startswith(("report", "bug")) or f.suffix == ".md"]
-    return {"summary": run_summary(d), "plan": st.get("plan"), "results": st.get("results"),
+    summary = run_summary(d)
+    live = summary.get("status") == "running"
+    phase = derive_phase(st, live=live, has_report=bool(summary.get("report")))
+    data_plan = st.get("data_plan") or st.get("_data_plan_rules") or []
+    return {"summary": summary, "plan": st.get("plan"), "results": st.get("results"),
             "values": st.get("values"), "checkpoints": st.get("checkpoints"), "ledger": st.get("ledger"),
             "action_log": (st.get("action_log") or [])[-400:], "shots": shots, "progress": progress,
-            "reports": sorted(reports), "model": st.get("model"), "mode": st.get("mode")}
+            "reports": sorted(reports), "model": st.get("model"), "mode": st.get("mode"),
+            "data_plan": data_plan, "phase": phase,
+            "attempt": int(st.get("attempt") or 1),
+            "attempt_history": st.get("attempt_history") or [],
+            "data_reuse": st.get("data_reuse") or {},
+            "previous_attempts": st.get("previous_attempts") or {}}
 
 
 def trace_lines(d: Path, since: int) -> dict:
@@ -494,10 +765,13 @@ class Handler(BaseHTTPRequestHandler):
                         only = (st.get("mode") or {}).get("cases") or []
                         if only:
                             args += ["--cases", ",".join(only)]
-                    elif str(b.get("cases") or "").strip():
-                        args += ["--cases", str(b["cases"]).replace(" ", "")]
-                    elif b.get("failed"):
-                        args.append("--failed")
+                    else:
+                        if b.get("new_run"):
+                            args.append("--new-run")
+                        if str(b.get("cases") or "").strip():
+                            args += ["--cases", str(b["cases"]).replace(" ", "")]
+                        elif b.get("failed"):
+                            args.append("--failed")
                 elif b.get("fresh"):
                     d = self._run(str(b["fresh"]))
                     if not d:

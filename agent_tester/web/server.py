@@ -515,6 +515,8 @@ class Handler(BaseHTTPRequestHandler):
                         args.append("--dry-run")
                     if b.get("subtasks") is False:
                         args.append("--no-subtasks")
+                    if b.get("rediscover"):
+                        args.append("--rediscover")
                     cf = str(b.get("cases_file") or "").strip()
                     if cf:
                         p = Path(cf).expanduser()

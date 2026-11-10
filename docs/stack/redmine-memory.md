@@ -58,6 +58,10 @@ Seeds: domain notes live in `agent_tester/memory/seeds.py` (`DOMAIN_LESSONS`). P
 
 **Overrides:** when live behaviour contradicts a domain or platform note, save a project-scoped lesson with key `overrides:<sha1>` whose text says what is *not* true here and what *is*. Retrieval suppresses the contradicted note for that project (see `memory/layers.py`).
 
+### Verified discovery maps (reuse)
+
+Per `(area, app, checklist item)` the memory DB keeps a scrubbed menu/label route keyed by env fingerprint (host + env; platform/version ride along). An item is reusable when verified (case `mark_step` after following the route, or covered by a prior/partial discovery pass), success age ≤ `DISCOVERY_REUSE_MAX_DAYS` (default 14), no failure since last success, and no change signal. Deploy markers (asset URL hash + version meta, code-only at run start) trigger a spot-check instead of blind reuse. Force with `--rediscover`, the web “Force rediscovery” checkbox, or `DISCOVERY_REUSE=0`. Routes flush incrementally (including on stop / SIGINT). Env-bound identity is refused. Discovery itself is read-only: admin/system actions (Quick Repair, Execute SQL, cache clear, …) may only be *located*, never run.
+
 ### Platform detection (discovery / env fingerprint)
 
 During discovery, code inspects page markup, login screens, URL patterns, and (when reachable read-only) version/meta tags. Results are stored on the discovery / env fingerprint entry — **not** as lasting facts:

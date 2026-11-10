@@ -140,10 +140,40 @@ def env_fingerprint(plan, apps: list[str] | None = None) -> str:
     return "|".join([f"env={env}"] + [f"{a}={hosts[a]}" for a in sorted(hosts)])
 
 
-def mark_discovery_stale(state, area: str | None, app: str, why: str = "") -> None:
-    """Invalidate a cached discovery entry so the next ensure_discovery re-runs (recipe failed / env change)."""
+def mark_discovery_stale(state, area: str | None, app: str, why: str = "",
+                         checklist_item: str | None = None, memory=None,
+                         plan=None) -> None:
+    """Invalidate a cached discovery entry so the next ensure_discovery re-runs (recipe failed / env change).
+
+    When checklist_item is set, only that item is marked stale in the durable map (fail_count+1)
+    and queued for incremental rediscovery — a reused map must never block a case.
+    """
     key = discovery_key(area, app)
     stale = state.data.setdefault("discovery_stale", {})
+    if checklist_item:
+        items = state.data.setdefault("discovery_stale_items", {}).setdefault(key, [])
+        if checklist_item not in items:
+            items.append(checklist_item)
+        # Bump fail on the durable row when we can.
+        try:
+            from .discovery_map import DiscoveryMapStore, match_item_to_rows, scope_for
+            if memory is not None and plan is not None:
+                fp = env_fingerprint(plan, [app])
+                ms = DiscoveryMapStore.from_memory(memory)
+                if ms is not None:
+                    rows = ms.list_for(scope_for(memory), area, app, fp)
+                    row = match_item_to_rows(rows, checklist_item)
+                    if row:
+                        ms.mark_stale(row["id"], why or "route failed in case")
+        except Exception:  # noqa: BLE001
+            pass
+        # Drop only this item from the in-run cache notes/recipes so incremental runs.
+        entry = (state.data.get("discovery") or {}).get(key)
+        if isinstance(entry, dict):
+            entry["checklist"] = [c for c in (entry.get("checklist") or []) if c != checklist_item]
+        state.save()
+        state.checkpoint(f"discovery item stale for {key}/{checklist_item}" + (f": {why}" if why else ""))
+        return
     stale[key] = why or "stale"
     store = state.data.get("discovery") or {}
     if key in store:
@@ -162,13 +192,25 @@ _NO_PROGRESS = re.compile(r"maximum repeated|did not respond|no screens were map
 
 def discovery_checklist(plan, app: str, state, *, area: str | None = None,
                         data_prep: list[dict] | None = None) -> list[str]:
-    """Short deduped checklist for this area:app from ALL selected cases + up-front data-plan parts."""
+    """Short deduped checklist for this area:app from ALL selected cases + up-front data-plan parts.
+
+    Admin/system actions (Quick Repair, cache clear, …) are not seeded unless a case step names
+    them — and even then they become locate-only goals (discovery must not run them).
+    """
+    from .discovery_guard import filter_discovery_checklist, is_admin_checklist_item
     from .placeholders import (checklist_from_cases, discovery_items_from_plan, merge_checklist)
     cases = [c for c in plan.cases if (area is None or c.area == area)]
     # Prefer all plan cases that touch this app (not only current area) so later cases are covered.
     cases_for_app = [c for c in plan.cases
                      if any((s.app or "none") == app for s in c.steps)]
     case_items = checklist_from_cases(cases_for_app or cases, app, limit=10)
+    # Only keep admin-ish cues when some selected case step explicitly names that admin action.
+    named_admin = any(
+        is_admin_checklist_item(getattr(s, "text", "") or "")
+        for c in (cases_for_app or cases) for s in (c.steps or [])
+    )
+    if not named_admin:
+        case_items = [x for x in case_items if not is_admin_checklist_item(x)]
     data_plan = state.data.get("_data_plan_rules") or state.data.get("data_plan") or []
     plan_items = discovery_items_from_plan(data_plan, app)
     # Also pull create apps from matching data_prep rules (legacy).
@@ -182,7 +224,8 @@ def discovery_checklist(plan, app: str, state, *, area: str | None = None,
                         prep_items.append(f"prep create on {app}: {(p.get('text') or '')[:60]}")
                 if (rule.get("find_app") or rule.get("app")) == app and rule.get("find"):
                     prep_items.append(f"prep find on {app}")
-    return merge_checklist(case_items, plan_items, prep_items, limit=10)
+    merged = merge_checklist(case_items, plan_items, prep_items, limit=10)
+    return filter_discovery_checklist(merged)
 
 
 def _checklist_covered(entry: dict, checklist: list[str]) -> list[str]:
@@ -202,38 +245,260 @@ def _checklist_covered(entry: dict, checklist: list[str]) -> list[str]:
     return missing
 
 
+def _force_rediscover(state) -> bool:
+    """CLI --rediscover, web checkbox, or DISCOVERY_REUSE=0."""
+    if state.data.get("rediscover"):
+        return True
+    from .discovery_map import reuse_enabled
+    return not reuse_enabled()
+
+
+def _discovery_change_text(plan, case, state) -> str:
+    from .discovery_map import ticket_case_blob
+    extra = "\n".join(str(x) for x in (state.data.get("ticket_texts") or []) if x)
+    return ticket_case_blob(plan, case) + ("\n" + extra if extra else "")
+
+
+def _log_discovery_reuse(state, key: str, reused: list[dict], live: list[str],
+                         spot_checked: int = 0, calls_saved: int = 0) -> None:
+    """One progress.log line per area:app describing reuse vs live discovery."""
+    from datetime import datetime
+    from .discovery_map import age_days, estimate_calls_saved
+    bits = []
+    if reused:
+        ages = []
+        for r in reused:
+            age = age_days(r.get("last_success_at") or r.get("verified_at") or r.get("updated_at"))
+            label = (r.get("checklist_item") or "?")[:40]
+            ages.append(f"{label} ({age:.0f}d)" if age is not None else label)
+        bits.append("reused from memory: " + ", ".join(ages))
+    if spot_checked:
+        bits.append(f"deploy changed, spot-checked {spot_checked} route(s)")
+    if live:
+        bits.append("discovered live: " + ", ".join(x[:40] for x in live))
+    if not bits:
+        bits.append("no checklist items")
+    saved = calls_saved or estimate_calls_saved(len(reused))
+    line = f"discovery {key}: " + "; ".join(bits) + f"; ~{saved} tool calls saved"
+    state.data.setdefault("notes", []).append(line)
+    try:
+        with (state.dir / "progress.log").open("a") as f:
+            f.write(f"{datetime.now().isoformat(timespec='seconds')} {line}\n")
+    except OSError:
+        pass
+    state.checkpoint(line)
+
+
+def _persist_discovered_routes(plan, case, app, state, memory, fp, checklist, notes, recipes,
+                               entry: dict) -> list[str]:
+    """Write scrubbed routes for covered checklist items immediately (atomic). Returns covered items."""
+    from .discovery_map import (
+        DiscoveryMapStore, buffer_pending, labels_from_route, parse_routes_from_discovery_notes,
+        scope_for,
+    )
+    from .memory.env_guard import EnvDetailError
+    covered: list[str] = []
+    store = DiscoveryMapStore.from_memory(memory) if memory is not None else None
+    if store is None:
+        return covered
+    marker = (state.data.get("deploy_markers") or {}).get(app) or ""
+    parsed = parse_routes_from_discovery_notes(notes or "", checklist)
+    # Also treat proposed recipes as routes when they mention checklist words.
+    for rec in recipes or []:
+        for item in checklist:
+            if item in parsed:
+                continue
+            words = [w for w in re.findall(r"[a-z0-9]{4,}", item.lower()) if len(w) > 3]
+            if words and any(w in rec.lower() for w in words) and re.search(r"(?i)(click|menu|->|→|>)", rec):
+                try:
+                    from .discovery_map import _safe_route
+                    parsed[item] = (_safe_route(rec[:400]), labels_from_route(rec))
+                except EnvDetailError:
+                    pass
+    scope = scope_for(memory)
+    for item, (route, labels) in parsed.items():
+        payload = {
+            "scope": scope, "area": case.area, "app": app, "checklist_item": item,
+            "env_fingerprint": fp, "route_text": route, "key_labels": labels,
+            "deploy_marker": marker, "platform": entry.get("platform"),
+            "platform_version": entry.get("platform_version") or state.data.get("detected_platform_version"),
+            "status": "proposed",
+        }
+        try:
+            store.upsert_route(**payload)
+            buffer_pending(state, payload)
+            covered.append(item)
+        except EnvDetailError:
+            continue
+        except Exception:  # noqa: BLE001
+            continue
+    if covered and len(covered) < len(checklist):
+        # Partial map: next run reuses covered, discovers the rest.
+        try:
+            from .discovery_map import item_key
+            store.mark_partial_coverage(scope, case.area, app, fp, [item_key(c) for c in covered])
+            entry["map_status"] = "partial"
+            entry["covered_items"] = list(covered)
+        except Exception:  # noqa: BLE001
+            pass
+    elif covered:
+        entry["map_status"] = "complete"
+        entry["covered_items"] = list(covered)
+    return covered
+
+
 def ensure_discovery(plan, case, app: str, state, testers: dict, memory,
                      data_prep: list[dict] | None = None,
                      checklist: list[str] | None = None) -> dict:
-    """Always run a bounded read-only discovery pass for this area/app (once per key this run).
+    """Discovery for this area/app: reuse verified maps when safe, else live (incremental) pass.
 
-    Prior pack/memory recipes are HINTS only — they never skip discovery. Re-runs when the env
-    fingerprint (CRM/portal host) changed or when a recipe used this run was marked failed/stale.
-    Checklist is built from ALL selected cases + data-plan parts for this app (not just this case).
-    If a later need is missing from the cached map, runs a small incremental pass for those items.
-    Returns {source, recipes, notes, hints, env, checklist} stored under state.data['discovery'][key]."""
+    Per checklist item, skip live discovery when the memory DB has a reusable route for the same
+    env fingerprint (verified success within DISCOVERY_REUSE_MAX_DAYS, or covered proposed from a
+    prior/partial discovery), no change signal, and no failure since last success. Deploy-marker
+    changes trigger a code-driven spot check instead of full rediscovery. Force with --rediscover
+    / web checkbox / DISCOVERY_REUSE=0.
+    """
+    from .discovery_map import (
+        DiscoveryMapStore, age_days, estimate_calls_saved, is_reusable, match_item_to_rows,
+        scope_for, spot_check_route,
+    )
     key = discovery_key(case.area, app)
     store = state.data.setdefault("discovery", {})
     fp = env_fingerprint(plan, [app])
     stale = (state.data.get("discovery_stale") or {}).get(key)
+    stale_items = set(state.data.get("discovery_stale_items", {}).get(key) or [])
     cached = store.get(key)
     want = list(checklist) if checklist is not None else discovery_checklist(
         plan, app, state, area=case.area, data_prep=data_prep)
-    if cached and not stale and cached.get("env") == fp:
+    force = _force_rediscover(state)
+    change_text = _discovery_change_text(plan, case, state)
+    marker = (state.data.get("deploy_markers") or {}).get(app) or ""
+    plat_ver = state.data.get("detected_platform_version")
+
+    # Empty checklist: still map the case title on the first pass this run; if we already
+    # attempted discovery for this key, reuse the in-run cache (avoid a second try that
+    # would trip DISCOVERY_TRIES when the tester is flaky in unit tests).
+    if not want:
+        if cached and not stale and cached.get("env") == fp and not force:
+            return cached
+        want = [case.title or case.id or f"map {app}"]
+
+    # Per-run cache: if already fully covered this run and not forced stale, return it.
+    if cached and not stale and cached.get("env") == fp and not force and not stale_items:
         missing = _checklist_covered(cached, want)
         if not missing:
             return cached
-        # Incremental discovery for just the missing items.
-        return _run_discovery(plan, case, app, state, testers, memory, fp, key, store,
-                              want=missing, incremental=True, prior=cached)
+
+    reused_rows: list[dict] = []
+    reuse_routes: list[str] = []
+    need_live: list[str] = []
+    spot_n = 0
+    map_store = DiscoveryMapStore.from_memory(memory) if memory is not None else None
+    known_rows = (map_store.list_for(scope_for(memory), case.area, app, fp)
+                  if map_store is not None else [])
+
+    for item in want:
+        if force or item in stale_items:
+            need_live.append(item)
+            continue
+        row = match_item_to_rows(known_rows, item)
+        if not row:
+            need_live.append(item)
+            continue
+        decision = is_reusable(
+            row, force=False, change_text=change_text,
+            current_platform_version=plat_ver, current_marker=marker,
+        )
+        if decision == "reuse":
+            reused_rows.append(row)
+            if row.get("route_text"):
+                reuse_routes.append(row["route_text"])
+            continue
+        if decision == "spot_check":
+            labels = list(row.get("key_labels") or [])
+            # Prefer an injectable navigator (tests); else check labels against empty → fail → live.
+            nav = (state.data.get("_spot_check_nav") or {}).get(app)
+            ok, missing, _snap = spot_check_route(
+                route_text=row.get("route_text") or "", key_labels=labels,
+                snapshot_text=(state.data.get("_spot_check_snap") or {}).get(app, ""),
+                navigate_and_snapshot=nav,
+            )
+            spot_n += 1
+            if ok and map_store is not None:
+                map_store.refresh_marker(row["id"], marker)
+                map_store.mark_success(row["id"], deploy_marker=marker)
+                reused_rows.append(row)
+                if row.get("route_text"):
+                    reuse_routes.append(row["route_text"])
+                continue
+            # Missing labels → incremental discovery for this item only.
+            if map_store is not None:
+                map_store.mark_stale(row["id"], "spot-check missing: " + ", ".join(missing)[:120])
+            need_live.append(item)
+            continue
+        need_live.append(item)
+
+    # Also honour in-run cache coverage for items not in the durable map.
+    if cached and not stale and cached.get("env") == fp and not force:
+        still = _checklist_covered(cached, need_live)
+        # Items covered by this-run notes but not needing rediscovery.
+        need_live = still
+
+    saved = estimate_calls_saved(len(reused_rows))
+    if not need_live and reused_rows:
+        # All reusable — no discovery LLM turn.
+        entry = dict(cached) if cached and cached.get("env") == fp else {
+            "source": "memory", "recipes": [], "hints": [], "notes": "", "env": fp, "checklist": want,
+        }
+        entry["source"] = "memory" if reused_rows else entry.get("source", "memory")
+        entry["env"] = fp
+        entry["checklist"] = list(dict.fromkeys((entry.get("checklist") or []) + want))
+        entry["recipes"] = list(dict.fromkeys(list(entry.get("recipes") or []) + reuse_routes))[:12]
+        entry["reused_items"] = [r.get("checklist_item") for r in reused_rows]
+        entry["notes"] = (entry.get("notes") or "")
+        if reuse_routes and "UI map (reused from memory)" not in entry["notes"]:
+            entry["notes"] = (
+                (entry["notes"] + "\n" if entry["notes"] else "")
+                + "UI map (reused from memory):\n" + "\n".join(f"- {r}" for r in reuse_routes[:8])
+            ).strip()
+        if spot_n:
+            entry["spot_checked"] = spot_n
+        store[key] = entry
+        (state.data.get("discovery_stale") or {}).pop(key, None)
+        state.save()
+        _log_discovery_reuse(state, key, reused_rows, [], spot_checked=spot_n, calls_saved=saved)
+        return entry
+
     if cached and (stale or cached.get("env") != fp):
         why = stale or f"env changed ({cached.get('env')!r} -> {fp!r})"
         state.checkpoint(f"discovery re-run for {key}: {why}")
-        store.pop(key, None)
+        if stale or cached.get("env") != fp:
+            # Keep durable maps; only clear this-run cache when env/stale forces a full re-eval.
+            if cached.get("env") != fp:
+                store.pop(key, None)
+                cached = None
         (state.data.get("discovery_stale") or {}).pop(key, None)
 
-    return _run_discovery(plan, case, app, state, testers, memory, fp, key, store,
-                          want=want, incremental=False, prior=None)
+    _log_discovery_reuse(state, key, reused_rows, need_live, spot_checked=spot_n, calls_saved=saved)
+    prior = cached if cached and cached.get("env") == fp else None
+    if prior is None and reuse_routes:
+        prior = {"source": "memory", "recipes": reuse_routes, "notes": "\n".join(reuse_routes),
+                 "checklist": [r.get("checklist_item") for r in reused_rows], "env": fp}
+    entry = _run_discovery(plan, case, app, state, testers, memory, fp, key, store,
+                           want=need_live, incremental=bool(reused_rows or prior), prior=prior)
+    if reuse_routes:
+        entry["recipes"] = list(dict.fromkeys(reuse_routes + list(entry.get("recipes") or [])))[:12]
+        entry["reused_items"] = [r.get("checklist_item") for r in reused_rows]
+        store[key] = entry
+        state.save()
+    # Clear per-item stale flags for items we just rediscovered.
+    if stale_items:
+        left = [i for i in stale_items if i in need_live and i not in (entry.get("covered_items") or [])]
+        # After a live pass, drop stale flags for items we attempted.
+        si = state.data.setdefault("discovery_stale_items", {})
+        si[key] = [i for i in (si.get(key) or []) if i not in need_live]
+        state.save()
+    return entry
 
 
 def _run_discovery(plan, case, app, state, testers, memory, fp, key, store, *,
@@ -281,6 +546,11 @@ def _run_discovery(plan, case, app, state, testers, memory, fp, key, store, *,
     brief["discovery_checklist"] = goal_lines
     brief["recipes"] = list(hints)
     brief["discovery_hints"] = list(hints)
+    # So propose_memory during discovery can attach routes to checklist items immediately.
+    state.data["_active_discovery"] = {
+        "area": case.area, "app": app, "env": fp, "checklist": goal_lines, "key": key,
+    }
+    state.save()
     notes, blocked = "", False
     try:
         sr = tester(app, brief, state)
@@ -291,6 +561,14 @@ def _run_discovery(plan, case, app, state, testers, memory, fp, key, store, *,
     except Exception as e:  # noqa: BLE001
         notes = f"discovery failed: {type(e).__name__}: {e}"
         state.data.setdefault("notes", []).append(notes)
+    finally:
+        # Flush any routes proposed mid-discovery even if the turn crashed / was stopped.
+        try:
+            from .discovery_map import flush_pending
+            flush_pending(state, memory)
+        except Exception:  # noqa: BLE001
+            pass
+        state.data.pop("_active_discovery", None)
     proposed = []
     if memory is not None:
         try:
@@ -328,6 +606,12 @@ def _run_discovery(plan, case, app, state, testers, memory, fp, key, store, *,
             state.data["detected_platform_version"] = det.platform_version
     except Exception as e:  # noqa: BLE001
         state.data.setdefault("notes", []).append(f"platform detect skipped: {type(e).__name__}")
+    # Persist covered routes immediately (partial OK if discovery stopped mid-way after some finds).
+    try:
+        _persist_discovered_routes(plan, case, app, state, memory, fp, goal_lines,
+                                   notes, proposed + list(hints), entry)
+    except Exception:  # noqa: BLE001
+        pass
     useful = bool(proposed) or bool(notes and not blocked and not notes.startswith("discovery failed")
                                     and not _NO_PROGRESS.search(notes))
     tries = state.data.setdefault("discovery_tries", {})
@@ -353,7 +637,8 @@ def _run_discovery(plan, case, app, state, testers, memory, fp, key, store, *,
     state.checkpoint(f"discovery done for {key}" + (" (blocked)" if blocked else "")
                      + (" (incremental)" if incremental else "")
                      + (f" ({len(want)} item(s))" if want else "")
-                     + (f" platform={entry.get('platform')}" if entry.get("platform") else ""))
+                     + (f" platform={entry.get('platform')}" if entry.get("platform") else "")
+                     + (f" covered={len(entry.get('covered_items') or [])}" if entry.get("covered_items") else ""))
     hard = blocked or notes.startswith("discovery failed")
     if not useful and hard and tries[key] >= DISCOVERY_TRIES:
         raise RunPaused(f"Discovery for {key} found no way to the screen after {tries[key]} tries "
@@ -412,10 +697,24 @@ def _has_admin_deeplink(texts) -> bool:
 
 
 def inject_discovery(brief: dict, entry: dict, *, max_recipes: int = 6, max_note_chars: int = 800) -> dict:
-    """Attach a small slice of discovery hints — never the whole recipe list or learned.md."""
+    """Attach a small slice of discovery hints — never the whole recipe list or learned.md.
+
+    Stays inside the lean retrieval budget (~MEMORY_TURN_TOKEN_BUDGET / 1200 tokens shared with memory).
+    """
+    from .memory.retrieve import DEFAULT_TOKEN_BUDGET, tokens_of
     brief = dict(brief)
-    recipes = list(entry.get("recipes") or [])[:max_recipes]
-    notes = (entry.get("notes") or "")[:max_note_chars]
+    # Cap route inject to ~half the turn budget so memory + discovery stay lean together.
+    route_budget = max(200, DEFAULT_TOKEN_BUDGET // 2)
+    recipes: list[str] = []
+    used = 0
+    for r in list(entry.get("recipes") or [])[:max_recipes]:
+        t = tokens_of(r)
+        if used + t > route_budget and recipes:
+            break
+        recipes.append(r)
+        used += t
+    note_cap = min(max_note_chars, max(120, (route_budget - used) * 4))
+    notes = (entry.get("notes") or "")[:note_cap]
     brief["recipes"] = recipes
     brief["discovery_notes"] = notes
     # Soft-sanitize: keep recipe text intact for memory diffs; warn this run's brief only.
@@ -561,6 +860,20 @@ def _run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge
              data_prep: list[dict] | None = None,
              pack_cfg: dict | None = None) -> dict[str, CaseResult]:
     state.checkpoint("run started", status="running")
+    # Soft ref so verify/flush paths can reach the Memory handle without serializing it.
+    state.data["_memory_ref"] = memory
+    try:
+        import os as _os
+        from .discovery_map import markers_for_plan
+        # Cheap deploy markers (no LLM). Skip network fetch in the unit suite / when pre-seeded.
+        do_fetch = not (
+            state.data.get("_skip_deploy_fetch")
+            or state.data.get("deploy_markers")
+            or _os.environ.get("QA_TEST")
+        )
+        markers_for_plan(plan, state, fetch=do_fetch)
+    except Exception:  # noqa: BLE001
+        pass
     read_snapshot(plan, state, testers, "baseline")
     by_id = {c.id: c for c in plan.cases}
     pack_cfg = pack_cfg or state.data.get("pack_cfg") or {}
@@ -568,56 +881,65 @@ def _run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge
     from .guidance_redo import apply_redo, report_undelivered
     from .placeholders import case_unresolved_tokens
 
-    _resolve_upfront(plan, state, testers, memory, data_prep or [], pack_cfg)
+    try:
+        _resolve_upfront(plan, state, testers, memory, data_prep or [], pack_cfg)
 
-    queue = list(execution_order(plan))
-    i = 0
-    while i < len(queue):
-        redone = apply_redo(state, plan, pack_cfg)
-        if redone:
-            # Next-after-current: insert at i, dropping later duplicates of the same ids.
-            rest = [c for c in queue[i:] if c not in redone]
-            queue = queue[:i] + list(redone) + rest
-            continue
+        queue = list(execution_order(plan))
+        i = 0
+        while i < len(queue):
+            redone = apply_redo(state, plan, pack_cfg)
+            if redone:
+                # Next-after-current: insert at i, dropping later duplicates of the same ids.
+                rest = [c for c in queue[i:] if c not in redone]
+                queue = queue[:i] + list(redone) + rest
+                continue
 
-        cid = queue[i]
-        i += 1
-        if state.result(cid):
-            continue
-        case = by_id.get(cid)
-        if case is None:
-            continue
-        from .agents.llm import TRACE_CASE
-        tok = TRACE_CASE.set(cid)
+            cid = queue[i]
+            i += 1
+            if state.result(cid):
+                continue
+            case = by_id.get(cid)
+            if case is None:
+                continue
+            from .agents.llm import TRACE_CASE
+            tok = TRACE_CASE.set(cid)
+            try:
+                result = _deps_block(case, state)
+                if result is None and not case.skip_reason:
+                    missing = case_unresolved_tokens(case, state, pack_cfg)
+                    if missing:
+                        result = CaseResult(
+                            case_id=case.id, verdict="BLOCKED", expected=case.expected,
+                            note=("prep-missing: placeholder(s) " + ", ".join(missing)
+                                  + " have no resolved value for this run (find/create failed or was skipped); "
+                                  "never search the page for the literal token"))
+                if result is None and not case.skip_reason:
+                    ensure_case_discovery(plan, case, state, testers, memory, data_prep or [])
+                    result = ensure_contact(plan, case, state, testers, data_prep or [])
+                if result is None and not case.skip_reason:
+                    result = ensure_data(plan, case, state, testers, data_prep or [])
+                if result is None:
+                    result = _run_case(plan, case, state, testers, judge, max_retries, manual_login,
+                                       manual_login_apps, memory=memory, pack_cfg=pack_cfg)
+                    after_case(case, state, data_prep or [])
+            finally:
+                TRACE_CASE.reset(tok)
+            state.set_result(result)
+            if on_case_done:
+                on_case_done(result)
+
+        report_undelivered(state, plan)
+        read_snapshot(plan, state, testers, "final")
+        state.checkpoint("run finished", status="finished")
+        return {cid: state.result(cid) for cid in execution_order(plan)}
+    finally:
+        # Persist any verified/proposed discovery routes even on stop / crash / Ctrl-C.
         try:
-            result = _deps_block(case, state)
-            if result is None and not case.skip_reason:
-                missing = case_unresolved_tokens(case, state, pack_cfg)
-                if missing:
-                    result = CaseResult(
-                        case_id=case.id, verdict="BLOCKED", expected=case.expected,
-                        note=("prep-missing: placeholder(s) " + ", ".join(missing)
-                              + " have no resolved value for this run (find/create failed or was skipped); "
-                              "never search the page for the literal token"))
-            if result is None and not case.skip_reason:
-                ensure_case_discovery(plan, case, state, testers, memory, data_prep or [])
-                result = ensure_contact(plan, case, state, testers, data_prep or [])
-            if result is None and not case.skip_reason:
-                result = ensure_data(plan, case, state, testers, data_prep or [])
-            if result is None:
-                result = _run_case(plan, case, state, testers, judge, max_retries, manual_login,
-                                   manual_login_apps, memory=memory, pack_cfg=pack_cfg)
-                after_case(case, state, data_prep or [])
-        finally:
-            TRACE_CASE.reset(tok)
-        state.set_result(result)
-        if on_case_done:
-            on_case_done(result)
-
-    report_undelivered(state, plan)
-    read_snapshot(plan, state, testers, "final")
-    state.checkpoint("run finished", status="finished")
-    return {cid: state.result(cid) for cid in execution_order(plan)}
+            from .discovery_map import flush_pending
+            flush_pending(state, memory)
+        except Exception:  # noqa: BLE001
+            pass
+        state.data.pop("_memory_ref", None)
 
 
 def _deps_block(case, state) -> CaseResult | None:
@@ -743,13 +1065,38 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
         if sr.stuck or sr.limit_hit:
             why = ("kept repeating the same action without progress" if getattr(sr, "loop", False)
                    else "hit the step/time limit" if sr.limit_hit else "got stuck")
+            # Safety net: if this turn used a reused map and the route failed (missing label / loop / 404 / XSRF),
+            # mark that item stale, rediscover it only, and retry the turn once — never block on a reused map.
+            retried = state.data.setdefault("_disco_safety_retry", {}).get(f"{case.id}:{app}")
+            failed_item = None if retried else _reused_route_failure(disco, state, log_mark, sr)
+            if failed_item:
+                state.data.setdefault("_disco_safety_retry", {})[f"{case.id}:{app}"] = True
+                state.checkpoint(f"{case.id}: reused route failed ({why}); rediscovering {failed_item!r}")
+                rediscover_failed_item(plan, case, app, state, testers, memory, failed_item, why)
+                disco = (state.data.get("discovery") or {}).get(discovery_key(case.area, app)) or disco
+                brief = inject_discovery(brief_for(plan, case, steps, state), disco)
+                brief = inject_memory(brief, memory, state, app)
+                brief = inject_placeholders(brief, state, pack_cfg)
+                log_mark = len(state.data["action_log"])
+                try:
+                    sr = tester(app, brief, state)
+                    sr = _maybe_continue(app, brief, sr, state, tester, log_mark)
+                    results[-1] = sr
+                    if sr.steps_done and not (sr.stuck or sr.limit_hit or sr.needs_login):
+                        _learn_route(case, app, state, log_mark)
+                    if not (sr.stuck or sr.limit_hit or sr.needs_login):
+                        continue
+                except Exception:  # noqa: BLE001
+                    pass
+                why = ("kept repeating the same action without progress" if getattr(sr, "loop", False)
+                       else "hit the step/time limit" if sr.limit_hit else "got stuck")
             note = f"tester on {app} {why}: {sr.notes}".strip()
             result = CaseResult(case_id=case.id, verdict="AGENT INCOMPLETE", expected=case.expected,
                                 values={k: v for r in results for k, v in r.values.items()},
                                 evidence=[s for r in results for s in r.screenshots], note=note)
             _learn_failure(case, app, state, log_mark, why, sr.notes or "")
             # A recipe/path that failed this run must not keep discovery skipped next time.
-            mark_discovery_stale(state, case.area, app, why)
+            mark_discovery_stale(state, case.area, app, why, memory=memory, plan=plan)
             return result
     full_brief = brief_for(plan, case, list(range(len(case.steps))), state)
     try:
@@ -775,7 +1122,10 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
 
 
 def _learn_route(case, app, state, log_mark) -> None:
-    """Fixed code writes the route this tester used into the pack's learned.md and this run's discovery entry."""
+    """Fixed code writes the route this tester used into the pack's learned.md and this run's discovery entry.
+
+    Also marks matching discovery-map items verified (mark_step progress after following the route).
+    """
     from . import learned
     try:
         acts = [a for a in state.data["action_log"][log_mark:] if a.get("case_id") == case.id]
@@ -786,8 +1136,105 @@ def _learn_route(case, app, state, log_mark) -> None:
             entry.setdefault("recipes", []).insert(0, line)
             state.data.setdefault("notes", []).append(f"saved route for {case.area or app} from {case.id}")
             state.save()
+        verify_discovery_maps_after_case(case, app, state, acts)
     except Exception:  # noqa: BLE001  learning must never fail a case
         pass
+
+
+def verify_discovery_maps_after_case(case, app, state, acts: list[dict] | None = None) -> int:
+    """Mark durable map items verified when a case used their route (mark_step progress). Returns count."""
+    from .discovery_map import (
+        DiscoveryMapStore, buffer_pending, item_key, labels_from_route, scope_for, _safe_route,
+    )
+    from .memory.env_guard import EnvDetailError
+    memory = state.data.get("_memory_ref")  # optional; callers may pass via state
+    # Prefer live memory handle stashed by main/run_plan.
+    mem = memory or state.data.get("memory")
+    # run_plan keeps memory only as arg — stash on state if present.
+    if mem is None:
+        return 0
+    plan = state.plan
+    if plan is None:
+        return 0
+    ms = DiscoveryMapStore.from_memory(mem)
+    if ms is None:
+        return 0
+    fp = env_fingerprint(plan, [app])
+    marker = (state.data.get("deploy_markers") or {}).get(app) or ""
+    rows = ms.list_for(scope_for(mem), case.area, app, fp)
+    if not rows:
+        return 0
+    from . import learned as _learned
+    hops = _learned.route_from_actions(acts or [], app)
+    hop_blob = " ".join(hops).lower()
+    n = 0
+    for row in rows:
+        labels = [str(x).lower() for x in (row.get("key_labels") or [])]
+        route = (row.get("route_text") or "").lower()
+        item = (row.get("checklist_item") or "").lower()
+        hit = False
+        if labels and any(lab and lab in hop_blob for lab in labels):
+            hit = True
+        elif route and any(tok and tok in hop_blob for tok in re.findall(r"[a-z0-9]{4,}", route)[:6]):
+            hit = True
+        elif item and any(tok and tok in hop_blob for tok in re.findall(r"[a-z0-9]{4,}", item)[:4]):
+            hit = True
+        # Also: any mark_step this turn after navigating counts as using the injected map.
+        if not hit and hops and row.get("status") in ("proposed", "verified", "partial"):
+            # Soft verify when the case progressed on this app after discovery inject.
+            if any(a.get("tool") == "mark_step" for a in (acts or []) if a.get("app") == app):
+                hit = True
+        if not hit:
+            continue
+        try:
+            ms.mark_verified(row["id"], deploy_marker=marker or None)
+            n += 1
+        except Exception:  # noqa: BLE001
+            continue
+    return n
+
+
+def rediscover_failed_item(plan, case, app, state, testers, memory, item: str, why: str = "") -> dict | None:
+    """Safety net: mark item stale, run incremental discovery for it only, return updated entry."""
+    mark_discovery_stale(state, case.area, app, why or "reused route failed",
+                         checklist_item=item, memory=memory, plan=plan)
+    try:
+        return ensure_discovery(plan, case, app, state, testers, memory, checklist=[item])
+    except Exception:  # noqa: BLE001 — never block the case on rediscovery failure
+        state.data.setdefault("notes", []).append(
+            f"incremental rediscovery for {item!r} failed after reused route error ({why})")
+        return None
+
+
+_ROUTE_FAIL = re.compile(
+    r"(?i)not found|no such (?:element|button|link|label)|target label|404|xsrf|"
+    r"acceptable referer|could not find|unable to (?:find|click|open)|maximum repeated"
+)
+
+
+def _reused_route_failure(disco: dict, state, log_mark: int, sr) -> str | None:
+    """If this turn used a reused map and failed on a missing label / loop / 404 / XSRF, return the checklist item."""
+    if not disco or disco.get("source") not in ("memory", "discovery", "discovery-inc"):
+        return None
+    reused = list(disco.get("reused_items") or [])
+    if not reused and disco.get("source") != "memory":
+        return None
+    acts = state.data.get("action_log") or []
+    blob = " ".join(
+        str(a.get("outcome") or "") + " " + str((a.get("args") or {}).get("element") or "")
+        for a in acts[log_mark:]
+    )
+    blob += " " + (sr.notes or "")
+    if getattr(sr, "loop", False):
+        pass
+    elif not _ROUTE_FAIL.search(blob) and not any(
+            a.get("tool") in ("not_found", "xsrf_detected") for a in acts[log_mark:]):
+        return None
+    # Prefer the first reused item; callers rediscover one item at a time.
+    if reused:
+        return reused[0]
+    checklist = list(disco.get("checklist") or [])
+    return checklist[0] if checklist else "UI map"
 
 
 def _learn_failure(case, app, state, log_mark, why: str, notes: str) -> None:

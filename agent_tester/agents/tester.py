@@ -505,6 +505,36 @@ class TesterSession:
 
         def request_approval(action_type: str, description: str) -> dict:
             """Ask before a data-changing, paying or irreversible step. Returns approved true/false."""
+            from ..discovery_guard import (
+                admin_action_env_allowed, case_allows_admin_action, discovery_blocks_tool,
+                is_admin_action_type, refuse_admin_reason,
+            )
+            blocked = discovery_blocks_tool("request_approval",
+                                            {"action_type": action_type, "description": description})
+            if s.brief.get("discovery") and blocked:
+                s.state.log_action(case_id=s.case_id, app=s.app, tool="request_approval",
+                                   args={"action_type": action_type, "description": description},
+                                   plan_step=s.current_step, approval="denied", outcome=blocked)
+                return {"approved": False, "reason": blocked}
+            if is_admin_action_type(action_type):
+                # Allowed when a case step asks for it, OR this turn already ran check_repair_sql
+                # and the approval is for that classified action_type (Execute path mid-case).
+                repair_followup = bool(s._repair_kind and action_type == s._repair_kind)
+                if not repair_followup and not case_allows_admin_action(
+                        s.brief, action_type=action_type, label=description):
+                    why = ("admin/system action requires a case step that explicitly asks for it "
+                           f"(got action_type={action_type!r})")
+                    s.state.log_action(case_id=s.case_id, app=s.app, tool="request_approval",
+                                       args={"action_type": action_type, "description": description},
+                                       plan_step=s.current_step, approval="denied", outcome=why)
+                    return {"approved": False, "reason": why}
+                pack_cfg = (s.state.data.get("pack_cfg") if s.state else None) or {}
+                if not admin_action_env_allowed(s.env or s.brief.get("env"), pack_cfg, action_type):
+                    why = refuse_admin_reason(s.env or s.brief.get("env"), action_type)
+                    s.state.log_action(case_id=s.case_id, app=s.app, tool="request_approval",
+                                       args={"action_type": action_type, "description": description},
+                                       plan_step=s.current_step, approval="denied", outcome=why)
+                    return {"approved": False, "reason": why}
             try:
                 how = s.policy.gate(description, f"{s.case_id} on {s.app}", action_type=action_type,
                                     details={"case": s.case_id, "app": s.app})
@@ -525,6 +555,13 @@ class TesterSession:
             exactly as the page shows it. Returns action_type for request_approval: 'execute_repair_sql' when it only
             adds columns/tables/indexes for the new fields (may be pre-approved on staging), 'repair_sql_destructive'
             when anything drops, changes or rewrites data (always asks). action_type null: nothing to execute."""
+            from ..discovery_guard import discovery_blocks_tool
+            blocked = discovery_blocks_tool("check_repair_sql", {})
+            if s.brief.get("discovery") and blocked:
+                s.state.log_action(case_id=s.case_id, app=s.app, tool="check_repair_sql",
+                                   args={"sql": (sql or "")[:200]}, plan_step=s.current_step,
+                                   outcome="denied: discovery")
+                return {"error": blocked, "action_type": None, "additive": [], "risky": []}
             from ..repair_sql import classify
             out = classify(sql)
             s._repair_kind, s._exec_ok = out["action_type"], False
@@ -663,9 +700,15 @@ class TesterSession:
                 return {"error": "memory not available"}
             try:
                 mid = s.memory.propose(kind, text, area=area or s.brief.get("area"), evidence=f"{s.state.dir.name}/{s.case_id}")
-                return {"proposed": mid}
             except ValueError as e:
                 return {"error": str(e)}
+            # During discovery: persist scrubbed routes immediately (survives mid-run stop).
+            if s.brief.get("discovery") and kind == "recipe" and text:
+                try:
+                    _persist_discovery_recipe(s, text, area or s.brief.get("area"))
+                except Exception:  # noqa: BLE001
+                    pass
+            return {"proposed": mid}
 
         def ledger_record(record: str, action: str, final_state: str = "", note: str = "") -> dict:
             """Log test data you created or changed. action: created | changed | used. record e.g. "order A1158"."""
@@ -901,10 +944,44 @@ class TesterSession:
                             f"{url} is the {other} app, but this turn only does the {self.app} steps (the {other} "
                             f"steps run in their own turn, with their own login). Stay on {self.app}. If a {self.app} "
                             f"step needs test data that is missing, finish with notes 'BLOCKED: <what is missing>'."))
+                    if self.brief.get("discovery"):
+                        from ..discovery_guard import discovery_blocks_click
+                        why = discovery_blocks_click(None, url)
+                        if why:
+                            return self._deny(name, args, why)
                     self.policy.check_url(url)
                     self._last_nav_url = url
                 label = " ".join(str(args.get(k, "")) for k in ("element", "text", "values") if args.get(k))
+                # Discovery: never click admin/system action buttons (QRR, Execute, cache clear, …).
+                if self.brief.get("discovery") and name == "browser_click":
+                    from ..discovery_guard import discovery_blocks_click
+                    why = discovery_blocks_click(label)
+                    if why:
+                        return self._deny(name, args, why)
+                # Case: admin action clicks only when a step asks; refused on preprod/prod unless allowlisted.
+                if (not self.brief.get("discovery") and name == "browser_click"
+                        and label):
+                    from ..discovery_guard import (
+                        admin_action_env_allowed, case_allows_admin_action, is_admin_action_label,
+                        refuse_admin_reason,
+                    )
+                    if is_admin_action_label(label):
+                        if not case_allows_admin_action(self.brief, label=label,
+                                                        action_type=self._step_action_type()):
+                            return self._deny(
+                                name, args,
+                                f"admin/system click '{label[:80]}' needs a case step that explicitly asks "
+                                f"for it (discovery must only map the link).")
+                        pack_cfg = (self.state.data.get("pack_cfg") if self.state else None) or {}
+                        at = self._step_action_type() or "admin_repair"
+                        if not admin_action_env_allowed(self.env or self.brief.get("env"), pack_cfg, at):
+                            return self._deny(name, args, refuse_admin_reason(
+                                self.env or self.brief.get("env"), at, label))
                 if name == "browser_click" and EXECUTE_LABEL.search(label) and not self._exec_ok:
+                    if self.brief.get("discovery"):
+                        return self._deny(
+                            name, args,
+                            "discovery is read-only: do not click Execute. Note that the button is present.")
                     return self._hold(name, args, (
                         "Execute needs approval first. For Quick Repair and Rebuild SQL: read the full SQL from the "
                         "page, call check_repair_sql with it, then request_approval with the action_type it returns. "
@@ -1577,6 +1654,57 @@ def still_on_login(page: str, start: str) -> bool:
     p = urlparse(page).path.lower().rstrip("/")
     return any(w in p for w in ("login", "signin", "sign-in", "sign_in")) or \
         (page.rstrip("/") == start.rstrip("/") and "login" in start.lower())
+
+
+def _persist_discovery_recipe(sess: "TesterSession", text: str, area: str | None) -> None:
+    """Atomic write of a scrubbed discovery route as soon as propose_memory confirms it (survives mid-stop)."""
+    from ..discovery_map import (
+        DiscoveryMapStore, buffer_pending, labels_from_route, match_item_to_rows, scope_for, _safe_route,
+    )
+    from ..memory.env_guard import EnvDetailError
+    active = (sess.state.data or {}).get("_active_discovery") or {}
+    if not active or sess.memory is None:
+        return
+    try:
+        route = _safe_route(text[:400])
+    except EnvDetailError:
+        return
+    checklist = list(active.get("checklist") or [])
+    # Prefer the checklist item whose words appear in the recipe.
+    item = None
+    low = route.lower()
+    for c in checklist:
+        words = [w for w in re.findall(r"[a-z0-9]{4,}", c.lower()) if len(w) > 3]
+        if words and any(w in low for w in words):
+            item = c
+            break
+    if item is None and checklist:
+        item = checklist[0]
+    if not item:
+        item = (area or active.get("area") or sess.app or "ui") + " route"
+    ms = DiscoveryMapStore.from_memory(sess.memory)
+    if ms is None:
+        return
+    fp = active.get("env") or ""
+    marker = ((sess.state.data or {}).get("deploy_markers") or {}).get(sess.app) or ""
+    payload = {
+        "scope": scope_for(sess.memory),
+        "area": area or active.get("area"),
+        "app": active.get("app") or sess.app,
+        "checklist_item": item,
+        "env_fingerprint": fp,
+        "route_text": route,
+        "key_labels": labels_from_route(route),
+        "deploy_marker": marker,
+        "platform": (sess.state.data or {}).get("detected_platform"),
+        "platform_version": (sess.state.data or {}).get("detected_platform_version"),
+        "status": "proposed",
+    }
+    try:
+        ms.upsert_route(**payload)
+        buffer_pending(sess.state, payload)
+    except EnvDetailError:
+        return
 
 
 def _safe_args(args: dict) -> dict:

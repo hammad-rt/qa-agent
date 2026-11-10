@@ -165,6 +165,11 @@ settings, create records, or pay. Prefer navigate + snapshot; click only to open
   Recipes must be **menu/label click sequences** (selectors/labels only) — never passwords or credentials.
   If you note a URL for identification, say it is for ID only: do NOT tell the tester to browser_navigate to
   SuiteCRM `module=Administration&action=…` URLs (those deep-links trigger XSRF / missing referer).
+- Admin / system actions are READ-ONLY for discovery: you may open Admin or Repair menus to *see* where
+  Quick Repair and Rebuild, Execute SQL, cache clear, Module Loader, Studio deploy, or Run Scheduler live,
+  and note the link label/URL. NEVER click those action buttons, NEVER call request_approval or
+  check_repair_sql, and NEVER run repair/rebuild/execute. Only a later selected case whose steps ask for
+  that admin action may do it (behind the normal approval gate).
 - Call finish(notes) with a short structured map (menus, search paths, labels, blockers; URLs only as ID notes).
   No pass/fail verdict.
 - If a CAPTCHA blocks login, call needs_manual_login and stop. Do not invent UI you did not see.

@@ -50,6 +50,10 @@ allowlist:
   prod: [app.savostore.com, savo.store]
   local: [localhost, checkout.stripe.com]
 
+# Envs where a case that explicitly asks for Quick Repair / execute SQL may run it
+# (discovery never runs these; preprod/prod refused unless listed here).
+admin_repair_envs: [staging, local]
+
 # Action types the user may pre-approve for a whole run at the plan gate.
 # change_settings is staging/preprod only (Policy.can_preapprove blocks it on prod).
 preapprovable_actions:
@@ -58,7 +62,7 @@ preapprovable_actions:
   - create_test_order
   - add_parcel
   - change_settings
-  - execute_repair_sql      # Quick Repair SQL that only adds new columns/tables/indexes (staging/preprod)
+  - execute_repair_sql      # Quick Repair SQL that only adds new columns/tables/indexes (staging/local)
 
 # Never pre-approvable: always a one-off approval.
 always_ask_actions:

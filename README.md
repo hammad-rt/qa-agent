@@ -119,7 +119,9 @@ General rules: `core/core-testing-spec.md`. Project packs: `packs/<slug>/` (Savo
     .venv/bin/python -m agent_tester cases runs/<run folder> [--post]
 
 ## Tests (offline)
-    .venv/bin/python -m unittest discover -s tests -t .
+    REPORT_PDF=0 .venv/bin/python -m unittest discover -s tests -t .
+    # Also fine: discover -s tests (no -t). Suite forces QA_INTERACTIVE=1 and skips loading .env
+    # (QA_TEST=1); auto mode is covered by tests/test_auto_mode.py.
 
 ## Status
 Phases 1-8 are built and covered by 177 offline tests. First finished live run: #180974 on 6 Oct (TC3 PASS,

@@ -1,5 +1,6 @@
 """The browser may use only this run's sites; a new site the app sends it to (e.g. a payment page) needs the
 user's OK, and is then allowed for the rest of the run."""
+from agent_tester import testing_hermetic as hermetic  # noqa: F401
 import tempfile
 import unittest
 from pathlib import Path
@@ -27,7 +28,7 @@ class BrowserSites(unittest.TestCase):
         self.state = RunState(Path(self.tmp.name) / "run")
         self.answer = False
         self.asked = []
-        self.policy = from_pack(load_pack(PACK), "staging",
+        self.policy = from_pack(load_pack(PACK), "staging", auto=False,
                                 approver=lambda a, r, d: self.asked.append(a) or self.answer)
         plan = TestPlan(task_id=1, requirements=[
             Requirement(key="env.preprod.portal", kind="url", value="https://pre.client-site.io:8443/", status="resolved"),

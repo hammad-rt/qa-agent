@@ -114,6 +114,9 @@ class ManualLogin(unittest.TestCase):
         logged = {"in": False}
 
         def tester(app, brief, state):
+            # Discovery-first passes are read-only maps — do not consume the login offer there.
+            if brief.get("discovery") or str(brief.get("case_id") or "").startswith("DISCO-"):
+                return StepResult(case_id=brief["case_id"], app=app, notes="discovery")
             if not logged["in"]:
                 return StepResult(case_id=brief["case_id"], app=app, stuck=True, needs_login="reCAPTCHA")
             return StepResult(case_id=brief["case_id"], app=app)
@@ -171,6 +174,8 @@ class ManualLogin(unittest.TestCase):
         attempts = {"n": 0}
 
         def tester(app, brief, state):
+            if brief.get("discovery") or str(brief.get("case_id") or "").startswith("DISCO-"):
+                return StepResult(case_id=brief["case_id"], app=app, notes="discovery")
             attempts["n"] += 1
             if attempts["n"] == 1:
                 return StepResult(case_id=brief["case_id"], app=app, stuck=True, needs_login="reCAPTCHA")
@@ -193,6 +198,8 @@ class ManualLogin(unittest.TestCase):
     def test_second_session_loss_is_blocked(self):
         """Only one mid-run re-login per app; a further CAPTCHA is BLOCKED without another prompt."""
         def tester(app, brief, state):
+            if brief.get("discovery") or str(brief.get("case_id") or "").startswith("DISCO-"):
+                return StepResult(case_id=brief["case_id"], app=app, notes="discovery")
             return StepResult(case_id=brief["case_id"], app=app, stuck=True, needs_login="reCAPTCHA again")
 
         asked = []
@@ -214,6 +221,8 @@ class ManualLogin(unittest.TestCase):
         asked = []
 
         def tester(app, brief, state):
+            if brief.get("discovery") or str(brief.get("case_id") or "").startswith("DISCO-"):
+                return StepResult(case_id=brief["case_id"], app=app, notes="discovery")
             return StepResult(case_id=brief["case_id"], app="crm", stuck=True,
                               needs_login="maybe CAPTCHA or session issue")
 

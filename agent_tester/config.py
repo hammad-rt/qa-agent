@@ -9,6 +9,10 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def load_dotenv(path: Path | None = None) -> None:
+    """Load `.env` into os.environ (setdefault). Skipped when ``QA_TEST=1`` so the unit suite
+    cannot pick up a laptop's real secrets / MEMORY_DB paths."""
+    if os.environ.get("QA_TEST", "").strip().lower() in ("1", "true", "yes"):
+        return
     path = path or ROOT / ".env"
     if not path.exists():
         return

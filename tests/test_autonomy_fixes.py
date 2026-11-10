@@ -1,6 +1,7 @@
 """Autonomy plan: staging change_settings preapprove, action_type browser gate, tool budget, discovery-first."""
 from __future__ import annotations
 
+from agent_tester import testing_hermetic as hermetic  # noqa: F401
 import tempfile
 import unittest
 from pathlib import Path
@@ -39,7 +40,8 @@ class ActionTypeBrowserGate(unittest.TestCase):
         self.state = RunState(Path(self.tmp.name) / "run")
         self.asked = []
         pack = load_pack(PACK)
-        self.policy = from_pack(pack, "staging", approver=lambda a, r, d: self.asked.append(a) or False)
+        self.policy = from_pack(pack, "staging", auto=False,
+                                approver=lambda a, r, d: self.asked.append(a) or False)
         brief = {
             "case_id": "TC5",
             "area": "rewards",

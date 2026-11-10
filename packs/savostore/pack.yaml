@@ -547,3 +547,45 @@ invariants:
       L: "^l$|total_?(rewards|earned)|lifetime"
       U: "^u$|used"
     checks: ["W == L - U", "W >= 0", "U <= L"]
+
+# Safety rules: always injected into every LLM call; never pruned or demoted by context learning.
+safety_rules:
+  - text: "Stripe test card 4242 4242 4242 4242 only (staging/local). Never use a real card."
+    always_send: true
+  - text: "Never pay with M-Pesa in rewards cases unless the user explicitly says otherwise."
+    always_send: true
+  - text: "No SQL or direct DB writes except Quick Repair Execute after check_repair_sql + approval."
+    always_send: true
+  - text: "Restore test data afterwards (rewards rows created, wallet baseline, test orders) when the case changed them."
+    always_send: true
+
+# Numbered rules referenced from test-cases.md as "rules 2, 14" on a case — always sent while that case runs.
+numbered_rules:
+  1: "Rewards earn rate is 5% of shipping after rewards; earned only when status CHANGES to Order Delivered."
+  2: "Redemption cap is at most 10% of unpaid shipping (not order total)."
+  14: "Payments for earn: Stripe test card 4242 only. Never M-Pesa."
+
+# Deterministic (no-LLM) record lookups for CUSTOMER / data-plan find and wallet field reads.
+lookups:
+  platform: suitecrm7
+  api: null
+  maps:
+    contact_by_email:
+      module: Contacts
+      match_field: email
+      advanced: true
+    shipping_orders:
+      module: AOS_Invoices
+      advanced: true
+      field_map: {contact: billing_contact, status: status, currency: currency_id}
+    quotes:
+      module: AOS_Quotes
+      advanced: true
+      field_map: {contact: billing_contact, status: stage}
+    wallet:
+      module: Contacts
+      fields: ["Current Rewards", "Total Rewards", "Rewards Used"]
+
+# Cases safe to run concurrently when PARALLEL_READONLY=1 (read-only, no shared rewards session / order mutations).
+# Do NOT list B2, B12, B3, B1, B16-3 etc. — they apply/clear rewards on shared order/session state.
+parallel_safe_cases: [E0, B9, C1, C5, C7]

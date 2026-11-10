@@ -318,7 +318,7 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
             plan = asyncio.run(plan_task(settings, pack, task_text, task_id, env, only_case=",".join(only) or None,
                                      lessons=_plan_lessons, trace_path=state.dir / "trace.jsonl", generate=generate,
                                      preapprovable=list(pack.config.get("preapprovable_actions", [])),
-                                     batch_ids=file_ids))
+                                     batch_ids=file_ids, run_dir=state.dir))
     except LLMOutputError as e:
         lessons_mem.store.close()
         print(f"\nPlanning stopped: {e}")
@@ -364,7 +364,7 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
                                         lessons=_replan_lessons, trace_path=state.dir / "trace.jsonl",
                                         generate=generate, answers=user_answers,
                                         preapprovable=list(pack.config.get("preapprovable_actions", [])),
-                                        batch_ids=file_ids))
+                                        batch_ids=file_ids, run_dir=state.dir))
         except LLMOutputError as e:
             print(f"Couldn't update the plan ({e}); keeping the first plan.")
             new = None

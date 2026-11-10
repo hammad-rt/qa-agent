@@ -1,0 +1,12 @@
+- text: "SuiteCRM 8 uses hash routes under /#/; treat it as a single-page app and wait for the view to settle after navigation."
+  area: crm
+  applies_when: navigation
+- text: "Module lists and record views are Angular screens; classic index.php module links may not apply."
+  area: crm
+  applies_when: navigation
+- text: "Search and filter panels may be separate from the list header; open Filters / Search before concluding a record is missing."
+  area: crm
+  applies_when: search
+- text: "Admin and studio options live under the Angular admin area, not the SuiteCRM 7 admin index.php pages."
+  area: crm
+  applies_when: admin

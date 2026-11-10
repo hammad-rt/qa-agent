@@ -42,12 +42,29 @@ def _parse_ts(s: str | None) -> datetime | None:
 
 
 class Memory:
-    def __init__(self, store: MemoryStore, pack_slug: str):
+    def __init__(self, store: MemoryStore, pack_slug: str, *, platforms: list[str] | None = None):
+        from .layers import default_domain_scopes, platform_scope
         self.store = store
         self.slug = pack_slug
         self.project = f"project:{pack_slug}"
-        self.scopes = ["core", self.project]       # never load another project's memories
+        self.platforms: list[str] = []
+        self.scopes = ["core", *default_domain_scopes(), self.project]
         self._retriever = None
+        if platforms:
+            self.set_platforms(platforms)
+
+    def set_platforms(self, platforms: list[str] | None) -> None:
+        """Include platform:<id> scopes when detection finds a platform (else domain+project only)."""
+        from .layers import default_domain_scopes, platform_scope
+        self.platforms = [p for p in (platforms or []) if p]
+        scopes = ["core", *default_domain_scopes()]
+        for p in self.platforms:
+            s = platform_scope(p)
+            if s and s not in scopes:
+                scopes.append(s)
+        scopes.append(self.project)
+        self.scopes = scopes
+        self._retriever = None  # drop cache tied to old scopes
 
     def retriever(self, state=None, token_budget: int | None = None):
         from .retrieve import TurnRetriever
@@ -56,6 +73,20 @@ class Memory:
         if self._retriever is None:
             self._retriever = TurnRetriever(self, token_budget=token_budget)
         return self._retriever
+
+    def record_override(self, contradicted: str, true_here: str, *, area: str | None = None,
+                        evidence: str | None = None) -> int:
+        """Project-scoped 'not true here' note that suppresses the contradicted domain/platform lesson."""
+        from .layers import override_key, override_text
+        text = assert_safe_lasting(override_text(contradicted, true_here), context="override")
+        key = override_key(contradicted)
+        for r in self.store.query([self.project], ["lesson", "fact"],
+                                  statuses=("active", "proposed", "needs_recheck"), key=key):
+            return r["id"]
+        return self.store.add(
+            "lesson", self.project, text, "agent_override", area=area, key=key,
+            evidence=evidence, status="proposed", confirm_count=1,
+        )
 
     # ---- gap resolver interface (resources = env-var pointers only) ---------------
     def get(self, scope: str, key: str) -> dict | None:
@@ -86,10 +117,14 @@ class Memory:
     # ---- trust / verify-before-trust ---------------------------------------------
     def trust_level(self, row: dict, env_fp: str | None = None) -> str:
         """trusted | hint | recheck | untrusted — stale or post-deploy rows are hints only."""
+        from .layers import scope_layer
         if row.get("status") == "needs_recheck":
             return "recheck"
         if row.get("status") != "active":
             return "untrusted"
+        # Platform notes are starting assumptions, never fully trusted.
+        if scope_layer(row.get("scope") or "") == "platform" or row.get("source") == "seed_platform":
+            return "hint"
         if env_fp and row.get("env_at_confirm") and row["env_at_confirm"] != env_fp:
             return "hint"
         ts = _parse_ts(row.get("last_confirmed_at"))

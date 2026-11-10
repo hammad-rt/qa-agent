@@ -80,6 +80,8 @@ Three kinds of memory (detail: `docs/stack/redmine-memory.md`):
 
 **Lean injection:** each turn gets a small ranked memory block (`MEMORY_TURN_TOKEN_BUDGET`, default ~1200 tokens), cached per area:app for the run. More detail is on-demand via `recall_lessons`. Retrieval is code-side (no extra LLM). End-of-run retrospective is built from the action log in code.
 
+**Layers:** domain CRM/ERP seeds always; platform seeds only when discovery detects SuiteCRM 7/8, Sugar, etc.; project memory always wins and can override contradicted notes. **Stuck ladder** (before explore/ask): memory → optional code root → configured docs/web search → explore → ask_user. Docs/web providers are off until `DOCS_SEARCH_URL` / Context7 env keys are set.
+
 **Env details** (emails, logins, URLs, record ids, passwords) are refused at write time and never kept as lasting memory; URLs/accounts come from pack / `.env` / this run’s answers.
 
 **Test data ledger:** every data change a run makes (the record and its old and new values) is written to the run's ledger, so it can be restored at the end.

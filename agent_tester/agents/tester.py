@@ -35,7 +35,7 @@ BLOCKED_BROWSER = {"browser_evaluate", "browser_run_code", "browser_install", "b
 FREE_TOOLS = {"browser_snapshot", "browser_take_screenshot", "browser_wait_for", "browser_find",
               "browser_console_messages", "browser_network_requests", "mark_step", "record_value", "evidence_name",
               "finish", "needs_manual_login", "recall_lessons", "propose_memory", "get_secret",
-              "note_behaviour", "lookup_docs", "browser_tabs"}
+              "note_behaviour", "lookup_docs", "stuck_lookup", "browser_tabs"}
 # Real paste: clipboard + Ctrl+V when the browser allows it, else a paste event with the text (both run the
 # page's paste handler; typing does not). Reads the field back after the page reacts.
 PASTE_JS = r"""async (page) => {
@@ -1047,16 +1047,56 @@ class TesterSession:
         return None
 
     def _start_exploring(self, name: str, why: str) -> dict:
-        """Stuck: instead of stopping (or retrying the same guess), map the screen once, then retry from what was
-        found. One exploration per step; a second stall stops the case with the findings."""
+        """Stuck: run the lookup ladder (memory → code → docs → web), then map the screen once.
+
+        One exploration per step; a second stall stops the case with the findings. Ladder providers
+        are optional and off when unset; snippets are untrusted hints inside the memory budget.
+        """
         self._explored = True
         tried = [t for t in dict.fromkeys(getattr(self, "_recent", [])) if t][-8:]
         self._sigs, self._recent, self.since_progress = {}, [], 0
+        ladder_note = ""
+        try:
+            from ..stuck_lookup import build_query, run_ladder
+            page = ""
+            if isinstance(self.last_snapshot, dict):
+                page = str(self.last_snapshot.get("url") or "")[:200]
+            q = build_query(
+                goal=self.brief.get("title") or self.case_id or "",
+                page=page,
+                tried=tried,
+                area=self.brief.get("area") or "",
+                app=self.app or "",
+            )
+            platform_id = (self.state.data or {}).get("detected_platform")
+            if not platform_id:
+                disco = (self.state.data or {}).get("discovery") or {}
+                for entry in disco.values():
+                    if isinstance(entry, dict) and entry.get("platform"):
+                        platform_id = entry["platform"]
+                        break
+            ladder = run_ladder(
+                query=q, memory=self.memory, pack=self.pack, platform_id=platform_id,
+                area=self.brief.get("area"), state=self.state,
+            )
+            if ladder.get("prompt"):
+                ladder_note = "\n" + ladder["prompt"] + "\nThen continue; if still stuck, explore the screen:\n"
+            self.state.log_action(
+                case_id=self.case_id, app=self.app, tool="stuck_lookup",
+                args={"why": why, "steps": ladder.get("steps_tried"), "n": len(ladder.get("snippets") or [])},
+                plan_step=self.current_step, outcome="ok",
+            )
+        except Exception as e:  # noqa: BLE001
+            self.state.log_action(
+                case_id=self.case_id, app=self.app, tool="stuck_lookup",
+                args={"why": why, "error": type(e).__name__},
+                plan_step=self.current_step, outcome="error",
+            )
         self.state.log_action(case_id=self.case_id, app=self.app, tool="explore", args={"why": why, "tried": tried},
                               plan_step=self.current_step, outcome="explore")
-        self.state.checkpoint(f"{self.case_id}: stuck ({why}); exploring the screen instead of guessing")
+        self.state.checkpoint(f"{self.case_id}: stuck ({why}); lookup ladder then exploring")
         tmpl = EXPLORE_TEXT_ASK if self.brief.get("prefer_ask_user") or self.brief.get("contact_lookup") else EXPLORE_TEXT
-        return {"error": tmpl.format(why=why, tried="; ".join(tried) or "none", n=EXPLORE_ACTIONS)}
+        return {"error": ladder_note + tmpl.format(why=why, tried="; ".join(tried) or "none", n=EXPLORE_ACTIONS)}
 
     async def auto_shot(self, what: str, tool_context) -> str | None:
         """Code-taken proof screenshot (never left to the model). Waits for the page to settle, then checks the

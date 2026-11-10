@@ -76,17 +76,20 @@ class ResourceNoEnvValue(unittest.TestCase):
 
 class SeedTests(unittest.TestCase):
     def test_core_seeds_idempotent_and_agnostic(self):
+        from agent_tester.memory.seeds import DOMAIN_LESSONS
         with tempfile.TemporaryDirectory() as d:
             store = MemoryStore(Path(d) / "m.db")
             a = ensure_seeds(store, "savostore")
             self.assertEqual(a["core"], len(CORE_LESSONS))
+            self.assertEqual(a["domain"], sum(len(v) for v in DOMAIN_LESSONS.values()))
             self.assertEqual(a["project"], 1)
             b = ensure_seeds(store, "savostore")
-            self.assertEqual(b, {"core": 0, "project": 0})
+            self.assertEqual(b, {"core": 0, "domain": 0, "platform": 0, "project": 0})
             texts = [r["text"] for r in store.query(["core"], ["lesson"])]
             self.assertTrue(all("SuiteCRM" not in t for t in texts))
-            proj = [r["text"] for r in store.query(["project:savostore"], ["lesson"])]
-            self.assertTrue(any("Advanced Search" in t for t in proj))
+            domain = [r["text"] for r in store.query(["domain:crm"], ["lesson"])]
+            self.assertTrue(any("Advanced Search" in t for t in domain))
+            self.assertTrue(all("SuiteCRM" not in t and "Savostore" not in t for t in domain))
             store.close()
 
 

@@ -30,7 +30,7 @@ class PreapprovalCrash(unittest.TestCase):
     def test_gate_offers_change_settings_when_pack_allows(self):
         pol = from_pack(load_pack(PACK), "staging")
         out = []
-        ok, pre = gate.plan_gate(threshold_plan(), input_fn=lambda _: "y", out=out.append, policy=pol)
+        ok, pre, _corr = gate.plan_gate(threshold_plan(), input_fn=lambda _: "y", out=out.append, policy=pol)
         self.assertTrue(ok)
         self.assertIn("change_settings", pre)
         pol.preapprove(pre)                       # no PolicyViolation

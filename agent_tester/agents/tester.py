@@ -98,6 +98,8 @@ def _hard_stop_in(e: BaseException) -> bool:
 LOOP_WARN, LOOP_STOP = 3, 5          # same call repeated this often without progress: warn, then stop
 IDLE_READS = 8                       # page reads in a row with nothing done in between: stalled, not working
 EXPLORE_ACTIONS = 15                 # extra actions for one exploration of a screen when a step is stuck
+STUCK_ASK_TIMEOUT_SEC = int(os.environ.get("STUCK_ASK_TIMEOUT_SEC", "600"))
+STUCK_ASK_MAX_PER_CASE = 2           # code-built stuck asks; do not count toward ask_user's 3/case
 EXPLORE_TEXT = (
     "STOP guessing: {why}. Explore before you act again ({n} more actions for this):\n"
     "1. browser_snapshot and list for yourself every menu, tab, button, link, dropdown (with its options) and "
@@ -977,6 +979,11 @@ class TesterSession:
                 self._reads = 0
                 if not getattr(self, "_explored", False):
                     return self._start_exploring(name, f"the page was read {IDLE_READS} times in a row with nothing done")
+                asked = self._maybe_stuck_ask(
+                    why=f"the page was read {IDLE_READS} times in a row with nothing done",
+                    name=name, repeats=IDLE_READS)
+                if asked is not None:
+                    return asked
                 self.result.limit_hit = True
                 self.result.loop = True
                 self.state.log_action(case_id=self.case_id, app=self.app, tool="loop_detected",
@@ -1022,6 +1029,12 @@ class TesterSession:
             if cycling:
                 n = stop_at
             if n >= stop_at:
+                asked = self._maybe_stuck_ask(
+                    why=("the same actions kept repeating" if cycling else
+                         f"{name} was repeated {n} times without finishing a step"),
+                    name=name, repeats=n)
+                if asked is not None:
+                    return asked
                 self.result.limit_hit = True
                 self.result.loop = True
                 self.state.log_action(case_id=self.case_id, app=self.app, tool="loop_detected",
@@ -1040,11 +1053,144 @@ class TesterSession:
                 return self._start_exploring(name, f"{per_step} actions went by without finishing a step")
             if self.since_progress > per_step + (EXPLORE_ACTIONS if getattr(self, "_explored", False) else 0) \
                     or self.actions > self.max_calls + (EXPLORE_ACTIONS if getattr(self, "_explored", False) else 0):
+                # Second stall after explore (or action budget): ask before blocking when someone can answer.
+                if getattr(self, "_explored", False):
+                    asked = self._maybe_stuck_ask(
+                        why=f"{self.since_progress} actions without finishing a step (after exploring)",
+                        name=name, repeats=self.since_progress)
+                    if asked is not None:
+                        return asked
                 over_time = True
         if over_time:
             self.result.limit_hit = True
             return {"error": "Limit reached. Call finish() now with what you have, saying which step you reached."}
         return None
+
+    def _can_stuck_ask(self) -> bool:
+        """True when a person can answer: web UI or an interactive tty (not unattended auto)."""
+        from ..auto import is_auto, web_mode
+        if web_mode() or os.environ.get("QA_WEB") == "1":
+            return True
+        if is_auto():
+            return bool(sys.stdin and sys.stdin.isatty())
+        return bool(sys.stdin and sys.stdin.isatty())
+
+    def _stuck_question(self, why: str) -> str:
+        tried = [t for t in dict.fromkeys(getattr(self, "_recent", [])) if t][-6:]
+        page = ""
+        if isinstance(self.last_snapshot, dict):
+            page = str(self.last_snapshot.get("url") or self.last_snapshot.get("title") or "")[:120]
+        elif isinstance(self.last_snapshot, str):
+            page = self.last_snapshot[:120]
+        return (
+            f"Stuck on {self.case_id} (step {self.current_step or '?'}): {why}.\n"
+            f"Tried: {'; '.join(tried) or 'none'}.\n"
+            f"Page: {page or '(unknown)'}.\n"
+            f"Options: (1) give guidance (free text)  (2) skip this case  (3) stop the run\n"
+            f"Reply with 1:<text>, 2:<reason>, or 3:<reason> (wait up to {STUCK_ASK_TIMEOUT_SEC}s): "
+        )
+
+    def _maybe_stuck_ask(self, *, why: str, name: str, repeats: int) -> dict | None:
+        """After explore (or a 2nd loop), ask the user before blocking. Returns a tool error to continue,
+        or None to proceed with the normal stop. Unattended auto: log the would-be question and return None."""
+        # Only after exploring already ran, or when a prior stuck-ask already happened this case (2nd loop).
+        explored = bool(getattr(self, "_explored", False))
+        asks = int(getattr(self, "_stuck_asks", 0))
+        if not explored and asks == 0:
+            return None
+        if asks >= STUCK_ASK_MAX_PER_CASE:
+            return None
+        q = self._stuck_question(why)
+        self._stuck_asks = asks + 1
+        if not self._can_stuck_ask():
+            # Unattended: keep current stop behaviour but put the question in the report / progress.log.
+            note = f"Stuck ask (unattended, no answerer): {q.strip()}"
+            self.state.data.setdefault("notes", []).append(note)
+            self.state.log_action(case_id=self.case_id, app=self.app, tool="stuck_ask",
+                                  args={"why": why, "question": q[:500], "answer": "", "unattended": True},
+                                  plan_step=self.current_step, outcome="unattended")
+            try:
+                with (self.state.dir / "progress.log").open("a") as f:
+                    from datetime import datetime
+                    f.write(f"{datetime.now().isoformat(timespec='seconds')} {note}\n")
+            except OSError:
+                pass
+            self.state.save()
+            return None
+        from ..auto import ask_line
+        ans = ""
+        try:
+            # Best-effort timeout: alarm is Unix-only; without it, ask_line blocks until answer/EOF.
+            import signal
+
+            def _timeout(signum, frame):  # noqa: ARG001
+                raise TimeoutError("stuck ask timed out")
+
+            old = None
+            try:
+                old = signal.signal(signal.SIGALRM, _timeout)
+                signal.alarm(max(1, STUCK_ASK_TIMEOUT_SEC))
+            except (ValueError, AttributeError, OSError):
+                old = None
+            try:
+                ans = ask_line(f"\n{q}").strip()
+            finally:
+                try:
+                    signal.alarm(0)
+                    if old is not None:
+                        signal.signal(signal.SIGALRM, old)
+                except (ValueError, AttributeError, OSError):
+                    pass
+        except (EOFError, TimeoutError):
+            ans = ""
+        self.state.log_action(case_id=self.case_id, app=self.app, tool="stuck_ask",
+                              args={"why": why, "question": q[:500], "answer": ans[:500]},
+                              plan_step=self.current_step, outcome="answered" if ans else "timeout")
+        self.state.data.setdefault("notes", []).append(
+            f"Stuck ask on {self.case_id}: {why}; answer={ans[:200] or '(none)'}")
+        self.state.save()
+        if not ans:
+            return None  # fall through to normal block
+        low = ans.lower()
+        # Parse 1:/2:/3: or bare keywords.
+        kind, rest = "guidance", ans
+        m = re.match(r"^\s*([123])\s*[:.\-\s]\s*(.*)$", ans, re.S)
+        if m:
+            kind = {"1": "guidance", "2": "skip", "3": "stop"}[m.group(1)]
+            rest = (m.group(2) or "").strip()
+        elif re.match(r"(?i)^\s*(skip|block)\b", ans):
+            kind, rest = "skip", re.sub(r"(?i)^\s*(skip|block)\b[:\s]*", "", ans).strip()
+        elif re.match(r"(?i)^\s*(stop|abort|quit)\b", ans):
+            kind, rest = "stop", re.sub(r"(?i)^\s*(stop|abort|quit)\b[:\s]*", "", ans).strip()
+        elif re.match(r"(?i)^\s*(guide|guidance|help)\b", ans):
+            kind, rest = "guidance", re.sub(r"(?i)^\s*(guide|guidance|help)\b[:\s]*", "", ans).strip()
+
+        if kind == "skip":
+            self.result.limit_hit = True
+            self.result.stuck = True
+            self.result.loop = True
+            self.result.notes = f"BLOCKED: skipped by user after stuck ask: {rest or why}"
+            self.finished = True
+            return {"error": f"User skipped this case: {rest or why}. Call finish(notes, stuck=True) now."}
+        if kind == "stop":
+            self.result.limit_hit = True
+            self.result.stuck = True
+            self.result.notes = f"Run stop requested after stuck ask: {rest or why}"
+            self.finished = True
+            from ..coordinator import RunPaused
+            raise RunPaused(f"User stopped the run at {self.case_id}: {rest or why}")
+        # guidance: reset loop counters once and feed GUIDANCE into the same session
+        self._sigs, self._recent, self.since_progress, self._reads = {}, [], 0, 0
+        self._explored = False
+        self.result.limit_hit = False
+        self.result.loop = False
+        guidance = rest or ans
+        self._guidance_notes = getattr(self, "_guidance_notes", []) + [f"GUIDANCE FROM THE USER (stuck ask): {guidance}"]
+        return {"error": (
+            f"GUIDANCE FROM THE USER (stuck ask; loop counters reset once):\n- {guidance}\n"
+            f"Your {name} call was NOT run. Follow the guidance, then continue. "
+            f"Approvals and safety rules still apply."
+        )}
 
     def _start_exploring(self, name: str, why: str) -> dict:
         """Stuck: run the lookup ladder (memory → code → docs → web), then map the screen once.

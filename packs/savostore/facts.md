@@ -57,11 +57,11 @@ CRM base https://staging5.rolustech.com:4220/index.php
 ## Business rules
 - Rewards earn rate: 5% of shipping after rewards. Earned when the order is fully paid and its status changes to "Order Delivered" in the CRM.
 - Redemption cap: rewards cover at most 10% of the shipping price, not the order total.
-- Adding a parcel to an already-paid order: the rewards limit is based only on the new unpaid shipping (confirmed intended by the user; for example a $400 parcel gives a $40 limit on order A1158).
+- Adding a parcel to an already-paid order: the rewards limit is based only on the new unpaid shipping (confirmed intended by the user; for example a $400 parcel on a previously paid $1,000 order gives a $40 limit).
 - A rewards balance of at least $100 or 50,000 KES is needed for the redemption cases.
 - Mandatory Shipment Protection (#180966) applies above a threshold set in the CRM. Production threshold: $150 (as of 30 Sep). Test at the threshold and just above it (150 and 151).
 
-- Test data placeholders in cases (ORDER-MULTI, ORDER-EARN, ORDER-KES...) mean the order prepared for the case: `test_order` (number) and `test_order_record` (CRM id) in values_so_far. On the portal open its invoice directly at `<portal URL>/shipping-only/invoice/<test_order_record>`; there is no `/payment/<number>` page (it is a 404). Buy & Ship: `test_quote`.
+- Test data placeholders in cases (ORDER-MULTI, ORDER-EARN, ORDER-KES, ORDER-BAS, CUSTOMER, Wallet) are never real order numbers. They are resolved for THIS run from the pack placeholders table (find first, else create) and stored only in run state (`order_multi` / `order_earn` / … plus aliases like `test_order` / `test_order_record`). Never search the page for the literal token. On the portal open a shipping-only invoice at `<portal URL>/shipping-only/invoice/<record id>`; there is no `/payment/<number>` page (it is a 404). Buy & Ship: `order_bas` / `test_quote`.
 - The wallet invariant (W = L - U, W >= 0, U <= L) is computed by code and given to the judge; a negative wallet with U > L is a FAIL even when W = L - U holds.
 
 ## Savo Rewards: CRM facts (verified 2026-10-12)
@@ -175,17 +175,19 @@ rewards, cap(s) = R% x unpaid shipping s.
 ## Verified flows (from manual retest, 2026-10-12; follow these, check each step against the page)
 **Open a CRM order directly:** browser_navigate to `<crm URL>/index.php?module=AOS_Invoices&action=DetailView&record=<record id>` (same id as the portal invoice, read in this run). Don't click the order-number link in lists; it often doesn't navigate.
 
-**Paying a shipping-only invoice:** use the **Pay By Card** button on the invoice page (opens `/shipping-only/stripe/<id>?appliedRewards=N`, then a second "Pay by Card" goes to Stripe; recipe R4). Do not click "Make a Payment" on these invoices; it does nothing useful.
+**Paying a shipping-only invoice (portal, default when the case says pay on the portal):** use the **Pay By Card** button on the invoice page (opens `/shipping-only/stripe/<id>?appliedRewards=N`, then a second "Pay by Card" goes to Stripe; recipe R4). Do not click "Make a Payment" on these invoices; it does nothing useful.
 
-**R1 Prepare a shipping-only order (A1142):** CRM: open the client's shipping-only order (AOS_Invoices) -> open its parcel, set Received, Save -> move status one step at a time, saving each: Shipped to Warehouse, On Warehouse floor, Ready to Ship, Shipped, Invoiced & Shipped. Portal: open `/shipping-only/invoice/<CRM record id>` directly (read the id from the CRM URL `record=` in the same run; never reuse an old id; "View Invoice" is not needed), wait ~4 s, check the balance, the Pay By Card button and rewards "up to" (= 10% of unpaid shipping; A1142: $44.00, up to $3.50).
-**R2 Buy & Ship (B1465):** AOS_Quotes record; the rewards box shows only at Awaiting Payment or Shipping Fee Invoiced. In USD the only option is Pay to Bank Account; there is no currency switch, so KES/M-Pesa cases are BLOCKED.
+**Record a payment in CRM (CRM alternative when portal card payment cannot be made):** on the order's DetailView open the **Payments** subpanel → **Create** → add a Paid payment for the full balance → confirm the subpanel shows the linked Paid payment and balance 0 → then move status on to completion (e.g. Order Delivered). Prefer this over looping on status saves. Note in the report that payment was made in CRM. Portal 4242 card payment stays the default when the case says pay on the portal.
+
+**R1 Prepare a shipping-only order:** Customer creates the order on the portal; then in CRM open that AOS_Invoices record -> open its parcel, set Received, Save -> move status one step at a time, saving each: Shipped to Warehouse, On Warehouse floor, Ready to Ship, Shipped, Invoiced & Shipped (invoice the shipping in CRM). Portal: open `/shipping-only/invoice/<CRM record id>` directly (read the id from the CRM URL `record=` in the same run; never reuse an old id; "View Invoice" is not needed), wait ~4 s, check the balance, the Pay By Card button and rewards "up to" (= 10% of unpaid shipping).
+**R2 Buy & Ship:** AOS_Quotes record; the rewards box shows only at Awaiting Payment or Shipping Fee Invoiced. In USD the only option is Pay to Bank Account; there is no currency switch, so KES/M-Pesa cases are BLOCKED.
 **R3 Apply/remove rewards (portal):** type the amount, click Apply, wait 3-5 s before reading. Remove with the X, then wait again. An amount over the cap is rejected with a message that disappears after a few seconds (read it right away).
 **R4 Stripe (staging only):** Pay By Card -> `/shipping-only/stripe/<id>?appliedRewards=N` -> click the second "Pay by Card" -> on Stripe choose USD -> card 4242 4242 4242 4242, expiry 12/34, CVC 123, cardholder name (required). For B6, leave Stripe without paying and check the wallet did not drop.
 **R5 Wallet check:** portal wallet balance; CRM Contacts > <client> -> Total Rewards, Current Rewards, Rewards Used (wait ~10 s, reload if empty). Redemptions are in the order's Rewards Redeemed subpanel.
 - In the CRM, an empty Rewards Redeemed subpanel or wallet total right after a change means it has not loaded yet: reload and read again before recording it.
-**R6 Admin redemption:** CRM order -> Rewards Redeemed subpanel -> Create -> Redeemed Rewards <= Applicable Rewards -> Save. On A1142 this returned HTTP 500: after two failures take a screenshot and record FAIL.
-**R7 Earn rewards (staging only):** pay an order (R4) -> CRM: set it to Order Delivered (earn = 5% of shipping after rewards). To earn faster raise the earn % under Administration > Rewards panel, then restore 5% earn / 10% redeem.
-- Not verified: creating a brand-new order of either type. Explore it from the page and propose a recipe.
+**R6 Admin redemption:** CRM order -> Rewards Redeemed subpanel -> Create -> Redeemed Rewards <= Applicable Rewards -> Save. If Create returns HTTP 500: after two failures take a screenshot and record FAIL.
+**R7 Earn rewards (staging only):** pay an order (R4 portal card, or CRM Payments subpanel when card payment cannot be made) -> CRM: set it to Order Delivered (earn = 5% of shipping after rewards). To earn faster raise the earn % under Administration > Rewards panel, then restore 5% earn / 10% redeem.
+- Creating a brand-new shipping-only order: customer places it on the portal; CRM then receives the package, moves status, and invoices shipping (see pack placeholders / data_prep create parts).
 
 ## UI recipes
 - Build a rewards balance: create a test order, pay it with the 4242 card, move it to Order Delivered in the CRM, then check the wallet.

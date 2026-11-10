@@ -418,15 +418,36 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
     sites = run_sites(policy, plan)
     print("\nThe browser will stay on: " + (", ".join(sites) or "no sites yet")
           + ". If the app sends it anywhere else (like a payment page), I'll ask you first.")
-    ok, pre = gate.plan_gate(plan, policy=policy, issues=check_plan(plan))
+    from .placeholders import build_data_plan, format_data_plan
+    data_plan = build_data_plan(plan, pack.config)
+    state.data["pack_cfg"] = {
+        "placeholders": (pack.config or {}).get("placeholders"),
+        "data_prep": (pack.config or {}).get("data_prep"),
+    }
+    state.data["_data_plan_rules"] = data_plan
+    ok, pre, corrections = gate.plan_gate(plan, policy=policy, issues=check_plan(plan), data_plan=data_plan)
     if not ok:
         state.checkpoint("user stopped at plan gate", status="dry_run" if draft is not None else "stopped")
         return 1
+    if corrections:
+        data_plan = build_data_plan(plan, pack.config, corrections=corrections)
+        state.data["_data_plan_rules"] = data_plan
+        state.data["data_plan_corrections"] = corrections
+        state.data.setdefault("notes", []).append("Data plan corrected at plan gate for this run.")
+    # Always log the data plan (auto mode too) for the report / progress.log.
+    try:
+        with (state.dir / "progress.log").open("a") as f:
+            from datetime import datetime
+            f.write(f"{datetime.now().isoformat(timespec='seconds')} {format_data_plan(data_plan)}\n")
+    except OSError:
+        pass
+    state.data.setdefault("notes", []).append(format_data_plan(data_plan))
     policy.preapprove(pre)
     state.data["approved"], state.data["preapproved"] = True, pre
     state.data["model"] = model_fingerprint(settings)
     state.data["mode"] = {"retest_bug": retest_bug, "cases": only, "email": email, "email_progress": email_progress,
                           "subtasks": bool(subtasks)}
+    state.save()
     return _execute(settings, pack, plan, state, policy, memory)
 
 
@@ -459,7 +480,8 @@ def _execute(settings, pack, plan, state, policy, memory) -> int:
                 results = run_plan(plan, state, testers, make_judge(settings, pack, memory), on_case_done=progress.case_done,
                                    manual_login=login,
                                    manual_login_apps=list(pack.config.get("manual_login_apps") or []),
-                                   memory=memory, data_prep=list(pack.config.get("data_prep") or []))
+                                   memory=memory, data_prep=list(pack.config.get("data_prep") or []),
+                                   pack_cfg=pack.config)
                 left = Ledger(state).unrestored()
                 if left:
                     print("\nThese settings were changed and not put back: " +
@@ -680,9 +702,21 @@ def cmd_rerun(settings: Settings, task_id: int, cases: str | None, src_run: str 
     sites = run_sites(policy, plan)
     print("\nThe browser will stay on: " + (", ".join(sites) or "no sites yet")
           + ". If the app sends it anywhere else (like a payment page), I'll ask you first.")
-    ok, pre = gate.plan_gate(plan, policy=policy, issues=check_plan(plan))
+    from .placeholders import build_data_plan, format_data_plan
+    data_plan = build_data_plan(plan, pack.config)
+    state.data["pack_cfg"] = {
+        "placeholders": (pack.config or {}).get("placeholders"),
+        "data_prep": (pack.config or {}).get("data_prep"),
+    }
+    state.data["_data_plan_rules"] = data_plan
+    ok, pre, corrections = gate.plan_gate(plan, policy=policy, issues=check_plan(plan), data_plan=data_plan)
     if not ok:
         return 1
+    if corrections:
+        data_plan = build_data_plan(plan, pack.config, corrections=corrections)
+        state.data["_data_plan_rules"] = data_plan
+        state.data["data_plan_corrections"] = corrections
+    state.data.setdefault("notes", []).append(format_data_plan(data_plan))
     policy.preapprove(pre)
     run_sites(policy, plan)
     state.set_plan(plan)

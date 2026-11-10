@@ -170,9 +170,11 @@ class DiscoveryFirst(unittest.TestCase):
         entry = ensure_discovery(self.plan, self.case, "portal", self.state, {"portal": tester}, mem)
         self.assertEqual(entry["source"], "discovery")
         self.assertEqual(len(seen), 1)
-        self.assertEqual(seen[0][2], 30)
+        self.assertGreaterEqual(seen[0][2], 30)
+        self.assertLessEqual(seen[0][2], 60)
         self.assertIn("Orders", entry["notes"])
-        # second call uses cache
+        self.assertTrue(entry.get("checklist"))
+        # second call uses cache when checklist covered
         entry2 = ensure_discovery(self.plan, self.case, "portal", self.state, {"portal": tester}, mem)
         self.assertEqual(len(seen), 1)
         self.assertEqual(entry2, entry)
@@ -290,6 +292,26 @@ class DiscoveryFirst(unittest.TestCase):
         self.assertIn("portal=a.example:1", env_fingerprint(plan))
         self.assertIn("crm=b.example:2", env_fingerprint(plan, ["crm"]))
         self.assertNotIn("portal=", env_fingerprint(plan, ["crm"]))
+
+    def test_incremental_discovery_for_missing_checklist(self):
+        mem = FakeMemory(recipes=[])
+        seen = []
+
+        def tester(app, brief, state):
+            seen.append(list(brief.get("discovery_checklist") or []))
+            return StepResult(case_id=brief["case_id"], app=app,
+                              notes="mapped: " + ", ".join(brief.get("discovery_checklist") or []))
+
+        ensure_discovery(self.plan, self.case, "portal", self.state, {"portal": tester}, mem,
+                         checklist=["create order"])
+        self.assertEqual(len(seen), 1)
+        # Later need not covered by cache → incremental pass
+        ensure_discovery(self.plan, self.case, "portal", self.state, {"portal": tester}, mem,
+                         checklist=["create order", "record payment", "move status"])
+        self.assertEqual(len(seen), 2)
+        self.assertTrue(any("payment" in x or "status" in x for x in seen[1]))
+        entry = self.state.data["discovery"][discovery_key(self.case.area, "portal")]
+        self.assertIn("inc", entry["source"])
 
 class XsrfDeepLinkGuard(unittest.TestCase):
     """Stop SuiteCRM Administration deep-link / XSRF loops (run 180966-…182438)."""

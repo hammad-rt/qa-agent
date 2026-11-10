@@ -95,12 +95,72 @@ def console_approver(input_fn=None, out=print):
     return approve
 
 
-def plan_gate(plan: TestPlan, input_fn=None, out=print, policy=None, issues: list[str] | None = None) -> tuple[bool, list[str]]:
-    """Returns (approved, action types pre-approved for this run). Always-ask actions (posting,
-    email, prod writes) are never offered for pre-approval; they are asked each time.
-    change_settings may be in the pre-approve batch when the pack lists it and env != prod."""
-    from .auto import prompter
+def show_data_plan(rows: list[dict] | None, out=print) -> None:
+    """Short table of placeholders: find-or-create, and each create part's app + what it does."""
+    from .placeholders import format_data_plan
+    if not rows:
+        return
+    out("\n" + format_data_plan(rows))
+
+
+def correct_data_plan(rows: list[dict], input_fn=None, out=print) -> dict:
+    """Optional interactive corrections to create parts for this run only.
+
+    Returns {TOKEN: {"create": [{"app", "text"}, ...]}} overlays. Empty in automatic mode.
+    """
+    from .auto import is_auto, prompter
+    if not rows or is_auto():
+        return {}
+    input_fn = input_fn or prompter("")
+    out("\nCorrect any create part? Enter a token (e.g. ORDER-MULTI), or press Enter to keep the plan.")
+    corrections: dict = {}
+    while True:
+        tok = input_fn("  Token to edit (Enter = done): ").strip()
+        if not tok:
+            break
+        row = next((r for r in rows if str(r.get("token") or "").upper() == tok.upper()), None)
+        if row is None or row.get("missing"):
+            out(f"  No placeholder {tok} in this plan.")
+            continue
+        parts = list(row.get("create") or [])
+        out(f"  Current create parts for {row['token']}:")
+        for i, p in enumerate(parts, 1):
+            out(f"    {i}. [{p.get('app')}] {(p.get('text') or '')[:120]}")
+        raw = input_fn("  New parts as app|text lines (blank line ends; Enter alone keeps current):\n  > ").rstrip()
+        if not raw:
+            continue
+        new_parts = []
+        line = raw
+        while line:
+            if "|" in line:
+                app, text = line.split("|", 1)
+                new_parts.append({"app": app.strip(), "text": text.strip()})
+            else:
+                out("  Use app|text (example: portal|Create a shipping-only order...)")
+            line = input_fn("  > ").rstrip()
+        if new_parts:
+            corrections[row["token"].upper()] = {"create": new_parts}
+            row["create"] = new_parts
+            out(f"  Updated {row['token']} for this run.")
+    return corrections
+
+
+def plan_gate(plan: TestPlan, input_fn=None, out=print, policy=None, issues: list[str] | None = None,
+              data_plan: list[dict] | None = None) -> tuple[bool, list[str], dict]:
+    """Returns (approved, action types pre-approved for this run, data_plan_corrections).
+
+    Always-ask actions (posting, email, prod writes) are never offered for pre-approval; they are
+    asked each time. change_settings may be in the pre-approve batch when the pack lists it and
+    env != prod. Data plan is shown (and optionally corrected) before the start prompt.
+    """
+    from .auto import prompter, is_auto
     input_fn = input_fn or prompter("y")
+    show_data_plan(data_plan, out=out)
+    corrections = {}
+    if data_plan and not is_auto():
+        corrections = correct_data_plan(data_plan, input_fn=input_fn, out=out)
+    elif data_plan and is_auto():
+        out("  (automatic: data plan logged; no corrections)")
     pre = []
     allowed = list(plan.preapprovable_actions)
     ask_each = []
@@ -120,4 +180,4 @@ def plan_gate(plan: TestPlan, input_fn=None, out=print, policy=None, issues: lis
         ok = input_fn("Start the run anyway? [y/N] ").strip().lower() in ("y", "yes")
     else:
         ok = input_fn("\nStart the run? [y/N] ").strip().lower() in ("y", "yes")
-    return ok, pre
+    return ok, pre, corrections

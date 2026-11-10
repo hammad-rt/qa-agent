@@ -231,12 +231,17 @@ def verify_text(case, v: dict) -> str:
 def _turn(tester, plan, state, rule, app, text, read_only, case_id):
     from .coordinator import brief_for
     from . import learned
-    kind = "create" if case_id.endswith("-create") else "find"
+    from .placeholders import inject_placeholders
+    kind = "create" if "-create" in case_id else ("find" if case_id.endswith("-find") or "-find" in case_id else "check")
     known = [l for l in learned.read(state.data.get("pack_root"), rule.get("area"), app, rule["id"])
              if f"{kind} test data {rule['id']}" in l]
     if known:   # the pack learned this on an earlier run: start from it, re-read the screen, and adapt if it moved
         text += ("\nThis worked before (learned, not yet confirmed; follow it but read each screen first):\n- "
                  + "\n- ".join(known[-2:]))
+    # Never steer create toward a wrong app via old Stuck lines about creating on another app.
+    if kind == "create":
+        text += (f"\nThis create part runs on app '{app}' only. Do not switch to another app for this part; "
+                 f"later/earlier create parts (if any) run on their own apps.")
     pseudo = PlannedCase(id=case_id, title=f"data prep: {rule['id']}", area=rule.get("area"),
                          steps=[Step(text=text, app=app)], values_to_record=[rule["value"]])
     brief = brief_for(plan, pseudo, [0], state)
@@ -245,6 +250,7 @@ def _turn(tester, plan, state, rule, app, text, read_only, case_id):
     brief["actions_per_step"] = PREP_MAX_ACTIONS
     brief["read_only"] = read_only
     brief["values_to_record"] = [rule["value"]] + list(rule.get("extra_values", []))
+    brief = inject_placeholders(brief, state)
     return tester(app, brief, state)
 
 
@@ -319,7 +325,31 @@ def _usable(rule, rec, used) -> bool:
 CREATE_TRIES = 2
 
 
+def _create_parts(rule: dict) -> list[dict]:
+    """Create may be a string (one app) or a sequence of app-tagged parts from the pack yaml."""
+    from .placeholders import create_parts
+    return create_parts(rule)
+
+
+def _apps_for_rule(rule: dict) -> list[str]:
+    apps = []
+    for a in (rule.get("find_app") or rule.get("app"),):
+        if a and a not in apps:
+            apps.append(a)
+    for p in _create_parts(rule):
+        if p.get("app") and p["app"] not in apps:
+            apps.append(p["app"])
+    vapp = (rule.get("verify") or {}).get("app")
+    if vapp and vapp not in apps:
+        apps.append(vapp)
+    return apps
+
+
 def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | None:
+    from .placeholders import subst_client, store_resolved
+    rule = dict(rule)
+    if rule.get("placeholder") and not rule.get("token"):
+        rule["token"] = rule["placeholder"]
     store = state.data.setdefault("prep", {})
     key, value = rule["id"], rule["value"]
     have = store.get(key)
@@ -329,15 +359,25 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
         state.values[value] = {"value": have["value"], "source": f"prep/{key}"}
         if have.get("record"):
             state.values[f"{value}_record"] = {"value": have["record"], "source": f"prep/{key}"}
+        for a in rule.get("aliases") or []:
+            state.values[a] = {"value": have["value"], "source": f"prep/{key}"}
+            if have.get("record"):
+                state.values[f"{a}_record"] = {"value": have["record"], "source": f"prep/{key}"}
+        if rule.get("token"):
+            store_resolved(state, rule["token"], value=have["value"], record=have.get("record"),
+                           value_key=value, prep_id=key, aliases=list(rule.get("aliases") or []))
         return None
+
+    find_app = rule.get("find_app") or rule.get("app")
+    app = find_app  # used by blocked()'s learn path
 
     def blocked(why):
         state.checkpoint(f"data prep {key} for {case.id} failed: {why}")
         from . import learned
         try:
-            for turn in (f"PREP-{key}-create", f"PREP-{key}-find"):
+            for turn in (f"PREP-{key}-create", f"PREP-{key}-create-0", f"PREP-{key}-find"):
                 acts = [a for a in state.data.get("action_log", []) if a.get("case_id") == turn]
-                if acts and learned.record_stuck(state.data.get("pack_root"), rule.get("area"), app or "crm",
+                if acts and learned.record_stuck(state.data.get("pack_root"), rule.get("area"), app or find_app or "crm",
                                                  turn, why, why, acts):
                     state.checkpoint(f"data prep {key}: saved where it got stuck to the pack")
                     break
@@ -350,21 +390,23 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
         return blocked(rule.get("blocked_note") or f"this preparation is not possible on {plan.env}")
     clients = rule.get("test_client")
     name = clients.get(plan.env) if isinstance(clients, dict) else clients
-    app = rule.get("app")
     login_app = rule.get("client_login_app")       # whose picked login identifies the test client (e.g. the customer app)
-    user = portal_login(plan, login_app, app)
+    user = portal_login(plan, login_app, find_app)
     contact = state.data.get("contact") or {}
     record_id = contact.get("record_id") if contact.get("email") == user and not contact.get("failed") else None
     if not (name or user):
         return blocked("no test user picked and no test client set for this environment; "
                        "the agent will not create orders for an unconfirmed account")
     client = client_label(name, user, record_id)
-    for k in ("find", "create"):
-        if rule.get(k):
-            rule = {**rule, k: rule[k].replace("{client}", client or "")}
-    tester = testers.get(app) if app else None
-    if tester is None:
-        return blocked(f"no tester for {app}" if app else "this prep rule names no app")
+    rule = subst_client(rule, client)
+    parts = _create_parts(rule)
+    need_apps = _apps_for_rule(rule)
+    for a in need_apps:
+        if a and testers.get(a) is None:
+            return blocked(f"no tester for {a}")
+    if not find_app and not parts:
+        return blocked("this prep rule names no app")
+    find_tester = testers.get(find_app) if find_app else None
     rejected = state.data.setdefault("prep_rejected", {}).setdefault(key, [])
     used = ([s["value"] for s in store.values() if s.get("consumed")] + [r["value"] for r in rejected]
             + list(rule.get("never_use", [])))
@@ -375,9 +417,9 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
         return sr.values.get(value), sr.values.get(f"{value}_record")
 
     hint = rule.get("record_hint") or "the record's id from the page URL"
-    # 1. FIND: read-only, exact fit only. A near-fit is never edited to make it fit (that is what made prep loop).
+    # 1. FIND: read-only on find_app (defaults to app). Exact fit only.
     find = (f"FIND ONLY. This turn is read-only: open lists and records and read them; change nothing.\n"
-            f"{rule['find']}\nDo not use: {skip or 'none'}.\n"
+            f"{rule.get('find') or ''}\nDo not use: {skip or 'none'}.\n"
             f"Only an exact fit counts. Never edit, fix, re-status or add to a record to make it fit; a near-fit "
             f"is a 'none'. If one fits exactly, record_value('{value}', '<its number exactly as shown, with its "
             f"prefix, exactly as shown>') and record_value('{value}_record', '<{hint}>'), then finish. "
@@ -385,37 +427,55 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
             f"Use the list's search, filters and sorting to narrow it down rather than paging through everything; "
             f"open a candidate to check it rather than assuming from the list. Say 'none' only after searching.")
     sr = None
-    try:
-        sr = _call(tester, plan, state, rule, app, find, True, f"PREP-{key}-find", key)
-        rec, record = rec_of(sr)
-    except Exception as e:  # noqa: BLE001
-        from .logsetup import short_error
-        state.checkpoint(f"data prep {key}: find failed ({short_error(e, f'data prep {key} find')}); creating one")
-        rec, record = None, None
-    if not _usable(rule, rec, used):
-        if rec is not None and not _is_none(rec):
-            state.checkpoint(f"data prep {key}: found {rec}, which is not enough or already used; creating one")
-        rec = record = None
+    rec = record = None
+    if find_tester is not None and rule.get("find"):
+        try:
+            sr = _call(find_tester, plan, state, rule, find_app, find, True, f"PREP-{key}-find", key)
+            rec, record = rec_of(sr)
+        except Exception as e:  # noqa: BLE001
+            from .logsetup import short_error
+            state.checkpoint(f"data prep {key}: find failed ({short_error(e, f'data prep {key} find')}); creating one")
+            rec, record = None, None
+        if not _usable(rule, rec, used):
+            if rec is not None and not _is_none(rec):
+                state.checkpoint(f"data prep {key}: found {rec}, which is not enough or already used; creating one")
+            rec = record = None
 
     for attempt in range(CREATE_TRIES + 1):
         if rec is None:
             if attempt == CREATE_TRIES:
                 break
-            if not rule.get("create"):
+            if not parts:
                 return blocked(f"nothing fits and this rule has no create step. {(sr.notes or '') if sr else ''}".strip())
-            create = (f"CREATE: {rule['create']}\nDo not reuse: {skip or 'none'}.\n"
-                      f"When it is done, record_value('{value}', '<the new number, exactly as shown>') and "
-                      f"record_value('{value}_record', '<{hint}>'), then "
-                      f"finish. If you cannot finish it, call finish with notes starting 'BLOCKED:' saying where you "
-                      f"stopped and the number of any record you created.")
-            try:
-                sr = _call(tester, plan, state, rule, app, create, False, f"PREP-{key}-create", key)
-            except Exception as e:  # noqa: BLE001
-                from .logsetup import short_error
-                return blocked(short_error(e, f"data prep {key} create"))
-            rec, record = rec_of(sr)
-            if not _usable(rule, rec, used):
+            # Multi-app create: run each pack-tagged part in order (e.g. portal then crm).
+            for i, part in enumerate(parts):
+                papp, ptext = part.get("app"), part.get("text") or ""
+                last = i == len(parts) - 1
+                create = (f"CREATE part {i + 1}/{len(parts)} on app '{papp}': {ptext}\n"
+                          f"Do not reuse: {skip or 'none'}.\n"
+                          f"Stay on app '{papp}' for this part only.")
+                if last:
+                    create += (f"\nWhen this part is done, record_value('{value}', '<the new number, exactly as shown>') "
+                               f"and record_value('{value}_record', '<{hint}>'), then finish. "
+                               f"If you cannot finish it, call finish with notes starting 'BLOCKED:' saying where you "
+                               f"stopped and the number of any record you created.")
+                else:
+                    create += ("\nWhen this part is done, finish (record the number/id if you already have it). "
+                               "A later part on another app continues the prep.")
+                try:
+                    sr = _call(testers[papp], plan, state, rule, papp, create, False,
+                               f"PREP-{key}-create-{i}" if len(parts) > 1 else f"PREP-{key}-create", key)
+                except Exception as e:  # noqa: BLE001
+                    from .logsetup import short_error
+                    return blocked(short_error(e, f"data prep {key} create part {i + 1}"))
+                got_v, got_r = rec_of(sr)
+                if not _is_none(got_v):
+                    rec, record = got_v, got_r or record
                 why = (sr.notes or "").strip()
+                if why.upper().startswith("BLOCKED:"):
+                    return blocked(why[8:].strip() or f"create part {i + 1} blocked")
+            if not _usable(rule, rec, used):
+                why = (sr.notes or "").strip() if sr else ""
                 why = why[8:].strip() if why.upper().startswith("BLOCKED:") else why
                 return blocked(why or f"creating a record did not give a usable {value} ({rec})")
         if not rule.get("verify"):
@@ -441,14 +501,79 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
     if rec is None:
         return blocked(f"no usable record after {CREATE_TRIES} tries; rejected: "
                        + "; ".join(f"{r['value']}: {r['why']}" for r in rejected[-CREATE_TRIES:]))
-    _learn(state, rule, key, app)
+    learn_app = (parts[-1]["app"] if parts else find_app) or find_app
+    _learn(state, rule, key, learn_app)
     store[key] = {"value": rec, "record": record, "consumed": False, "for": case.id}
     state.values[value] = {"value": rec, "source": f"prep/{key}"}
     if record:
         state.values[f"{value}_record"] = {"value": record, "source": f"prep/{key}"}
+    for a in rule.get("aliases") or []:
+        state.values[a] = {"value": rec, "source": f"prep/{key}"}
+        if record:
+            state.values[f"{a}_record"] = {"value": record, "source": f"prep/{key}"}
+    if rule.get("token"):
+        store_resolved(state, rule["token"], value=rec, record=record, value_key=value,
+                       prep_id=key, aliases=list(rule.get("aliases") or []))
     state.save()
     state.checkpoint(f"data prep {key}: using {rec} for {case.id}")
     return None
+
+
+def resolve_data_plan(plan, state, testers: dict, data_plan: list[dict],
+                      *, pseudo_case=None) -> list[CaseResult]:
+    """Resolve every placeholder row up front (find or create). Returns BLOCKED results for failures;
+    successful rows are stored in run state only. Does not stop the run — caller continues other cases."""
+    from .models import PlannedCase, CaseType
+    from .placeholders import tokens_in_case
+    blocked: list[CaseResult] = []
+    for row in data_plan or []:
+        if row.get("missing"):
+            note = f"prep-missing: placeholder {row['token']} is not defined in the pack"
+            state.checkpoint(note)
+            state.data.setdefault("notes", []).append(note)
+            for cid in row.get("cases") or []:
+                blocked.append(CaseResult(case_id=cid, verdict="BLOCKED", note=note))
+            continue
+        rule = dict(row.get("rule") or {})
+        if not rule:
+            continue
+        tok = row["token"]
+        have = (state.data.get("placeholders") or {}).get(tok.upper())
+        prep_have = (state.data.get("prep") or {}).get(rule.get("id"))
+        if have and have.get("value") and prep_have and not prep_have.get("consumed"):
+            row["status"] = "ready"
+            row["resolved"] = have.get("value")
+            continue
+        case = pseudo_case or PlannedCase(
+            id=f"DATA-{tok}", title=f"prepare {tok}", area=rule.get("area"),
+            type=CaseType.DATA_SETUP,
+            steps=[Step(text=f"Prepare placeholder {tok}", app=rule.get("find_app") or rule.get("app") or "none")],
+            expected=f"{tok} ready")
+        for c in plan.cases:
+            if tok.upper() in {t.upper() for t in tokens_in_case(c)}:
+                case = c
+                break
+        err = _ensure_one(plan, case, state, testers, rule)
+        if err is not None:
+            row["status"] = "failed"
+            row["error"] = err.note
+            state.data.setdefault("notes", []).append(f"data plan {tok}: {err.note}")
+            for cid in row.get("cases") or [case.id]:
+                blocked.append(CaseResult(case_id=cid, verdict="BLOCKED", expected=getattr(case, "expected", ""),
+                                          note=err.note or f"prep-missing: {tok}"))
+        else:
+            row["status"] = "ready"
+            got = (state.data.get("placeholders") or {}).get(tok.upper()) or {}
+            row["resolved"] = got.get("value") or (state.data.get("prep") or {}).get(rule.get("id"), {}).get("value")
+            state.checkpoint(f"data plan: {tok} ready ({row.get('resolved')})")
+    state.data["data_plan"] = [
+        {**{k: v for k, v in r.items() if k != "rule"},
+         **({"rule_id": (r.get("rule") or {}).get("id")} if r.get("rule") else {})}
+        for r in data_plan
+    ]
+    state.data["_data_plan_rules"] = data_plan
+    state.save()
+    return blocked
 
 
 def _learn(state, rule, key, app) -> None:
@@ -456,11 +581,18 @@ def _learn(state, rule, key, app) -> None:
     next prep turn reads it (it is in the brief for this area and app)."""
     from . import learned
     log = state.data.get("action_log", [])
-    for turn, what in ((f"PREP-{key}-create", f"create test data {key}"), (f"PREP-{key}-find", f"find test data {key}")):
+    # Prefer the last create part (multi-app sequences end with the finishing app).
+    create_turns = [f"PREP-{key}-create"] + [f"PREP-{key}-create-{i}" for i in range(8)]
+    for turn in create_turns:
         acts = [a for a in log if a.get("case_id") == turn]
-        if acts and learned.record_recipe(state.data.get("pack_root"), rule.get("area"), app, what, acts):
-            state.checkpoint(f"data prep {key}: saved how it was done to the pack ({what})")
+        if acts and learned.record_recipe(state.data.get("pack_root"), rule.get("area"), app,
+                                          f"create test data {key}", acts):
+            state.checkpoint(f"data prep {key}: saved how it was done to the pack (create test data {key})")
             return
+    acts = [a for a in log if a.get("case_id") == f"PREP-{key}-find"]
+    if acts and learned.record_recipe(state.data.get("pack_root"), rule.get("area"), app,
+                                      f"find test data {key}", acts):
+        state.checkpoint(f"data prep {key}: saved how it was done to the pack (find test data {key})")
 
 
 def _verify(plan, case, state, testers, rule, rec, record, key) -> tuple[str, str]:

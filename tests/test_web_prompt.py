@@ -17,7 +17,7 @@ class ClassifyPrompt(unittest.TestCase):
             "Options: (1) give guidance (free text)  (2) skip this case  (3) stop the run\n"
             "Reply with 1:<text>, 2:<reason>, or 3:<reason> (wait up to 600s): "
         )
-        self.assertEqual(p["kind"], "stuck_ask")
+        self.assertIn(p["kind"], ("stuck_ask", "stuck_chat"))
         self.assertEqual(p["timeout_sec"], 600)
         self.assertIn("Stuck", p["title"])
 

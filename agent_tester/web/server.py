@@ -126,7 +126,7 @@ PRE_CASE_RE = re.compile(r"^(DISCO-|CONTACT-|PREP-)")
 DEFAULT_STUCK_ASK_TIMEOUT = int(os.environ.get("STUCK_ASK_TIMEOUT_SEC", "600"))
 
 
-def classify_prompt(prompt: str) -> dict:
+def classify_prompt(prompt: str, *, kind_hint: str | None = None) -> dict:
     """Read-only: classify a stdin/ASK prompt so the web UI can pin the right panel.
 
     Returns kind, optional timeout_sec (stuck-ask), and a short title for the banner.
@@ -134,12 +134,18 @@ def classify_prompt(prompt: str) -> dict:
     p = (prompt or "").strip()
     if not p:
         return {"kind": "none", "timeout_sec": None, "title": ""}
-    stuck = bool(re.search(r"(?i)options:\s*\(1\)\s*give guidance", p)
-                 or re.search(r"(?i)reply with\s*1:<text>", p)
-                 or re.search(r"(?i)^stuck on\s+\S+", p))
+    if kind_hint in ("stuck_chat", "stuck_ask"):
+        m = re.search(r"(?i)wait up to\s+(\d+)\s*s", p)
+        return {"kind": "stuck_chat" if kind_hint == "stuck_chat" else "stuck_ask",
+                "timeout_sec": int(m.group(1)) if m else DEFAULT_STUCK_ASK_TIMEOUT,
+                "title": "Stuck — waiting for your answer"}
+    stuck = bool(re.search(r"(?i)options:\s*\(1\)\s*(?:give guidance|send a chat)", p)
+                 or re.search(r"(?i)reply with\s*(?:1:<text>|free text)", p)
+                 or re.search(r"(?i)^stuck on\s+\S+", p)
+                 or re.search(r"(?i)type go\s*/\s*continue", p))
     if stuck:
         m = re.search(r"(?i)wait up to\s+(\d+)\s*s", p)
-        return {"kind": "stuck_ask", "timeout_sec": int(m.group(1)) if m else DEFAULT_STUCK_ASK_TIMEOUT,
+        return {"kind": "stuck_chat", "timeout_sec": int(m.group(1)) if m else DEFAULT_STUCK_ASK_TIMEOUT,
                 "title": "Stuck — waiting for your answer"}
     if re.search(r"(?i)token to edit|correct any create part|data plan", p) and not re.search(r"\[y/N\]", p):
         return {"kind": "data_plan", "timeout_sec": None, "title": "Data plan — your input"}
@@ -366,6 +372,9 @@ class Job:
         self.run_hint = Path(args[1]).name if len(args) > 1 and args[0] == "resume" else None
         self.lock = threading.Lock()
         env = {**os.environ, "PYTHONUNBUFFERED": "1", "QA_WEB": "1"}
+        # Headed browser: CLI flag wins; else honor QA_HEADED already in the environment.
+        if "--headed" in args:
+            env["QA_HEADED"] = "1"
         self.proc = subprocess.Popen([sys.executable, "-u", "-m", "agent_tester", *args], cwd=ROOT,
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                      env=env, start_new_session=True)
@@ -427,6 +436,7 @@ class Job:
                     self._answered_ask_ids = getattr(self, "_answered_ask_ids", set())
                     if self.out and not self.out.endswith("\n"):
                         self.out += "\n"
+                    # Console shows the human prompt only (never dump structured stuck JSON).
                     self.out += str(q.get("prompt", "")) + " "
                     continue
                 i = self._buf.find(ASK_MARK)
@@ -447,16 +457,24 @@ class Job:
             waiting_since = self.waiting_since
         running = self.proc.poll() is None
         ask_id = ""
+        stuck = None
+        kind_hint = None
         if self.pending and running:
             waiting, prompt, secret = True, str(self.pending.get("prompt", "")), bool(self.pending.get("secret"))
             ask_id = str(self.pending.get("ask_id") or "")
+            stuck = self.pending.get("stuck") if isinstance(self.pending.get("stuck"), dict) else None
+            kind_hint = self.pending.get("kind")
         else:  # fallback for any prompt that did not come through ask_line
             tail = text.rstrip().splitlines()[-1] if text.strip() else ""
             waiting = running and not text.endswith("\n") and bool(tail)
             prompt, secret = (tail if waiting else ""), waiting and any(w in tail.lower() for w in SECRET_WORDS)
             if waiting and waiting_since is None:
                 waiting_since = time.time()
-        meta = classify_prompt(prompt) if waiting else {"kind": "none", "timeout_sec": None, "title": ""}
+        meta = (classify_prompt(prompt, kind_hint=kind_hint) if waiting
+                else {"kind": "none", "timeout_sec": None, "title": ""})
+        # Prefer structured stuck payload timeout when present.
+        if stuck and stuck.get("timeout_sec") and meta.get("kind") in ("stuck_ask", "stuck_chat"):
+            meta = {**meta, "timeout_sec": int(stuck["timeout_sec"])}
         return {"id": self.id, "args": self.args, "started": self.started, "running": self.proc.poll() is None,
                 "code": self.proc.poll(), "out": text[since:], "len": len(text), "waiting": waiting,
                 "secret": secret, "prompt": prompt, "ask_id": ask_id,
@@ -464,6 +482,7 @@ class Job:
                 "prompt_title": meta.get("title") or "",
                 "prompt_timeout_sec": meta.get("timeout_sec"),
                 "waiting_since": waiting_since if waiting else None,
+                "stuck": stuck,
                 "run_dir": _run_dir_from(text) or self.run_hint}
 
     def answer(self, text: str, ask_id: str | None = None):
@@ -578,6 +597,11 @@ def run_detail(d: Path) -> dict:
     live = summary.get("status") == "running"
     phase = derive_phase(st, live=live, has_report=bool(summary.get("report")))
     data_plan = st.get("data_plan") or st.get("_data_plan_rules") or []
+    now_doing = st.get("now_doing") if isinstance(st.get("now_doing"), dict) else None
+    if not now_doing and live and shots:
+        now_doing = {"line": summary.get("current") or "—", "screenshot": shots[-1] if shots else None,
+                     "case_id": summary.get("current"), "page": "", "status": "running"}
+    stuck_chat = _read_json(d / "stuck_chat.json", {}) or {}
     return {"summary": summary, "plan": st.get("plan"), "results": st.get("results"),
             "values": st.get("values"), "checkpoints": st.get("checkpoints"), "ledger": st.get("ledger"),
             "action_log": (st.get("action_log") or [])[-400:], "shots": shots, "progress": progress,
@@ -586,7 +610,9 @@ def run_detail(d: Path) -> dict:
             "attempt": int(st.get("attempt") or 1),
             "attempt_history": st.get("attempt_history") or [],
             "data_reuse": st.get("data_reuse") or {},
-            "previous_attempts": st.get("previous_attempts") or {}}
+            "previous_attempts": st.get("previous_attempts") or {},
+            "now_doing": now_doing,
+            "stuck_chat": stuck_chat if isinstance(stuck_chat, dict) else {}}
 
 
 def trace_lines(d: Path, since: int) -> dict:
@@ -825,6 +851,10 @@ class Handler(BaseHTTPRequestHandler):
                         if p.suffix.lower() not in (".md", ".txt", ".markdown") or not p.is_file():
                             return self._send(400, {"error": f"no .md or .txt file at {cf}"})
                         args += ["--cases-file", str(p.resolve())]
+                if b.get("headed"):
+                    # Safe on resume/rerun/start: Playwright MCP relaunches; falls back to headless if no display.
+                    if "--headed" not in args:
+                        args.append("--headed")
                 j = Job(args)
                 JOBS[j.id] = j
                 return self._send(200, j.info())

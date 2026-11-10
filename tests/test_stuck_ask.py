@@ -41,22 +41,40 @@ class StuckAsk(unittest.TestCase):
         self.assertTrue(any("unattended" in n.lower() or "Stuck ask" in n for n in self.st.data["notes"]))
 
     def test_guidance_resets_counters(self):
+        # Conversational: chat turn then explicit go — only then continue with guidance.
         with mock.patch.object(self.s, "_can_stuck_ask", return_value=True), \
-             mock.patch("agent_tester.auto.ask_line", return_value="1:use the Payments subpanel"):
+             mock.patch.object(self.s, "_ask_stuck_line",
+                               side_effect=["use the Payments subpanel", "go"]):
             out = self.s._maybe_stuck_ask(why="looped", name="browser_click", repeats=4)
         self.assertIn("GUIDANCE", out["error"])
         self.assertIn("Payments subpanel", out["error"])
         self.assertFalse(self.s.result.limit_hit)
         self.assertEqual(self.s._sigs, {})
         self.assertFalse(self.s._explored)
+        chat = (self.st.dir / "stuck_chat.json")
+        self.assertTrue(chat.is_file())
 
     def test_skip_blocks_case(self):
         with mock.patch.object(self.s, "_can_stuck_ask", return_value=True), \
-             mock.patch("agent_tester.auto.ask_line", return_value="2:no test data"):
+             mock.patch.object(self.s, "_ask_stuck_line", return_value="2:no test data"):
             out = self.s._maybe_stuck_ask(why="looped", name="browser_click", repeats=4)
         self.assertTrue(self.s.result.stuck)
         self.assertIn("skipped by user", self.s.result.notes)
         self.assertIn("finish", out["error"].lower())
+
+    def test_question_is_human_readable(self):
+        self.s.last_snapshot = (
+            'Page URL: https://example.test/x\nPage Title: Checkout\n'
+            '- heading "Billing Currency" [ref=e1]\n'
+            '- button "Continue" [disabled] [ref=e2]\n'
+        )
+        self.s._recent = ["click:checkbox Agree to the above statement",
+                          "click:checkbox Agree to the above statement"]
+        q = self.s._stuck_question("browser_click was repeated 3 times")
+        self.assertNotIn("step ?", q)
+        self.assertNotIn("[ref=", q)
+        self.assertNotIn('"content"', q)
+        self.assertIn("Billing Currency", q)
 
     def test_max_two_asks(self):
         self.s._stuck_asks = STUCK_ASK_MAX_PER_CASE

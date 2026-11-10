@@ -250,8 +250,15 @@ class VisibleBrowser(unittest.TestCase):
             self.assertIn("--headless", ts._connection_params.server_params.args)
 
     def test_headed_flag(self):
-        with mock.patch.dict("os.environ", {"QA_HEADED": "1"}), tempfile.TemporaryDirectory() as d:
+        with mock.patch.dict("os.environ", {"QA_HEADED": "1", "DISPLAY": ":0"}), tempfile.TemporaryDirectory() as d:
+            T.headed._warned = False  # type: ignore[attr-defined]
             self.assertNotIn("--headless", T.playwright_toolset(Path(d), "portal")._connection_params.server_params.args)
+
+    def test_headed_falls_back_without_display(self):
+        with mock.patch.dict("os.environ", {"QA_HEADED": "1"}, clear=True), tempfile.TemporaryDirectory() as d:
+            T.headed._warned = False  # type: ignore[attr-defined]
+            args = T.playwright_toolset(Path(d), "portal")._connection_params.server_params.args
+            self.assertIn("--headless", args)
 
     def test_no_display_says_so(self):
         msgs = []

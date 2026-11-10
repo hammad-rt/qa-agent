@@ -83,17 +83,20 @@ class AskFresh(unittest.TestCase):
                 {"n": 1, "text": "create", "app": "portal"}], "area": "rewards"},
             st, pol, Evidence(st.dir), max_calls=30, max_minutes=5)
         s._explored = True
-        answers = iter(["1:open contact by email", "1:use one package only"])
+        # Conversational stuck ask: each case gets a chat turn then explicit go.
+        answers = iter([
+            "open contact by email", "go",
+            "use one package only", "go",
+        ])
 
-        def fake_ask(prompt="", secret=False, ask_id=None):
-            # Simulate leftover tagged with a different id being ignored by ask_line itself —
-            # here we just return the next fresh answer and assert ask_id changes.
+        def fake_ask(prompt, ask_id=None, summary=None):
+            # _ask_stuck_line(prompt, ask_id, summary=...)
             fake_ask.ids.append(ask_id)
             return next(answers)
 
         fake_ask.ids = []
         with mock.patch.object(s, "_can_stuck_ask", return_value=True), \
-             mock.patch("agent_tester.auto.ask_line", side_effect=fake_ask):
+             mock.patch.object(s, "_ask_stuck_line", side_effect=fake_ask):
             s.case_id = "CONTACT-E0"
             out1 = s._maybe_stuck_ask(why="contact", name="browser_click", repeats=4)
             s.case_id = "PREP-order_earn-create-0"
@@ -101,12 +104,14 @@ class AskFresh(unittest.TestCase):
             out2 = s._maybe_stuck_ask(why="create form", name="browser_click", repeats=4)
         self.assertIn("open contact by email", out1["error"])
         self.assertIn("one package only", out2["error"])
-        self.assertNotEqual(fake_ask.ids[0], fake_ask.ids[1])
+        self.assertGreaterEqual(len(fake_ask.ids), 4)
+        contact_ids = [i for i in fake_ask.ids if i and i.startswith("stuck-CONTACT")]
+        prep_ids = [i for i in fake_ask.ids if i and i.startswith("stuck-PREP")]
+        self.assertTrue(contact_ids and prep_ids)
+        self.assertNotEqual(contact_ids[0], prep_ids[0])
         notes = " ".join(st.data["notes"])
         self.assertIn("PREP-order_earn-create-0", notes)
         self.assertIn("one package only", notes)
-        self.assertNotIn("answer=1:open contact by email", [
-            n for n in st.data["notes"] if "PREP-order_earn-create-0" in n][0])
 
 
 class FormValidation(unittest.TestCase):

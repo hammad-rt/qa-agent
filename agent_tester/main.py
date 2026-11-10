@@ -214,7 +214,7 @@ def with_cases_file(bundle, text: str, name: str, prefix: str = "Test Cases - ")
 def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_run: bool,
              retest_bug: int | None = None, email: bool = False, email_progress: bool = False,
              fresh_plan: bool = False, draft_run: str | None = None, subtasks: bool = True,
-             cases_file: Path | None = None) -> int:
+             cases_file: Path | None = None, rediscover: bool = False) -> int:
     from . import gate
     from .agents.planner import plan_task
     from .plan_checks import check_plan
@@ -277,6 +277,9 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
     state, draft = _state_for_run(settings.runs_dir, task_id, draft, draft_src, draft_state, subtasks)
     state.data["env"] = env                       # known even if the run is stopped before planning
     state.data["mode"] = {"cases": parse_cases_early(case), "subtasks": bool(subtasks)}
+    if rediscover:
+        state.data["rediscover"] = True
+        state.data.setdefault("notes", []).append("Forced rediscovery (--rediscover / web checkbox).")
     if cases_text is not None:
         (state.dir / "cases_file.md").write_text(cases_text)     # kept with the run, so a fresh plan can reuse it
         state.data["mode"]["cases_file"] = Path(cases_file).name
@@ -455,6 +458,7 @@ def _execute(settings, pack, plan, state, policy, memory) -> int:
     from .agents.judge import make_judge
     from .agents.tester import make_tester
     from .coordinator import RunPaused, run_plan
+    from .discovery_map import flush_pending
     from .end_of_run import export_memory, finish_memory
     from .ledger import Ledger
     from .reliability import RunLock, RunLocked, apply_retention
@@ -467,11 +471,44 @@ def _execute(settings, pack, plan, state, policy, memory) -> int:
         from .notify import make_notifier
         notifier = make_notifier()
     progress = Progress(state, len(plan.cases), notifier=notifier if mode.get("email_progress") else None)
+    results = {}
+    # Flush discovery maps on SIGINT/SIGTERM as well as try/finally (web stop, Ctrl-C, kill).
+    _prev_handlers = {}
+
+    def _flush_maps(reason: str = "") -> None:
+        try:
+            flush_pending(state, memory)
+            if reason:
+                state.data.setdefault("notes", []).append(f"discovery map flushed on {reason}")
+                state.save()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_signal(signum, frame):  # noqa: ARG001
+        _flush_maps(f"signal {signum}")
+        raise KeyboardInterrupt
+
+    try:
+        import signal
+        for sig in (getattr(signal, "SIGINT", None), getattr(signal, "SIGTERM", None)):
+            if sig is None:
+                continue
+            try:
+                _prev_handlers[sig] = signal.signal(sig, _on_signal)
+            except (ValueError, OSError):
+                pass
+    except Exception:  # noqa: BLE001
+        pass
     try:
         with RunLock(settings.runs_dir / ".run.lock"):
             tester = make_tester(settings, pack, plan.env, policy, state.dir, memory=memory)
             testers = {app: tester for app in pack.apps}
             state.data["pack_root"] = str(pack.root)
+            state.data["pack_cfg"] = state.data.get("pack_cfg") or {
+                "placeholders": (pack.config or {}).get("placeholders"),
+                "data_prep": (pack.config or {}).get("data_prep"),
+                "admin_repair_envs": (pack.config or {}).get("admin_repair_envs"),
+            }
             state.save()
             login = make_manual_login(pack, plan, state)
             login_first(pack, plan, state, login)
@@ -491,16 +528,19 @@ def _execute(settings, pack, plan, state, policy, memory) -> int:
                         from .coordinator import restore_pass
                         restore_pass(plan, state, testers, left)
             except RunPaused as e:
+                _flush_maps("pause")
                 progress.paused(str(e))
                 _partial_report(state, pack)
                 print(f"Resume with: python -m agent_tester resume {state.dir}")
                 return 3
             except KeyboardInterrupt:
+                _flush_maps("KeyboardInterrupt")
                 state.checkpoint("stopped by user (Ctrl-C)", status="paused")
                 _partial_report(state, pack)
                 print(f"\nStopped. Resume with: python -m agent_tester resume {state.dir}")
                 return 130
             except Exception as e:  # noqa: BLE001  (anything outside a single case: keep the run resumable)
+                _flush_maps("error")
                 if os.environ.get("AGENT_DEBUG"):
                     raise
                 _save_trace(state.dir / "agent_error.log")
@@ -512,6 +552,17 @@ def _execute(settings, pack, plan, state, policy, memory) -> int:
     except RunLocked as e:
         print(f"Can't start: {e}")
         return 5
+    finally:
+        _flush_maps("finally")
+        try:
+            import signal
+            for sig, prev in _prev_handlers.items():
+                try:
+                    signal.signal(sig, prev)
+                except (ValueError, OSError):
+                    pass
+        except Exception:  # noqa: BLE001
+            pass
     led = Ledger(state)
     if led.unrestored():
         print("\nWARNING: these settings were not restored and verified: " +
@@ -1099,6 +1150,8 @@ def _main(argv=None) -> int:
                    help="test only this ticket, not its subtasks and related tickets")
     t.add_argument("--email", action="store_true", help="email the report to REPORT_EMAIL_TO")
     t.add_argument("--email-progress", action="store_true", help="also email start, halfway, pause and finish")
+    t.add_argument("--rediscover", action="store_true",
+                   help="ignore stored discovery maps and run a fresh live discovery pass")
     rr = sub.add_parser("rerun")
     rr.add_argument("task_id", type=int)
     rr.add_argument("--cases", default=None, help="default: all cases of the plan")
@@ -1178,7 +1231,7 @@ def _main(argv=None) -> int:
             a.env = env
         return cmd_test(settings, a.task_id, a.case, a.env, a.dry_run, a.retest_bug, a.email, a.email_progress,
                         fresh_plan=a.fresh_plan, draft_run=a.draft_run, subtasks=a.subtasks,
-                        cases_file=a.cases_file)
+                        cases_file=a.cases_file, rediscover=bool(getattr(a, "rediscover", False)))
     if a.cmd == "rerun":
         return cmd_rerun(settings, a.task_id, a.cases, a.src_run, a.failed, getattr(a, "new_run", False))
     if a.cmd == "web":

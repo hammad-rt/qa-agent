@@ -11,6 +11,13 @@ from .models import CaseResult, PlannedCase, Step
 
 
 PREP_MAX_ACTIONS = int(os.environ.get("PREP_MAX_ACTIONS", "120"))
+# Cap LLM find turns so a missing record switches to create instead of looping 40+ searches.
+DATA_FIND_MAX_STEPS = int(os.environ.get("DATA_FIND_MAX_STEPS", "12"))
+DATA_FIND_MAX_SEARCHES = int(os.environ.get("DATA_FIND_MAX_SEARCHES", "2"))
+
+# Create parts that pay (Stripe / card / M-Pesa) are refused on preprod/production.
+_PAY_CREATE = re.compile(r"(?i)\b(pay|stripe|4242|m-?pesa|card payment|complete payment)\b")
+_NO_PAY_ENVS = frozenset({"preprod", "pre-prod", "production", "prod"})
 
 
 def _case_text(case) -> str:
@@ -397,16 +404,153 @@ def _turn(tester, plan, state, rule, app, text, read_only, case_id):
     if kind == "create":
         text += (f"\nThis create part runs on app '{app}' only. Do not switch to another app for this part; "
                  f"later/earlier create parts (if any) run on their own apps.")
+    if kind == "find":
+        text += (f"\nBudget: at most {DATA_FIND_MAX_STEPS} actions and about {DATA_FIND_MAX_SEARCHES} failed "
+                 f"search attempts. If nothing exact fits by then, finish(notes='none found') — do NOT "
+                 f"record_value '{rule['value']}' as none/null/not found (those are rejected). "
+                 f"Create runs next when find is not_found.")
     pseudo = PlannedCase(id=case_id, title=f"data prep: {rule['id']}", area=rule.get("area"),
                          steps=[Step(text=text, app=app)], values_to_record=[rule["value"]])
     brief = brief_for(plan, pseudo, [0], state)
     brief["data_prep"] = True
-    brief["max_tool_calls"] = PREP_MAX_ACTIONS            # creating an order is one long step; let it finish
-    brief["actions_per_step"] = PREP_MAX_ACTIONS
+    # Find is short and read-only; create may be a long multi-screen flow.
+    budget = DATA_FIND_MAX_STEPS if kind == "find" else PREP_MAX_ACTIONS
+    brief["max_tool_calls"] = budget
+    brief["actions_per_step"] = budget
+    if kind == "find":
+        brief["find_budget"] = True
     brief["read_only"] = read_only
     brief["values_to_record"] = [rule["value"]] + list(rule.get("extra_values", []))
     brief = inject_placeholders(brief, state)
     return tester(app, brief, state)
+
+
+def _lookup_kind_for_rule(rule: dict, pack_cfg: dict | None = None) -> str | None:
+    """Map a prep rule to a pack lookups.maps key (explicit ``lookup`` wins; else module hints)."""
+    if rule.get("lookup"):
+        return str(rule["lookup"])
+    maps = ((pack_cfg or {}).get("lookups") or {}).get("maps") or {}
+    blob = " ".join(str(rule.get(k) or "") for k in ("find", "id", "value", "placeholder", "token")).lower()
+    # Prefer an explicit maps entry whose name appears in the rule text.
+    for kind in maps:
+        if str(kind).lower() in blob:
+            return str(kind)
+    if "aos_quotes" in blob or ("quote" in blob):
+        return "quotes" if "quotes" in maps else None
+    if "aos_invoices" in blob or "invoice" in blob:
+        return "shipping_orders" if "shipping_orders" in maps else None
+    if "contact" in blob or "customer" in blob:
+        return "contact_by_email" if "contact_by_email" in maps else None
+    return None
+
+
+def _deterministic_prep_find(plan, case, state, testers: dict, rule: dict, *,
+                             find_app: str, client_email: str | None) -> tuple[str | None, str | None, str]:
+    """Try pack lookups (no LLM) before the find agent.
+
+    Returns (value, record_id, status) where status is 'found' | 'not_found' | 'skipped'.
+    A 'not_found' from code counts toward ending find and switching to create.
+    """
+    from .config import under_unit_tests
+    pack_cfg = state.data.get("pack_cfg") or {}
+    maps = (pack_cfg.get("lookups") or {}).get("maps") or {}
+    kind = _lookup_kind_for_rule(rule, pack_cfg)
+    if not kind or kind not in maps:
+        return None, None, "skipped"
+    if os.environ.get("LOOKUP_DETERMINISTIC", "1").strip().lower() in ("0", "false", "no"):
+        return None, None, "skipped"
+    if under_unit_tests() and not os.environ.get("LOOKUP_FORCE"):
+        return None, None, "skipped"
+    base = None
+    for r in getattr(plan, "requirements", []) or []:
+        if r.value and str(r.key).startswith("env.") and str(r.key).endswith(f".{find_app}"):
+            base = r.value
+            break
+    if not base:
+        return None, None, "skipped"
+    platform = ((state.data.get("discovery") or {}).get(f"{case.area}:{find_app}") or {}).get("platform") \
+        or (pack_cfg.get("lookups") or {}).get("platform") or "suitecrm7"
+    tester = testers.get(find_app)
+    browser = getattr(tester, "lookup_browser", None) if tester is not None else None
+    close = None
+    import asyncio
+    from .lookups import lookup_from_pack
+    try:
+        if browser is None:
+            browser, close = _mcp_browser_for_lookup(state.dir, find_app)
+            if browser is None:
+                return None, None, "skipped"
+        contact = state.data.get("contact") or {}
+        params = {"email": client_email or contact.get("email") or "",
+                  "contact": contact.get("record_id") or "",
+                  "record_id": contact.get("record_id") or "",
+                  "value": client_email or ""}
+        res = asyncio.run(lookup_from_pack(
+            browser, pack_cfg, kind, base_url=base, platform=platform, **params))
+    except Exception as e:  # noqa: BLE001
+        state.checkpoint(f"deterministic prep find {rule.get('id')}: {type(e).__name__}: {e}")
+        return None, None, "not_found"
+    finally:
+        if close:
+            try:
+                close()
+            except Exception:  # noqa: BLE001
+                pass
+    if res is None or not res.ok or not res.record_id:
+        state.checkpoint(f"data prep {rule.get('id')}: deterministic find → not_found "
+                         f"({getattr(res, 'notes', '') or 'no match'})")
+        return None, None, "not_found"
+    # Prefer a human-facing number from the row when present; else the CRM record id.
+    value = None
+    for k in ("Number", "Invoice Number", "Quote Number", "Name", "number", "name"):
+        if res.values.get(k):
+            value = str(res.values[k]).strip()
+            break
+    if not value:
+        value = res.record_id
+    if _is_none(value):
+        return None, None, "not_found"
+    state.checkpoint(f"data prep {rule.get('id')}: deterministic find → {value} (record {res.record_id})")
+    return value, res.record_id, "found"
+
+
+def _find_exhausted(sr, rec, state, case_id: str, key: str) -> bool:
+    """True when the find turn should end as not_found (budget / none / empty / finish notes)."""
+    if getattr(sr, "not_found", False):
+        state.checkpoint(f"data prep {key}: find finish → not_found")
+        return True
+    if _is_none(rec):
+        return True
+    if getattr(sr, "limit_hit", False):
+        state.checkpoint(f"data prep {key}: find hit action budget → not_found")
+        return True
+    # Count failed search-like navigations in this find turn.
+    acts = [a for a in state.data.get("action_log", []) if a.get("case_id") == case_id]
+    searches = [a for a in acts if a.get("tool") in ("browser_navigate", "browser_type", "browser_click")
+                and re.search(r"search|query|filter|advanced", json.dumps(a.get("args") or {}), re.I)]
+    if len(searches) >= DATA_FIND_MAX_SEARCHES and _is_none(rec):
+        state.checkpoint(f"data prep {key}: {len(searches)} failed searches → not_found")
+        return True
+    notes = (getattr(sr, "notes", None) or "")
+    if re.search(r"(?i)\b(none found|not found|nothing fits|no match)\b", notes):
+        state.checkpoint(f"data prep {key}: find notes → not_found")
+        return True
+    return False
+
+
+def _create_parts_for_env(plan, rule: dict, parts: list[dict]) -> list[dict] | str:
+    """Drop/refuse pay-bearing create parts on preprod/production. Returns parts or an error string."""
+    env = (getattr(plan, "env", None) or "").lower()
+    if env not in _NO_PAY_ENVS:
+        return parts
+    kept = []
+    for p in parts:
+        text = p.get("text") or ""
+        if _PAY_CREATE.search(text) and not re.search(r"(?i)do not pay|don't pay|never pay", text):
+            return (f"create needs a payment step, which is not allowed on {plan.env}; "
+                    f"top up / pay by hand on this environment and rerun")
+        kept.append(p)
+    return kept
 
 
 def ensure_data(plan, case, state, testers: dict, rules: list[dict]) -> CaseResult | None:
@@ -572,29 +716,55 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
         return sr.values.get(value), sr.values.get(f"{value}_record")
 
     hint = rule.get("record_hint") or "the record's id from the page URL"
-    # 1. FIND: read-only on find_app (defaults to app). Exact fit only.
+    # 1. FIND: deterministic lookup first, then a short read-only LLM find. Exact fit only.
     find = (f"FIND ONLY. This turn is read-only: open lists and records and read them; change nothing.\n"
             f"{rule.get('find') or ''}\nDo not use: {skip or 'none'}.\n"
             f"Only an exact fit counts. Never edit, fix, re-status or add to a record to make it fit; a near-fit "
-            f"is a 'none'. If one fits exactly, record_value('{value}', '<its number exactly as shown, with its "
+            f"is a not_found. If one fits exactly, record_value('{value}', '<its number exactly as shown, with its "
             f"prefix, exactly as shown>') and record_value('{value}_record', '<{hint}>'), then finish. "
-            f"If none fits exactly, record_value('{value}', 'none') and finish. "
+            f"If none fits exactly, finish(notes='none found') — never record_value '{value}' as none/null/"
+            f"not found (rejected) and never keep searching past the budget. "
             f"Use the list's search, filters and sorting to narrow it down rather than paging through everything; "
-            f"open a candidate to check it rather than assuming from the list. Say 'none' only after searching.")
+            f"open a candidate to check it rather than assuming from the list.")
     sr = None
     rec = record = None
-    if find_tester is not None and rule.get("find"):
+    find_case = f"PREP-{key}-find"
+    det_status = "skipped"
+    if find_app and rule.get("find"):
+        d_val, d_rec, det_status = _deterministic_prep_find(
+            plan, case, state, testers, rule, find_app=find_app, client_email=user)
+        if det_status == "found" and _usable(rule, d_val, used):
+            rec, record = d_val, d_rec
+        elif det_status == "found":
+            state.checkpoint(f"data prep {key}: deterministic hit {d_val} not usable; will create")
+            rec = record = None
+            det_status = "not_found"
+    # LLM find only when code did not already settle not_found / found.
+    if rec is None and det_status != "not_found" and find_tester is not None and rule.get("find"):
         try:
-            sr = _call(find_tester, plan, state, rule, find_app, find, True, f"PREP-{key}-find", key)
+            sr = _call(find_tester, plan, state, rule, find_app, find, True, find_case, key)
             rec, record = rec_of(sr)
         except Exception as e:  # noqa: BLE001
             from .logsetup import short_error
             state.checkpoint(f"data prep {key}: find failed ({short_error(e, f'data prep {key} find')}); creating one")
             rec, record = None, None
-        if not _usable(rule, rec, used):
+            sr = None
+        if sr is not None and _find_exhausted(sr, rec, state, find_case, key):
+            if rec is not None and not _is_none(rec) and not _usable(rule, rec, used):
+                state.checkpoint(f"data prep {key}: found {rec}, which is not enough or already used; creating one")
+            else:
+                state.checkpoint(f"data prep {key}: find → not_found; running create parts")
+            rec = record = None
+        elif not _usable(rule, rec, used):
             if rec is not None and not _is_none(rec):
                 state.checkpoint(f"data prep {key}: found {rec}, which is not enough or already used; creating one")
             rec = record = None
+    elif rec is None and det_status == "not_found":
+        state.checkpoint(f"data prep {key}: deterministic find → not_found; running create parts")
+
+    # Never treat a literal 'none'/empty as a resolved placeholder value.
+    if _is_none(rec):
+        rec = record = None
 
     for attempt in range(CREATE_TRIES + 1):
         if rec is None:
@@ -602,11 +772,14 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
                 break
             if not parts:
                 return blocked(f"nothing fits and this rule has no create step. {(sr.notes or '') if sr else ''}".strip())
+            env_parts = _create_parts_for_env(plan, rule, parts)
+            if isinstance(env_parts, str):
+                return blocked(env_parts)
             # Multi-app create: run each pack-tagged part in order (e.g. portal then crm).
-            for i, part in enumerate(parts):
+            for i, part in enumerate(env_parts):
                 papp, ptext = part.get("app"), part.get("text") or ""
-                last = i == len(parts) - 1
-                create = (f"CREATE part {i + 1}/{len(parts)} on app '{papp}': {ptext}\n"
+                last = i == len(env_parts) - 1
+                create = (f"CREATE part {i + 1}/{len(env_parts)} on app '{papp}': {ptext}\n"
                           f"Do not reuse: {skip or 'none'}.\n"
                           f"Stay on app '{papp}' for this part only.")
                 if last:
@@ -619,7 +792,7 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
                                "A later part on another app continues the prep.")
                 try:
                     sr = _call(testers[papp], plan, state, rule, papp, create, False,
-                               f"PREP-{key}-create-{i}" if len(parts) > 1 else f"PREP-{key}-create", key)
+                               f"PREP-{key}-create-{i}" if len(env_parts) > 1 else f"PREP-{key}-create", key)
                 except Exception as e:  # noqa: BLE001
                     from .logsetup import short_error
                     return blocked(short_error(e, f"data prep {key} create part {i + 1}"))
@@ -629,6 +802,8 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
                 why = (sr.notes or "").strip()
                 if why.upper().startswith("BLOCKED:"):
                     return blocked(why[8:].strip() or f"create part {i + 1} blocked")
+            if _is_none(rec):
+                rec = record = None
             if not _usable(rule, rec, used):
                 why = (sr.notes or "").strip() if sr else ""
                 why = why[8:].strip() if why.upper().startswith("BLOCKED:") else why

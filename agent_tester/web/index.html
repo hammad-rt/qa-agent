@@ -146,6 +146,7 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc);cursor:point
     <select id="scope" aria-label="What to test" title="A feature can be tested with all its subtasks and related tickets, or on its own"><option value="all">Feature + subtasks and related tickets</option><option value="only">Only this ticket</option></select>
     <input id="caseIds" aria-label="Cases to run" placeholder="Cases (optional), e.g. TC1,TC2">
     <input id="casesFile" aria-label="Test cases file" title="Use the cases in this file instead of the ticket's Redmine Test Cases task. Runs only this ticket." placeholder="Cases file (optional), e.g. /path/test-cases.md">
+    <label class="mute" title="Ignore stored discovery maps and map the UI fresh"><input type="checkbox" id="rediscover"> Force rediscovery</label>
     <div class="row"><button class="pri" onclick="start(false)"><svg class="i" viewBox="0 0 24 24"><path d="M6 4l14 8-14 8z"/></svg>Start run</button><button class="sec" onclick="start(true)" title="Draft the plan and answer its questions without testing. The next Start run of the same task and environment continues from this plan.">Plan only</button></div>
     <div id="startErr" class="mute" role="alert" style="color:var(--bad)"></div>
   </div>
@@ -237,7 +238,7 @@ async function loadRuns(){try{const rs=await api('/api/runs');const ids=new Set(
  window._runs=rs;
  setHTML('#runs',(rs.length?bar:'')+rs.map(r=>`<div class="run ${r.id==cur?'sel':''}" tabindex="0" role="button" aria-label="Run for task ${esc(r.task)}" onkeydown="if(event.key=='Enter')openRun('${r.id}')" onclick="openRun('${r.id}')"><div class="t"><input type="checkbox" class="rsel" ${sel.has(r.id)?'checked':''} onclick="event.stopPropagation();togSel('${r.id}',this.checked)"> #${esc(r.task)} <span class="pill ${r.status}">${esc(stLabel(r.status))}</span>${r.phase?`<span class="pill">${esc(r.phase)}</span>`:''}<span class="grow"></span><span class="racts"><button class="sm icon ghost" title="Rename" aria-label="Rename run" onclick="event.stopPropagation();renameRun('${r.id}')">${ic('edit')}</button><button class="sm icon dan" title="Delete" aria-label="Delete run" onclick="event.stopPropagation();delRun('${r.id}')">${ic('trash')}</button></span></div>${r.label?`<div class="lbl">${esc(r.label)}</div>`:''}${progress(r.counts,r.cases)}<div class="mute">${esc(r.env||'')} · ${r.done}/${r.cases} cases${r.current?` · now <b>${esc(String(r.current).split('.').slice(-1)[0])}</b>`:''}${r.elapsed_sec!=null?` · ${esc(fmtDur(r.elapsed_sec))}`:''} · ${esc((r.started||'').replace('T',' ').slice(0,16))}</div><div>${pills(r.counts)}</div></div>`).join('')||'<div class="empty">No runs yet. Enter a Redmine task number and start.</div>')}catch(e){}}
 function openRun(id){if(cur!==id){cur=id;showConsole();traceNext=0;blocks=[];openBlock=null;$('#events').innerHTML='';}loadRuns();refresh()}
-async function start(dry){$('#startErr').textContent='';try{job=await api('/api/start',{task:$('#task').value,env:$('#env').value,cases:$("#caseIds").value,cases_file:$('#casesFile').value,dry_run:dry,subtasks:$('#scope').value!=='only'});outLen=0;jobOut='';jobBase='';cur=null;$('#events').innerHTML='';$('#title').textContent='Starting #'+$('#task').value+'…';pollJob()}catch(e){$('#startErr').textContent=e.message}}
+async function start(dry){$('#startErr').textContent='';try{job=await api('/api/start',{task:$('#task').value,env:$('#env').value,cases:$("#caseIds").value,cases_file:$('#casesFile').value,dry_run:dry,subtasks:$('#scope').value!=='only',rediscover:!!$('#rediscover')?.checked});outLen=0;jobOut='';jobBase='';cur=null;$('#events').innerHTML='';$('#title').textContent='Starting #'+$('#task').value+'…';pollJob()}catch(e){$('#startErr').textContent=e.message}}
 async function rerun(o){if(!cur)return;if(job&&job.running){alert('A run is still going; stop it or wait for it to finish.');return}
  const what=o.new_run?'Start fresh in a new run folder (same plan)?':o.cases?'Rerun case '+o.cases+' in this same run window?':o.failed?'Rerun the cases that did not pass in this same run window?':$('#rerunAll').dataset.mode=='start'?'Start this task again (it stopped before planning)?':'Rerun all cases in this same run window (archives the last attempt)?';if(!confirm(what))return;
  try{const keep=cur;const b=o.failed?await baseFor(cur):'';job=await api('/api/start',{rerun:cur,...o});outLen=0;jobOut='';jobBase=b;
@@ -253,7 +254,7 @@ async function resume(){try{const b=await baseFor(cur);job=await api('/api/start
 async function stopJob(){if(job&&confirm('Stop this run? It pauses and can be resumed.'))job=await api(`/api/jobs/${job.id}/stop`,{})}
 
 /* ---- Pending prompt (pinned) ---- */
-function clearPromptUi(){const pin=$('#promptPin');pin.innerHTML='';pin.dataset.p='';lastPromptKey='';stopTitleFlash();stopCountdown();$('#waitBanner').classList.remove('on');$('#waitBanner').textContent=''}
+function clearPromptUi(){const pin=$('#promptPin');pin.innerHTML='';pin.dataset.p='';pin.dataset.ask='';lastPromptKey='';stopTitleFlash();stopCountdown();$('#waitBanner').classList.remove('on');$('#waitBanner').textContent=''}
 function stopTitleFlash(){if(titleFlash){clearInterval(titleFlash);titleFlash=null}document.title=baseTitle}
 function startTitleFlash(msg){stopTitleFlash();let on=false;titleFlash=setInterval(()=>{on=!on;document.title=on?msg:baseTitle},1000)}
 function maybeNotify(title,body){try{
@@ -279,34 +280,35 @@ function stuckCard(p,meta){
   <div class="mute" style="margin-top:6px">Primary: guide · Secondary: skip · Danger: stop. Same answers as 1:/2:/3: on the CLI.</div></div>`}
 function genericAsk(p,secret,meta){
  return `<div class="ask" style="flex-direction:column;align-items:stretch"><div class="ask-head">${ic('alert')}${esc((meta&&meta.title)||'Waiting for your answer')}<span class="cd" id="askCd"></span></div><div class="ask-body">${esc(p)}</div><div class="ask-acts" style="align-items:center"><input id="ans" type="${secret?'password':'text'}" autocomplete="off" placeholder="Type an answer, or leave empty for the default" onkeydown="if(event.key=='Enter')answer()" style="flex:1"><button class="pri" onclick="answer()">Send</button></div></div>`}
+function askIdOf(j){return (j&&j.ask_id)||($('#promptPin')&&$('#promptPin').dataset.ask)||''}
 function renderPrompt(j){const pin=$('#promptPin'),banner=$('#waitBanner');
  if(!j||!j.waiting||!j.prompt){clearPromptUi();return}
  const meta={kind:j.prompt_kind||'question',title:j.prompt_title||'',timeout_sec:j.prompt_timeout_sec};
- const key=j.prompt+(j.waiting_since||'');
+ const key=(j.ask_id||'')+'|'+(j.prompt||'')+(j.waiting_since||'');
  const isStuck=meta.kind==='stuck_ask'||/Options:\s*\(1\)\s*give guidance/i.test(j.prompt);
  const html=isStuck?stuckCard(j.prompt,meta):approvalCard(j.prompt,meta)||genericAsk(j.prompt,j.secret,meta);
  banner.classList.add('on');banner.innerHTML=`${ic('alert')} Waiting for your answer${meta.title?': '+esc(meta.title):''}`;
- if(pin.dataset.p===j.prompt&&pin.innerHTML){startCountdown($('#askCd'),j.waiting_since,meta.timeout_sec||(isStuck?600:null));return}
- pin.dataset.p=j.prompt;pin.innerHTML=html;
+ if(pin.dataset.p===j.prompt&&pin.dataset.ask===(j.ask_id||'')&&pin.innerHTML){startCountdown($('#askCd'),j.waiting_since,meta.timeout_sec||(isStuck?600:null));return}
+ pin.dataset.p=j.prompt;pin.dataset.ask=j.ask_id||'';pin.innerHTML=html;
  startCountdown($('#askCd'),j.waiting_since,meta.timeout_sec||(isStuck?600:null));
  // Focus + surface when a new prompt appears (user asked not to hunt in the log).
- if(key!==lastPromptKey){lastPromptKey=key;startTitleFlash('⏳ Waiting for answer — QA Agent');maybeNotify(meta.title||'QA Agent needs input',j.prompt);
+ if(key!==lastPromptKey){lastPromptKey=key;startTitleFlash('Waiting for answer — QA Agent');maybeNotify(meta.title||'QA Agent needs input',j.prompt);
   requestAnimationFrame(()=>{pin.scrollIntoView({block:'start',behavior:matchMedia('(prefers-reduced-motion:reduce)').matches?'auto':'smooth'});
    const focusEl=$('#stuckGuide')||$('#ans');if(focusEl)try{focusEl.focus({preventScroll:true})}catch(e){}})}}
-async function decide(v){if(!job)return;await api(`/api/jobs/${job.id}/input`,{text:v});clearPromptUi()}
-async function answer(){if(!job)return;const i=$('#ans');await api(`/api/jobs/${job.id}/input`,{text:i?i.value:''});clearPromptUi()}
+async function decide(v){if(!job)return;try{await api(`/api/jobs/${job.id}/input`,{text:v,ask_id:askIdOf(job)});clearPromptUi()}catch(e){alert(e.message||e)}}
+async function answer(){if(!job)return;const i=$('#ans');try{await api(`/api/jobs/${job.id}/input`,{text:i?i.value:'',ask_id:askIdOf(job)});clearPromptUi()}catch(e){alert(e.message||e)}}
 async function stuckAct(kind){if(!job)return;let text='';
  if(kind==='guide'){const g=($('#stuckGuide')||{}).value||'';if(!g.trim()){($('#stuckGuide')||{focus(){}}).focus();return}text='1:'+g.trim()}
  else if(kind==='skip'){const r=prompt('Reason to skip this case (optional):','')??null;if(r===null)return;text='2:'+(r||'skipped from UI')}
  else{if(!confirm('Stop the whole run?'))return;const r=prompt('Reason to stop (optional):','')??'';text='3:'+(r||'stopped from UI')}
- await api(`/api/jobs/${job.id}/input`,{text});clearPromptUi()}
-
+ try{await api(`/api/jobs/${job.id}/input`,{text,ask_id:askIdOf(job)});clearPromptUi()}catch(e){alert(e.message||e)}}
 async function pollJob(){try{
  if(!job||!job.running){const js=await api('/api/jobs');const r=js.find(x=>x.running);if(r&&(!job||r.id!==job.id)){job=r;outLen=0;jobOut='';jobBase=''}}
  if(!job)return;const j=await api(`/api/jobs/${job.id}/out?since=${outLen}`);outLen=j.len;job=j;jobOut+=j.out;
  if(j.run_dir&&cur!==j.run_dir&&(cur===null||(j.waiting&&followed!==j.prompt))){if(j.waiting)followed=j.prompt;cur=j.run_dir;traceNext=0;blocks=[];openBlock=null;$('#events').innerHTML='';loadRuns()}
  if(j.waiting)renderPrompt(j);else if($('#promptPin').dataset.p)clearPromptUi();
  $('#stopBtn').style.display=j.running?'':'none';guideShow();if(!j.running){if($('#promptPin').innerHTML)clearPromptUi();loadRuns()}showConsole()}catch(e){
+ // The web server was restarted: its old job is gone. Drop it so the run going now (and its Stop button) is picked up.
  if(job&&/no job/.test(e.message||'')){job=null;outLen=0;jobOut='';jobBase='';clearPromptUi()}}}
 const clean=t=>String(t??'').replace(/<\|[^|]*\|>/g,' ').replace(/^\s*(thought|analysis|final)\b\s*/i,'').replace(/\s+\n/g,'\n').trim();
 function tryJson(t){const m=String(t).match(/\{[\s\S]*\}/);if(!m)return null;try{return JSON.parse(m[0])}catch(e){return null}}

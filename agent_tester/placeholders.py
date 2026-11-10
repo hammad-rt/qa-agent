@@ -200,8 +200,18 @@ def resolved_map(state) -> dict[str, dict]:
     return dict((state.data.get("placeholders") or {}))
 
 
+_NONE_VALUES = frozenset({"", "none", "no", "n/a", "na", "null", "not found", "nothing", "-"})
+
+
+def _is_none_value(v) -> bool:
+    return v is None or str(v).strip().strip("'\"").lower() in _NONE_VALUES
+
+
 def store_resolved(state, token: str, *, value, record=None, value_key: str, prep_id: str,
                    aliases: list[str] | None = None) -> None:
+    # Never persist placeholder sentinels like "none" / "not found" as the resolved value.
+    if _is_none_value(value):
+        return
     entry = {"value": value, "record": record, "value_key": value_key, "prep_id": prep_id}
     state.data.setdefault("placeholders", {})[token.upper()] = entry
     state.values[value_key] = {"value": value, "source": f"placeholder/{token}"}

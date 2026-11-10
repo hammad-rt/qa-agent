@@ -13,9 +13,11 @@ class Progress:
         self.log = state.dir / "progress.log"
 
     def _write(self, line: str) -> None:
-        self.out(line)
+        from .redact import for_user
+        safe = for_user(line)
+        self.out(safe)
         with self.log.open("a") as f:
-            f.write(f"{datetime.now().isoformat(timespec='seconds')} {line}\n")
+            f.write(f"{datetime.now().isoformat(timespec='seconds')} {safe}\n")
 
     def started(self, label: str) -> None:
         self._write(f"Started {label}: {self.total} case(s)" + (f", {self.done} already done" if self.done else ""))
@@ -42,6 +44,14 @@ class Progress:
     def finished(self, counts: dict, report) -> None:
         summary = ", ".join(f"{v} {k}" for k, v in counts.items())
         self._write(f"Finished: {summary}. Report: {report}")
+        disco = self.state.data.get("discovery_reuse_stats") or {}
+        if disco:
+            self._write(
+                f"Discovery reuse: {disco.get('areas', 0)} area(s), "
+                f"{disco.get('reused', 0)} route(s) reused, "
+                f"{disco.get('live', 0)} live, "
+                f"{disco.get('spot_checked', 0)} spot-checked, "
+                f"~{disco.get('calls_saved', 0)} tool calls saved")
         ctx = self.state.data.get("context_stats") or {}
         if ctx:
             self._write(

@@ -23,8 +23,10 @@ def model(settings: Settings, json_mode: bool = False, max_tokens: int | None = 
     extra = {"max_tokens": max_tokens or int(os.environ.get("LLM_MAX_TOKENS", "8192"))}   # the server's default is only 512
     if json_mode and os.environ.get("LLM_JSON_MODE", "1") != "0":
         extra["response_format"] = {"type": "json_object"}
+    from ..redact import effective_api_key
     base, name, key = job_model(settings, job)
-    return LiteLlm(model=f"openai/{name}", api_base=base, api_key=key, **extra)
+    # Placeholder keys (none/null/empty) become a dummy — vLLM often needs no real key.
+    return LiteLlm(model=f"openai/{name}", api_base=base, api_key=effective_api_key(key), **extra)
 
 
 async def run_agent(agent, prompt: str, settings: Settings, state: dict | None = None, app_name: str = "qa-agent",

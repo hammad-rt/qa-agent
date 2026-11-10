@@ -131,7 +131,8 @@ class UiShellLayout(unittest.TestCase):
         html = HTML.read_text()
         self.assertIn("function runCardHtml", html)
         self.assertIn("rmore", html)
-        self.assertIn("Can't delete while this run is going", html)
+        self.assertIn("Can't delete while this run is active", html)
+        self.assertIn("['new','planning','running','stuck']", html.replace(" ", ""))
         self.assertIn("Rename", html)
 
 

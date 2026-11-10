@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import time
 import uuid
 
 from ..config import Settings, job_model
 
 _sem: asyncio.Semaphore | None = None
+
+# Hard caps so a hung provider cannot hold the LLM semaphore forever.
+# LiteLLM: timeout = whole response; stream_timeout = wait for next chunk (docs.litellm.ai).
+LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", os.environ.get("LLM_CALL_TIMEOUT", "180")))
+LLM_STREAM_TIMEOUT = float(os.environ.get("LLM_STREAM_TIMEOUT", "60"))
+# No usable text from ADK events for this long → fail the attempt (empty keepalive events don't count).
+LLM_IDLE_TIMEOUT = float(os.environ.get("LLM_IDLE_TIMEOUT", "90"))
 
 
 class LLMOutputError(RuntimeError):
@@ -19,23 +28,50 @@ class LLMOutputError(RuntimeError):
 def model(settings: Settings, json_mode: bool = False, max_tokens: int | None = None, job: str = "tester",
           temperature: float | None = None):
     """json_mode asks the server for a syntactically valid JSON object (vLLM supports it). LLM_JSON_MODE=0 turns it off."""
-    import os
     from google.adk.models.lite_llm import LiteLlm
     extra = {"max_tokens": max_tokens or int(os.environ.get("LLM_MAX_TOKENS", "8192"))}   # the server's default is only 512
     if json_mode and os.environ.get("LLM_JSON_MODE", "1") != "0":
         extra["response_format"] = {"type": "json_object"}
     if temperature is not None:
         extra["temperature"] = float(temperature)
+    # Pass through to litellm so hung HTTP streams are cancelled (not only checked between retries).
+    if LLM_TIMEOUT > 0:
+        extra["timeout"] = LLM_TIMEOUT
+    if LLM_STREAM_TIMEOUT > 0:
+        extra["stream_timeout"] = LLM_STREAM_TIMEOUT
     from ..redact import effective_api_key
     base, name, key = job_model(settings, job)
     # Placeholder keys (none/null/empty) become a dummy — vLLM often needs no real key.
     return LiteLlm(model=f"openai/{name}", api_base=base, api_key=effective_api_key(key), **extra)
 
 
+async def _iter_events_with_idle(aiter, *, idle_sec: float, call_deadline: float | None = None):
+    """Yield ADK events; fail when no event arrives within idle_sec, or past call_deadline."""
+    while True:
+        left = idle_sec
+        if call_deadline is not None:
+            left = min(left, max(0.05, call_deadline - time.monotonic()))
+        try:
+            ev = await asyncio.wait_for(aiter.__anext__(), timeout=left)
+        except StopAsyncIteration:
+            return
+        except asyncio.TimeoutError as e:
+            if call_deadline is not None and time.monotonic() >= call_deadline:
+                raise LLMOutputError(
+                    f"LLM call hit the {LLM_TIMEOUT:.0f}s per-call timeout") from e
+            raise LLMOutputError(
+                f"no text for {LLM_IDLE_TIMEOUT:.0f}s (stream idle / empty ADK events)") from e
+        yield ev
+
+
 async def run_agent(agent, prompt: str, settings: Settings, state: dict | None = None, app_name: str = "qa-agent",
                     trace_path=None, retry: bool = False, follow_up=None, max_follow_ups: int = 2) -> str:
     """Run one agent to completion and return its final text. retry=True only for agents without side
-    effects (planner, reviewer, judge); testers are never replayed automatically."""
+    effects (planner, reviewer, judge); testers are never replayed automatically.
+
+    Each turn is bounded by LLM_TIMEOUT (LiteLLM + asyncio) and LLM_IDLE_TIMEOUT (no text in events).
+    Cancellation releases the shared LLM semaphore so retries are not starved behind hung calls.
+    """
     if retry:
         from ..reliability import with_retries
         return await with_retries(lambda: run_agent(agent, prompt, settings, state, app_name, trace_path, False))
@@ -52,19 +88,53 @@ async def run_agent(agent, prompt: str, settings: Settings, state: dict | None =
     runner = Runner(agent=agent, app_name=app_name, session_service=svc)
     final = ""
     msg, left = prompt, max_follow_ups
-    async with _sem:
-        while msg:
-            async for ev in runner.run_async(user_id="qa", session_id=sid,
-                                             new_message=types.Content(role="user", parts=[types.Part(text=msg)])):
-                if trace_path:
-                    _trace(trace_path, ev)
-                if ev.content and ev.content.parts:
-                    text = "".join(p.text or "" for p in ev.content.parts if getattr(p, "text", None))
-                    if text and ev.is_final_response():
-                        final = text
-            # follow_up(final) -> a message to continue the same session (history kept), or None to stop.
-            msg = follow_up(final) if (follow_up and left > 0) else None
-            left -= 1
+    idle = max(0.05, LLM_IDLE_TIMEOUT)
+    call_cap = max(idle + 0.05, LLM_TIMEOUT)
+
+    async def _one_turn(user_msg: str) -> str:
+        turn_final = ""
+        saw_text = False
+        last_text_at = time.monotonic()
+        deadline = time.monotonic() + call_cap
+        stream = runner.run_async(
+            user_id="qa", session_id=sid,
+            new_message=types.Content(role="user", parts=[types.Part(text=user_msg)]))
+        async for ev in _iter_events_with_idle(stream.__aiter__(), idle_sec=idle, call_deadline=deadline):
+            if trace_path:
+                _trace(trace_path, ev)
+            text = ""
+            if ev.content and ev.content.parts:
+                text = "".join(p.text or "" for p in ev.content.parts if getattr(p, "text", None))
+            if text:
+                saw_text = True
+                last_text_at = time.monotonic()
+                if ev.is_final_response():
+                    turn_final = text
+            elif time.monotonic() - last_text_at >= idle:
+                # Empty keepalive ADK events must not reset the idle clock forever.
+                raise LLMOutputError(
+                    f"no text for {LLM_IDLE_TIMEOUT:.0f}s (empty ADK events)")
+        if not saw_text and not (turn_final or "").strip():
+            # Completed with only empty keepalive-style events.
+            raise LLMOutputError("no text for the whole LLM call (empty ADK events)")
+        return turn_final
+
+    try:
+        async with _sem:
+            while msg:
+                try:
+                    final = await asyncio.wait_for(_one_turn(msg), timeout=call_cap)
+                except asyncio.TimeoutError as e:
+                    raise LLMOutputError(
+                        f"LLM call hit the {LLM_TIMEOUT:.0f}s per-call timeout") from e
+                except asyncio.CancelledError:
+                    # Propagate so plan deadline / SIGINT can free the semaphore promptly.
+                    raise
+                # follow_up(final) -> a message to continue the same session (history kept), or None to stop.
+                msg = follow_up(final) if (follow_up and left > 0) else None
+                left -= 1
+    except asyncio.CancelledError:
+        raise
     return final
 
 

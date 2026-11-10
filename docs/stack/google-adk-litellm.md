@@ -64,6 +64,12 @@ Known ADK issue: MCP sessions historically could recreate per tool call and clos
 | `LLM_API_KEY` | Often `none` for internal vLLM |
 | `LLM_JSON_MODE` | `1` enables `response_format=json_object` |
 | `LLM_MAX_TOKENS` | Planner/judge reply budget (server default may be 512) |
+| `LLM_TIMEOUT` / `LLM_CALL_TIMEOUT` | LiteLLM whole-response timeout in seconds (default 180); also caps each `run_agent` turn |
+| `LLM_STREAM_TIMEOUT` | LiteLLM stream idle / next-chunk timeout (default 60) |
+| `LLM_IDLE_TIMEOUT` | Fail the attempt when ADK events carry no text for this many seconds (default 90) |
+| `PLAN_BATCH` | Max cases per planner batch (default 6) |
+| `PLAN_CONCURRENCY` | Concurrent planner batches (default 1 so hung calls cannot starve retries) |
+| `PLAN_MAX_SECONDS` | Hard wall-clock plan deadline; cancels in-flight LLM calls |
 | `TESTER_MAX_TOKENS` | Tester reply budget (smaller to protect context) |
 | `TESTER_KEEP_PAGE_READS` | How many page reads stay in tester history |
 | `TESTER_MAX_PAGE_CHARS` | Truncate page text before it hits the model |

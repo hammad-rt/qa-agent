@@ -167,7 +167,9 @@ def _intent_sig(name: str, args: dict, snapshot: str = "") -> str | None:
     with every snapshot), or a script quoting the same texts."""
     if name in ("browser_click", "browser_type", "browser_select_option"):
         ref = re.sub(r"\W|ref", "", str(args.get("target") or args.get("ref") or ""))
-        label = _label_of(ref, snapshot) or ("" if ref else str(args.get("element") or "").strip().lower())
+        # Prefer snapshot label, then the stable element name (refs change every snapshot), then bare ref.
+        label = (_label_of(ref, snapshot)
+                 or str(args.get("element") or "").strip().lower())
         # refs get a new frame prefix after every reload (f3e125, f6e125, ...) but the element keeps its number
         key = label or re.sub(r"^f\d+", "", ref)
         if not key:
@@ -1207,13 +1209,16 @@ class TesterSession:
             sig = _call_sig(name, args)
             intent = _intent_sig(name, args, self.last_snapshot)   # same target reached by reworded calls/refs
             # Same element after a page/wizard change is not a true repeat — reset that intent's counter.
+            # Discovery (and resumed discovery) often toggles chrome (All menu) without real progress;
+            # keep counting across page-hash flips so STUCK_MAX_ATTEMPTS still fires.
             page_h = getattr(self, "_page_hash", None) or ""
             self._sig_page = getattr(self, "_sig_page", {}) or {}
+            disco = bool(self.brief.get("discovery"))
             for key in (sig, intent):
                 if not key:
                     continue
                 prev_page = self._sig_page.get(key)
-                if prev_page and page_h and prev_page != page_h:
+                if (not disco) and prev_page and page_h and prev_page != page_h:
                     self._sigs[key] = 0
                 self._sig_page[key] = page_h
             self._sigs[sig] = self._sigs.get(sig, 0) + 1
@@ -1272,7 +1277,8 @@ class TesterSession:
                         f"alert/status messages near the form before clicking {submit_label!r} again. "
                         f"(Attempt {n}/{stop_at} on this control.)"
                     )}
-            if (n >= stop_at or cycling) and not getattr(self, "_explored", False):
+            # Discovery loops: skip the explore ladder (it resets counters) and ask after STUCK_MAX.
+            if (n >= stop_at or cycling) and not getattr(self, "_explored", False) and not disco:
                 return self._start_exploring(name, "the same actions kept repeating" if cycling else
                                              f"{name} was repeated {n} times")
             if cycling:
@@ -1399,7 +1405,8 @@ class TesterSession:
 
         explored = bool(getattr(self, "_explored", False))
         asks = int(getattr(self, "_stuck_asks", 0))
-        if not explored and asks == 0:
+        # Discovery (incl. resumed DISCO-* cases) asks on first stop_at hit; other cases explore first.
+        if not explored and asks == 0 and not self.brief.get("discovery"):
             return None
         if asks >= STUCK_ASK_MAX_PER_CASE:
             return None

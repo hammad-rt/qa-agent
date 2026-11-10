@@ -29,16 +29,21 @@ class WebDomShell(unittest.TestCase):
         self.assertRegex(markup, r'data-p="report"[^>]*>\s*Report')
         self.assertRegex(markup, r'data-p="mem"[^>]*>\s*Memory')
         self.assertRegex(markup, r'data-p="know"[^>]*>\s*Knowledge')
-        # Tabs and guide must appear before any pane.on / pane blocks as siblings under main.
+        # Classic tabs sit directly under the run title (first chrome in the pane).
+        # Guidance stays always visible (outside panes), below phase/now/wait chrome.
         main = re.search(r"<main>([\s\S]*)</main>", markup)
         self.assertIsNotNone(main)
         body = main.group(1)
-        guide_i = body.find('id="guideRow"')
+        head_i = body.find('class="head"')
         tabs_i = body.find('role="tablist"')
+        phase_i = body.find('id="phaseBar"')
+        guide_i = body.find('id="guideRow"')
         live_i = body.find('id="live"')
-        self.assertGreater(guide_i, 0)
-        self.assertGreater(tabs_i, guide_i)
-        self.assertGreater(live_i, tabs_i)
+        self.assertGreater(head_i, -1)
+        self.assertGreater(tabs_i, head_i)
+        self.assertGreater(phase_i, tabs_i)
+        self.assertGreater(guide_i, tabs_i)
+        self.assertGreater(live_i, guide_i)
         # Not nested inside a pane
         before_live = body[:live_i]
         self.assertNotIn('class="pane', before_live.split('id="guideRow"')[0][-80:])
@@ -60,7 +65,7 @@ class WebDomShell(unittest.TestCase):
         self.assertIn("max-height:min(30vh", css.replace(" ", ""))
 
     def test_run_card_actions_stay_compact(self):
-        """Sidebar run cards: title row truncates, actions are a kebab, no Delete while running."""
+        """Sidebar run cards: title row truncates, actions are a kebab, no Delete while active."""
         css, _, rest = self.html.partition("</style>")
         script = rest
         self.assertIn(".run .tid", css)
@@ -74,7 +79,8 @@ class WebDomShell(unittest.TestCase):
         self.assertIn("run.is-run.racts", compact)
         self.assertIn("function runCardHtml", script)
         self.assertIn('aria-haspopup="menu"', script)
-        self.assertIn("Can't delete while this run is going", script)
+        self.assertIn("Can't delete while this run is active", script)
+        self.assertIn("['new','planning','running','stuck']", script.replace(" ", ""))
         self.assertIn("is-run", script)
         # Two icon buttons in the title row would fight the pills; actions live in the menu.
         self.assertNotRegex(

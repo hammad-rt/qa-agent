@@ -19,6 +19,11 @@ class Settle(unittest.TestCase):
 
 class IntentLoop(unittest.TestCase):
     def test_reworded_clicks_share_intent(self):
-        a = T._intent_sig("browser_click", {"element": "View Invoice", "target": "f1e348"})
-        b = T._intent_sig("browser_click", {"target": "[ref=f1e348]"})
+        snap = '- link "View Invoice" [ref=f1e348]\n'
+        a = T._intent_sig("browser_click", {"element": "View Invoice", "target": "f1e348"}, snap)
+        b = T._intent_sig("browser_click", {"target": "[ref=f1e348]"}, snap)
         self.assertEqual(a, b)
+        # Element name alone still groups changing refs when the snapshot has no match yet.
+        c = T._intent_sig("browser_click", {"element": "View Invoice", "ref": "e999"})
+        d = T._intent_sig("browser_click", {"element": "View Invoice", "ref": "e1000"})
+        self.assertEqual(c, d)

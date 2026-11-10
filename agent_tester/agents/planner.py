@@ -33,9 +33,11 @@ def _static(s: str):
 
 
 # Legacy fixed count (overridden by token-budget sizing when PLAN_BATCH_TOKENS is set).
-PLAN_BATCH = int(os.environ.get("PLAN_BATCH", "8"))
+# ~6 cases keeps prompts nearer ~10K tokens for slow local models; 12 was ~21.7K and hung often.
+PLAN_BATCH = int(os.environ.get("PLAN_BATCH", "6"))
 PLAN_BATCH_TOKENS = int(os.environ.get("PLAN_BATCH_TOKENS", "6000"))  # ~case texts packed per call
-PLAN_CONCURRENCY = int(os.environ.get("PLAN_CONCURRENCY", "3"))
+# Concurrency 1 by default so a hung batch cannot starve its own retries on the LLM semaphore.
+PLAN_CONCURRENCY = int(os.environ.get("PLAN_CONCURRENCY", "1"))
 # Empty/{} planner replies: retry (with split) this many times per leaf batch, then give up.
 PLAN_EMPTY_RETRIES = int(os.environ.get("PLAN_EMPTY_RETRIES", "2"))
 # Hard cap across all batch attempts (wall clock) and total split attempts.
@@ -61,7 +63,7 @@ def size_batches(task_text: str, ids: list[str], *, token_budget: int | None = N
                  max_count: int | None = None) -> list[list[str]]:
     """Split case ids into batches sized by approximate token budget (not a fixed count)."""
     budget = token_budget if token_budget is not None else PLAN_BATCH_TOKENS
-    cap = max_count if max_count is not None else max(PLAN_BATCH, 12)
+    cap = max_count if max_count is not None else max(1, PLAN_BATCH)
     blocks = dict(_case_blocks(task_text, ids))
     batches: list[list[str]] = []
     cur: list[str] = []
@@ -156,15 +158,34 @@ async def _plan_batch_resilient(settings, pack, task_text: str, task_id: int, en
                      "Do not return {} or an empty cases list.")
             temp = PLAN_RETRY_TEMPERATURE
         try:
-            plan = await plan_task(settings, pack, task_text + nudge, task_id, env,
-                                   only_case=",".join(cur), repair=False, temperature=temp,
-                                   run_dir=run_dir, **kw)
+            remaining = max(1.0, deadline - time.monotonic())
+            plan = await asyncio.wait_for(
+                plan_task(settings, pack, task_text + nudge, task_id, env,
+                          only_case=",".join(cur), repair=False, temperature=temp,
+                          run_dir=run_dir, **kw),
+                timeout=remaining)
             why = _empty_plan_reason(plan, cur)
             if why:
                 raise LLMOutputError(f"planner returned {why}")
             parts.append(plan)
             _plan_progress(run_dir, f"{batch_label}: finished {len(cur)} case(s)")
             continue
+        except asyncio.TimeoutError as e:
+            _plan_progress(run_dir, f"{batch_label}: cancelled — plan deadline ({PLAN_MAX_SECONDS}s)")
+            raise LLMOutputError(
+                f"Planning hit the {PLAN_MAX_SECONDS}s time cap while working on {batch_label} "
+                f"({ids_txt}). Resume with: python -m agent_tester test {task_id} --env {env}") from e
+        except asyncio.CancelledError as e:
+            # Outer plan deadline cancels in-flight wait_fors; treat near-deadline cancel as the time cap.
+            if time.monotonic() >= deadline - 1.0:
+                _plan_progress(run_dir, f"{batch_label}: cancelled — plan deadline ({PLAN_MAX_SECONDS}s)")
+                raise LLMOutputError(
+                    f"Planning hit the {PLAN_MAX_SECONDS}s time cap while working on {batch_label} "
+                    f"({ids_txt}). Resume with: python -m agent_tester test {task_id} --env {env}") from e
+            _plan_progress(run_dir, f"{batch_label}: cancelled ({ids_txt})")
+            raise LLMOutputError(
+                f"{batch_label}: planning cancelled for {ids_txt}. "
+                f"Resume with: python -m agent_tester test {task_id} --env {env}") from e
         except LLMOutputError as e:
             why = str(e)
             if empty_n >= PLAN_EMPTY_RETRIES or len(cur) <= 1:
@@ -194,7 +215,7 @@ async def plan_in_batches(settings, pack, task_text: str, task_id: int, env: str
     sem = asyncio.Semaphore(max(1, PLAN_CONCURRENCY))
     parts: list[TestPlan | None] = [None] * len(batches)
     status = ["pending"] * len(batches)
-    deadline = time.monotonic() + max(30, PLAN_MAX_SECONDS)
+    deadline = time.monotonic() + max(1, PLAN_MAX_SECONDS)
     attempt_budget = [0]
     lock = asyncio.Lock()
 
@@ -206,6 +227,8 @@ async def plan_in_batches(settings, pack, task_text: str, task_id: int, env: str
 
     async def one(i: int, batch: list[str]):
         label = f"Batch {i + 1}/{len(batches)}"
+        # Take the batch semaphore only for work that can finish or be cancelled promptly;
+        # hung LLM calls must release via asyncio cancellation (see run_agent / wait_for).
         async with sem:
             async with lock:
                 status[i] = "running"
@@ -224,7 +247,25 @@ async def plan_in_batches(settings, pack, task_text: str, task_id: int, env: str
                     _plan_progress(run_dir, f"{label} failed. {_status_line()}")
                 raise
 
-    await asyncio.gather(*(one(i, b) for i, b in enumerate(batches)))
+    tasks = [asyncio.create_task(one(i, b), name=f"plan-batch-{i + 1}") for i, b in enumerate(batches)]
+    try:
+        remaining = max(1.0, deadline - time.monotonic())
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=remaining)
+    except asyncio.TimeoutError as e:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        _plan_progress(run_dir, f"Planning cancelled after {PLAN_MAX_SECONDS}s hard deadline")
+        raise LLMOutputError(
+            f"Planning hit the {PLAN_MAX_SECONDS}s time cap (cancelled in-flight LLM calls). "
+            f"Resume with: python -m agent_tester test {task_id} --env {env}") from e
+    except asyncio.CancelledError:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
     plan = _merge_plans([p for p in parts if p is not None], task_id, env)
     if repair:
         from ..casegen import add_repair_case

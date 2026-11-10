@@ -304,6 +304,21 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
             task_text += f"\n\nRETEST MODE: plan only the cases that check this fixed bug: {hint}"
     lessons_mem = open_memory(settings, pack)
     from .agents.llm import LLMOutputError
+    # Install SIGINT/SIGTERM before planning so Ctrl-C cancels hung LLM calls promptly
+    # (the case-loop handlers are installed later, after the plan exists).
+    import signal as _signal
+    _plan_prev = {}
+
+    def _plan_on_signal(signum, frame):  # noqa: ARG001
+        raise KeyboardInterrupt
+
+    for _sig in (getattr(_signal, "SIGINT", None), getattr(_signal, "SIGTERM", None)):
+        if _sig is None:
+            continue
+        try:
+            _plan_prev[_sig] = _signal.signal(_sig, _plan_on_signal)
+        except (ValueError, OSError):
+            pass
     try:
         if draft is not None:
             print(f"Continuing from the plan drafted in {draft_src.name} (plan only); no new planning.")
@@ -327,6 +342,17 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
         print(f"\nPlanning stopped: {e}")
         state.checkpoint(f"planner output unusable: {e}", status="blocked")
         return 4
+    except KeyboardInterrupt:
+        lessons_mem.store.close()
+        print("\nPlanning interrupted (Ctrl-C).")
+        state.checkpoint("planning interrupted", status="paused")
+        return 130
+    finally:
+        for _sig, _old in _plan_prev.items():
+            try:
+                _signal.signal(_sig, _old)
+            except (ValueError, OSError):
+                pass
     lessons_mem.store.close()
     if only:                                   # code enforces the case selection, whatever the planner returned
         from .modes import filter_plan

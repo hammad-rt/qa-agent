@@ -35,7 +35,7 @@ BLOCKED_BROWSER = {"browser_evaluate", "browser_run_code", "browser_install", "b
 FREE_TOOLS = {"browser_snapshot", "browser_take_screenshot", "browser_wait_for", "browser_find",
               "browser_console_messages", "browser_network_requests", "mark_step", "record_value", "evidence_name",
               "finish", "needs_manual_login", "recall_lessons", "propose_memory", "get_secret",
-              "note_behaviour", "lookup_docs", "stuck_lookup", "browser_tabs"}
+              "note_behaviour", "lookup_docs", "stuck_lookup", "browser_tabs", "get_context"}
 # Real paste: clipboard + Ctrl+V when the browser allows it, else a paste event with the text (both run the
 # page's paste handler; typing does not). Reads the field back after the page reacts.
 PASTE_JS = r"""async (page) => {
@@ -476,6 +476,13 @@ class TesterSession:
         self._last_nav_url: str | None = None # last browser_navigate URL (for XSRF attribution)
         self._repair_kind: str | None = None  # check_repair_sql result for the SQL on the page
         self._exec_ok = False                 # an Execute click was approved for that SQL (or explicitly)
+        self._page_hash: str | None = None    # hash of last captured trimmed page state
+        self._page_state: str = ""            # last trimmed page state text
+        self._llm_stats: dict = {"turns": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                                 "llm_s": 0.0, "tool_s": 0.0}
+        self._tool_t0: float | None = None
+        self._context_selector = None         # set by make_tester when context learning is on
+        self._step_type: str = "general"
 
     # ---- tools exposed to the model -------------------------------------------------
     def tools(self):
@@ -694,6 +701,34 @@ class TesterSession:
             rows = s.memory.recall(query, k=5, area=s.brief.get("area"), app=s.app, state=s.state)
             return {"lessons": [{"id": r["id"], "kind": r["kind"], "text": truncate_row_text(r["text"])} for r in rows]}
 
+        def get_context(topic: str) -> dict:
+            """Pull a demoted or omitted context chunk (facts/routes/lessons) when you need it.
+            Prefer this over guessing. Counts as a promotion signal for that chunk."""
+            from ..context import record_usage_signals
+            sel = getattr(s, "_context_selector", None)
+            if sel is None:
+                # Fallback: memory recall when selector was not wired.
+                return recall_lessons(topic)
+            found = sel.by_topic(topic, limit=3)
+            if not found:
+                return {"chunks": [], "note": "nothing on that topic; try recall_lessons or lookup_docs"}
+            texts = [{"id": c.id, "source": c.source, "text": c.text[:1500]} for c in found]
+            for c in found:
+                # On-demand pull promotes the chunk for this step type.
+                try:
+                    from ..context.learning import ContextScores
+                    scores = getattr(s, "_context_scores", None)
+                    if scores is not None:
+                        scores.mark_stall_fix(c.id, getattr(s, "_step_type", "general"))
+                except Exception:  # noqa: BLE001
+                    pass
+            record_usage_signals(s.state, case_id=s.case_id,
+                                 used_chunk_ids=[c.id for c in found],
+                                 resolved_by=found[0].id)
+            s.state.log_action(case_id=s.case_id, app=s.app, tool="get_context",
+                               args={"topic": topic[:200], "n": len(found)}, plan_step=s.current_step)
+            return {"chunks": texts}
+
         def propose_memory(kind: str, text: str, area: str = "") -> dict:
             """Suggest a lesson, recipe or fact worth keeping (e.g. a workaround that worked). The user approves it at the end."""
             if s.memory is None:
@@ -819,7 +854,7 @@ class TesterSession:
             return out
 
         tools = [record_value, calculate, request_approval, check_repair_sql, mark_step, evidence_name, get_secret, finish, recall_lessons,
-                 needs_manual_login, ask_user, note_behaviour, lookup_docs]
+                 get_context, needs_manual_login, ask_user, note_behaviour, lookup_docs]
         if s.toolset is not None:
             tools.append(paste_text)
             if not s.brief.get("discovery"):
@@ -849,7 +884,14 @@ class TesterSession:
     # ---- callbacks: the code side of every tool call --------------------------------
     def before_tool(self, tool, args, tool_context):
         name = tool.name
+        # Unchanged snapshot short-circuit: do not count as a loop/idle-read step.
+        if name == "browser_snapshot" and getattr(self, "_page_hash", None) and getattr(self, "_page_fresh", False):
+            self.state.log_action(case_id=self.case_id, app=self.app, tool="browser_snapshot",
+                                  args={"unchanged": True}, plan_step=self.current_step,
+                                  outcome="unchanged")
+            return {"result": UNCHANGED, "page_state": getattr(self, "_page_state", "")[:500]}
         self.calls += 1
+        self._tool_t0 = time.monotonic()
         if getattr(self, "finished", False) is True:
             # finish() already ran: the case is over. Some models answer the finish response with the same calls
             # again (mark_step x4 + finish, forever); end the turn here instead of asking the model again.
@@ -868,13 +910,16 @@ class TesterSession:
         last_act, last_snap = getattr(self, "_last_act", 0.0), getattr(self, "_last_snap", 0.0)
         if name in ACTING_TOOLS:
             self._last_act = now
+            self._page_fresh = False
         elif name in ("browser_snapshot", "browser_take_screenshot", "browser_find"):
             if last_act and now - last_act < settle:          # pages update 3-8 s late: let them settle
                 time.sleep(settle - (now - last_act))
             self._last_snap = time.monotonic()
         elif name == "record_value" and last_act and last_act > last_snap:
-            return {"error": "The page changed after your last read and may still be updating. "
-                             "Take a fresh browser_snapshot (it waits for the page to settle), then record the value again."}
+            # Auto page state after a click/type updates _last_snap; only insist on a fresh read when it did not.
+            if not getattr(self, "_page_fresh", False):
+                return {"error": "The page changed after your last read and may still be updating. "
+                                 "Take a fresh browser_snapshot (it waits for the page to settle), then record the value again."}
         if name in ("browser_type", "browser_fill_form"):
             ref = str(args.get("target") or args.get("ref") or "").removeprefix("ref=")
             if ref and getattr(self, "unread_input", None) == ref:
@@ -1370,9 +1415,30 @@ class TesterSession:
                 self.result.snapshots.append(txt.name)
         args["filename"] = str(png.resolve())
 
+    def _remember_page(self, text: str) -> str:
+        """Trim, store hash, mark fresh; return trimmed text."""
+        trimmed = trim_page(text or "", MAX_PAGE_CHARS)
+        h = page_hash(trimmed)
+        self.last_snapshot = trimmed
+        self._page_state = trimmed
+        self._page_hash = h
+        self._page_fresh = True
+        self._last_snap = time.monotonic()
+        # Durable for discovery spot-checks / reuse (same auto page state PR #8 maintains).
+        try:
+            by_app = self.state.data.setdefault("_page_state_by_app", {})
+            by_app[self.app or ""] = trimmed
+        except Exception:  # noqa: BLE001
+            pass
+        return trimmed
+
     def after_tool(self, tool, args, tool_context, tool_response):
+        t0 = getattr(self, "_tool_t0", None)
+        if t0 is not None:
+            self._llm_stats["tool_s"] = self._llm_stats.get("tool_s", 0.0) + (time.monotonic() - t0)
+            self._tool_t0 = None
         if tool.name == "browser_snapshot":
-            self.last_snapshot = _text_of(tool_response)
+            self._remember_page(_text_of(tool_response))
         if tool.name == "browser_take_screenshot":
             raw = args.get("filename") or ""
             png = Path(raw) if Path(raw).is_absolute() else self.ev.shots / Path(raw).name
@@ -1389,7 +1455,7 @@ class TesterSession:
                 name = png.name
                 if name not in self.result.screenshots:
                     self.result.screenshots.append(name)
-        if tool.name.startswith("browser_"):
+        if tool.name.startswith("browser_") or tool.name in ("paste_text", "run_helper"):
             text = _text_of(tool_response)
             err = _tool_error(text)
             seq = getattr(self, "_pending_seq", None)
@@ -1400,23 +1466,52 @@ class TesterSession:
             self._pending_seq = None
             blocked = self._check_page_site(tool.name, text)
             if blocked:
+                self._page_fresh = False
                 return {"error": blocked}
             if tool.name == "browser_navigate" and _is_not_found(text):
                 self.state.log_action(case_id=self.case_id, app=self.app, tool="not_found",
                                       args={"url": str(args.get("url", ""))[:300]}, plan_step=self.current_step,
                                       outcome="404")
+                self._page_fresh = False
                 return {"error": (f"{args.get('url', '')} does not exist (404 page). Do not guess addresses. Use "
                                   "only a URL from the project rules / recipes (filled with ids from values_so_far) "
                                   "or a link on the page; otherwise open the screen through the menus.")}
             xsrf = self._note_xsrf(tool.name, args, text)
             if xsrf:
+                self._page_fresh = False
                 return {"error": xsrf}
-            return _cap_obj(_redact_obj(tool_response, self.keep_emails), MAX_PAGE_CHARS)
+            out = _cap_obj(_redact_obj(tool_response, self.keep_emails), MAX_PAGE_CHARS)
+            # Auto page state: after every state-changing tool, return a trimmed snapshot with the result
+            # so the model never needs a separate browser_snapshot turn.
+            if is_state_changing(tool.name, text) and not err:
+                if result_already_has_page(text):
+                    trimmed = self._remember_page(text)
+                    out = merge_page_into_result(out, trimmed, keep_emails=self.keep_emails, cap=MAX_PAGE_CHARS)
+                else:
+                    # Capture via MCP when the tool result had no page tree (sync best-effort flag;
+                    # async capture runs when tool_context is available through auto path).
+                    captured = self._try_capture_page(tool_context)
+                    if captured:
+                        out = merge_page_into_result(out, captured, keep_emails=self.keep_emails, cap=MAX_PAGE_CHARS)
+                    elif getattr(self, "_page_state", ""):
+                        # Still attach last known state so the model does not immediately re-snapshot.
+                        out = merge_page_into_result(out, self._page_state, keep_emails=self.keep_emails,
+                                                     cap=MAX_PAGE_CHARS)
+            elif tool.name == "browser_snapshot":
+                trimmed = getattr(self, "_page_state", "") or trim_page(text, MAX_PAGE_CHARS)
+                out = _cap_obj(_redact_obj({"result": trimmed}, self.keep_emails), MAX_PAGE_CHARS)
+            return out
         return None
 
+    def _try_capture_page(self, tool_context) -> str:
+        """Best-effort sync capture is not available; return '' (async path uses auto_shot helpers)."""
+        # Playwright MCP usually embeds the snapshot; when it does not, leave _page_fresh false so
+        # record_value still asks for a real snapshot. Optional async capture is done in auto_shot.
+        return ""
+
     def before_model(self, callback_context, llm_request):
-        """Keep the model's history small: only the last KEEP_PAGE_READS browser results stay whole; older ones
-        are replaced by a one-line placeholder (the tester can take a new snapshot)."""
+        """Keep history lean (latest page only) and stamp LLM-call timing for the trace."""
+        self._llm_t0 = time.monotonic()
         contents = getattr(llm_request, "contents", None)
         prune_history(contents or [], KEEP_PAGE_READS)
         note = TesterSession._new_guidance(self)
@@ -1431,6 +1526,50 @@ class TesterSession:
             contents.append(_gt.Content(role="user", parts=[_gt.Part(
                 text="\n\n".join(notes) + "\nApply this now, in your current step, and keep following it.")]))
         return None
+
+    def after_model(self, callback_context, llm_response):
+        """Log prompt/completion tokens + latency from LiteLLM usage into run stats / trace."""
+        # First apply raw_calls repair (text-as-tool-call).
+        fixed = raw_calls.after_model(callback_context, llm_response)
+        resp = fixed if fixed is not None else llm_response
+        t0 = getattr(self, "_llm_t0", None)
+        latency = (time.monotonic() - t0) if t0 else 0.0
+        usage = {}
+        for src in (getattr(resp, "usage_metadata", None), getattr(resp, "usage", None)):
+            if src is None:
+                continue
+            if isinstance(src, dict):
+                usage = src
+                break
+            usage = {
+                "prompt_tokens": getattr(src, "prompt_token_count", None) or getattr(src, "prompt_tokens", 0) or 0,
+                "completion_tokens": getattr(src, "candidates_token_count", None)
+                or getattr(src, "completion_tokens", 0) or 0,
+                "total_tokens": getattr(src, "total_token_count", None) or getattr(src, "total_tokens", 0) or 0,
+            }
+            break
+        if not usage:
+            extra = getattr(resp, "model_extra", None) or {}
+            if isinstance(extra, dict) and isinstance(extra.get("usage"), dict):
+                usage = extra["usage"]
+        if not usage:
+            meta = getattr(resp, "custom_metadata", None) or {}
+            if isinstance(meta, dict) and isinstance(meta.get("usage"), dict):
+                usage = meta["usage"]
+        pt = int((usage or {}).get("prompt_tokens") or (usage or {}).get("input_tokens") or 0)
+        ct = int((usage or {}).get("completion_tokens") or (usage or {}).get("output_tokens") or 0)
+        self._llm_stats["turns"] = self._llm_stats.get("turns", 0) + 1
+        self._llm_stats["prompt_tokens"] = self._llm_stats.get("prompt_tokens", 0) + pt
+        self._llm_stats["completion_tokens"] = self._llm_stats.get("completion_tokens", 0) + ct
+        self._llm_stats["llm_s"] = self._llm_stats.get("llm_s", 0.0) + latency
+        # Persist per-case rollup on the run state for progress.log / report.
+        by = self.state.data.setdefault("llm_stats", {})
+        by[self.case_id] = dict(self._llm_stats)
+        try:
+            self.state.save()
+        except Exception:  # noqa: BLE001
+            pass
+        return fixed
 
     def _check_page_site(self, tool_name: str, text: str) -> str | None:
         """The app may send the browser to another site (e.g. a payment page). A site this run hasn't
@@ -1529,19 +1668,24 @@ class TesterSession:
         return {"error": f"Blocked: {why}. Do not retry this; continue or call finish()."}
 
 
-MAX_PAGE_CHARS = int(os.environ.get("TESTER_MAX_PAGE_CHARS", "30000"))   # ~8K tokens per page read
-KEEP_PAGE_READS = int(os.environ.get("TESTER_KEEP_PAGE_READS", "2"))
+from ..page_state import (DEFAULT_MAX_PAGE_CHARS, UNCHANGED, is_state_changing,
+                          merge_page_into_result, page_hash, result_already_has_page, trim_page)
+
+MAX_PAGE_CHARS = DEFAULT_MAX_PAGE_CHARS   # env TESTER_MAX_PAGE_CHARS (default 12000)
+KEEP_PAGE_READS = int(os.environ.get("TESTER_KEEP_PAGE_READS", "1"))  # only latest page state
 TESTER_MAX_TOKENS = int(os.environ.get("TESTER_MAX_TOKENS", "2048"))
-DROPPED = "[older page read removed to save space; take a new browser_snapshot if you need the page]"
+DROPPED = "[older page state removed; the latest page state is in the most recent tool result]"
 
 
 def prune_history(contents, keep: int) -> int:
-    """Replace all but the last `keep` browser tool results in the request history. Returns how many were dropped."""
+    """Keep only the last `keep` page-bearing browser results; stub the rest with one line."""
     refs = []
     for c in contents:
         for p in (getattr(c, "parts", None) or []):
             fr = getattr(p, "function_response", None)
-            if fr is not None and (getattr(fr, "name", "") or "").startswith("browser_"):
+            name = (getattr(fr, "name", "") or "") if fr is not None else ""
+            if fr is not None and name.startswith("browser_"):
+                # Prefer stubbing results that carry page text (snapshots / auto page state).
                 refs.append(fr)
     dropped = 0
     for fr in refs[:-keep] if keep > 0 else refs:
@@ -1553,8 +1697,9 @@ def prune_history(contents, keep: int) -> int:
 
 def _cap_obj(o, limit: int):
     if isinstance(o, str):
-        return o if len(o) <= limit else (o[:limit] + f"\n[... page text cut: {len(o) - limit} more characters. "
-                                          "Use browser_find, or scroll and snapshot again, for the rest.]")
+        return trim_page(o, limit) if len(o) > 200 else (
+            o if len(o) <= limit else (o[:limit] + f"\n[... page text cut: {len(o) - limit} more characters. "
+                                       "Use browser_find for the rest.]"))
     if isinstance(o, dict):
         return {k: _cap_obj(v, limit) for k, v in o.items()}
     if isinstance(o, list):
@@ -1774,42 +1919,79 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
                 instr += "\nTested helpers (prefer them for these routine steps; call run_helper):\n" + "\n".join(
                     f"- {n}: {h.meta['description']} params {json.dumps(h.meta.get('params', {}))}"
                     + (" [changes data: needs approval]" if h.meta.get("changes_data") else "") for n, h in helpers.items())
+            # Context selector: safety + case-tagged rules always; other facts/memory/routes by budget.
+            from ..context import (ContextChunk, ContextSelector, ContextScores, StepContext,
+                                   case_tagged_rule_chunks, facts_to_chunks, parse_numbered_rules,
+                                   record_injection, safety_chunks_from_pack)
+            from ..facts_pick import brief_text
+            pack_cfg = getattr(pack, "config", None) or {}
+            # Share memory.db with discovery_maps (same SQLite file; no duplicate schema DB).
+            try:
+                ctx_scores = ContextScores(settings.memory_db)
+            except Exception:  # noqa: BLE001
+                ctx_scores = ContextScores()
+            selector = ContextSelector(pack_cfg, scores=ctx_scores.as_dict())
+            selector.register(safety_chunks_from_pack(pack_cfg))
+            case_blob = brief_text(brief)
+            numbered = parse_numbered_rules(getattr(pack, "facts", "") or "")
+            # Also allow pack.yaml numbered_rules.
+            for n, t in (pack_cfg.get("numbered_rules") or {}).items():
+                try:
+                    numbered[int(n)] = str(t)
+                except (TypeError, ValueError):
+                    pass
+            selector.register(case_tagged_rule_chunks(brief.get("case_id") or "", case_blob, numbered))
+            # Always-send: current steps, guidance, data-plan values.
+            steps_json = json.dumps(brief.get("steps") or [], indent=1, default=str)
+            selector.register([ContextChunk(source="case_steps", text="Your steps:\n" + steps_json,
+                                            case_ids=(brief.get("case_id") or "",), always_send=True)])
+            if brief.get("placeholder_note") or brief.get("redo_guidance"):
+                selector.register([ContextChunk(
+                    source="guidance",
+                    text=str(brief.get("placeholder_note") or "") + "\n" + json.dumps(brief.get("redo_guidance") or []),
+                    always_send=True)])
+            vals = brief.get("values_so_far") or {}
+            if vals:
+                selector.register([ContextChunk(
+                    source="data_plan",
+                    text="Data-plan / values_so_far (binding):\n" + json.dumps(vals, indent=1, default=str)[:3000],
+                    always_send=True)])
             if not brief.get("discovery") and getattr(pack, "facts", ""):
-                from ..facts_pick import brief_text, relevant
-                rules = relevant(pack.facts, brief_text(brief))
-                if rules:
-                    instr += ("\nProject rules (facts.md, current). They apply even if your steps were written before "
-                              "a rule existed: if a step skips a prerequisite a rule requires (for example paying in "
-                              "full before Order Delivered), do the prerequisite first and say in notes it was inferred "
-                              "from facts.md; if it cannot be done, stop and report BLOCKED with the reason.\n" + rules + "\n")
-            if brief.get("read_only") and not brief.get("discovery"):
-                instr += "\nThis turn is READ-ONLY: log in and read values only. Never change anything."
-            # Budgeted memory block (ranked rows + few stuck/route hints). Never dump learned.md.
+                selector.register(facts_to_chunks(pack.facts, app=app, area=brief.get("area") or ""))
             mem_prompt = (brief.get("memory_prompt") or "").strip()
             if mem_prompt and mem_prompt != "(no saved lessons for this turn)":
-                instr += ("\nMemory for this turn (hints only — verify on the live page; "
-                          "call recall_lessons if you need more):\n" + mem_prompt + "\n")
-            stats = brief.get("memory_stats") or {}
-            if stats.get("tokens"):
-                instr += f"(memory inject ~{stats.get('tokens')} tokens)\n"
+                selector.register([ContextChunk(source="memory", text=mem_prompt,
+                                                step_types=("navigate", "read", "verify", "prep", "general"),
+                                                apps=(app,))])
             recipes = (brief.get("recipes") or [])[:6]
             disco_notes = (brief.get("discovery_notes") or "").strip()[:800]
             if recipes or disco_notes:
-                if brief.get("discovery"):
-                    instr += ("\nPrior recipes / learned routes are HINTS only — verify on the live page; "
-                              "ignore stale paths; map real menus, search and screens for this environment:\n")
-                else:
-                    instr += "\nUI map from discovery (follow menu/label paths; do not re-explore from scratch):\n"
-                instr += ("On an XSRF / acceptable-referer page, return via Home/menu — never retry the same "
-                          "Administration deep-link with browser_navigate.\n")
-                for r in recipes:
-                    instr += f"- recipe: {r}\n"
+                route_txt = "\n".join(f"- recipe: {r}" for r in recipes)
                 if disco_notes:
-                    instr += disco_notes + "\n"
+                    route_txt += "\n" + disco_notes
+                selector.register([ContextChunk(
+                    source="routes", text=route_txt,
+                    step_types=("navigate", "discover", "prep", "general"), apps=(app,))])
+            step_type = ("discover" if brief.get("discovery") else
+                         "prep" if brief.get("data_prep") else
+                         "read" if brief.get("read_only") else "navigate")
+            sess._step_type = step_type
+            sess._context_selector = selector
+            sess._context_scores = ctx_scores
+            selection = selector.select(StepContext(
+                step_type=step_type, app=app, case_id=brief.get("case_id") or "",
+                query=case_blob[:500]))
+            record_injection(state, selection, case_id=brief.get("case_id") or "",
+                             step_type=step_type, call_label=f"tester_{app}")
+            if selection.prompt:
+                instr += ("\n--- context for this step (code-selected; call get_context(topic) if you need more) ---\n"
+                          + selection.prompt + "\n")
+            if brief.get("read_only") and not brief.get("discovery"):
+                instr += "\nThis turn is READ-ONLY: log in and read values only. Never change anything."
             agent = LlmAgent(name=f"tester_{app}", model=model(settings, max_tokens=TESTER_MAX_TOKENS),
                              instruction=lambda _c: instr, tools=[toolset, *sess.tools()],
                              before_tool_callback=sess.before_tool, after_tool_callback=sess.after_tool,
-                             before_model_callback=sess.before_model, after_model_callback=raw_calls.after_model)
+                             before_model_callback=sess.before_model, after_model_callback=sess.after_model)
             prompt = "Your steps:\n" + json.dumps(brief, indent=1, default=str)
 
             async def go():

@@ -25,7 +25,13 @@ class Progress:
         self.done += 1
         mins = (time.time() - self.start) / 60
         extra = f" (still present: bug {r.known_bug})" if r.known_bug else ""
-        self._write(f"[{self.done}/{self.total}] {r.case_id}: {r.verdict}{extra} · {mins:.1f} min")
+        stats = (self.state.data.get("llm_stats") or {}).get(r.case_id) or {}
+        timing = ""
+        if stats:
+            timing = (f" · {stats.get('turns', 0)} LLM turns, "
+                      f"{stats.get('prompt_tokens', 0) + stats.get('completion_tokens', 0)} tok, "
+                      f"LLM {stats.get('llm_s', 0):.0f}s, tools {stats.get('tool_s', 0):.0f}s")
+        self._write(f"[{self.done}/{self.total}] {r.case_id}: {r.verdict}{extra} · {mins:.1f} min{timing}")
         if self.total >= 4 and self.done == self.total // 2:
             self._milestone("QA run halfway", f"{self.done} of {self.total} cases done.")
 
@@ -36,6 +42,28 @@ class Progress:
     def finished(self, counts: dict, report) -> None:
         summary = ", ".join(f"{v} {k}" for k, v in counts.items())
         self._write(f"Finished: {summary}. Report: {report}")
+        disco = self.state.data.get("discovery_reuse_stats") or {}
+        if disco:
+            self._write(
+                f"Discovery reuse: {disco.get('areas', 0)} area(s), "
+                f"{disco.get('reused', 0)} route(s) reused, "
+                f"{disco.get('live', 0)} live, "
+                f"{disco.get('spot_checked', 0)} spot-checked, "
+                f"~{disco.get('calls_saved', 0)} tool calls saved")
+        ctx = self.state.data.get("context_stats") or {}
+        if ctx:
+            self._write(
+                f"Context: {ctx.get('calls', 0)} injects, "
+                f"{ctx.get('tokens_sent', 0)} tokens sent, "
+                f"{ctx.get('tokens_omitted', 0)} tokens saved by selection")
+        llm = self.state.data.get("llm_stats") or {}
+        if llm:
+            turns = sum(v.get("turns", 0) for v in llm.values())
+            pt = sum(v.get("prompt_tokens", 0) for v in llm.values())
+            ct = sum(v.get("completion_tokens", 0) for v in llm.values())
+            ls = sum(v.get("llm_s", 0) for v in llm.values())
+            ts = sum(v.get("tool_s", 0) for v in llm.values())
+            self._write(f"LLM totals: {turns} turns, {pt}+{ct} tok, LLM {ls:.0f}s, tools {ts:.0f}s")
         self._milestone("QA run finished", f"{summary}\nReport: {report}")
 
     def _milestone(self, subject: str, body: str) -> None:

@@ -76,6 +76,14 @@ promoted to core: {{ learned.promoted | length }}, new open bugs saved: {{ learn
 {% if redos %}<h2>Redos from guidance</h2><ul>{% for r in redos %}<li>{{ r.cases | join(', ') }}: {{ r.text }}</li>{% endfor %}</ul>{% endif %}
 {% if stuck_asks %}<h2>Stuck asks</h2><ul>{% for a in stuck_asks %}<li>{{ a.case_id }} ({{ a.app }}): {{ a.args.why if a.args else '' }} — {{ a.outcome }}{% if a.args and a.args.answer %}: {{ a.args.answer }}{% endif %}</li>{% endfor %}</ul>{% endif %}
 {% if notes %}<h2>Run notes</h2><ul>{% for n in notes %}<li>{{ n }}</li>{% endfor %}</ul>{% endif %}
+{% if llm_stats %}<h2>LLM timing</h2>
+<table><tr><th>Case</th><th>Turns</th><th>Prompt tok</th><th>Completion tok</th><th>LLM s</th><th>Tool s</th></tr>
+{% for cid, s in llm_stats.items() %}<tr><td>{{ cid }}</td><td>{{ s.turns }}</td><td>{{ s.prompt_tokens }}</td>
+<td>{{ s.completion_tokens }}</td><td>{{ '%.1f'|format(s.llm_s or 0) }}</td><td>{{ '%.1f'|format(s.tool_s or 0) }}</td></tr>{% endfor %}
+</table>{% endif %}
+{% if context_stats %}<h2>Context selection</h2>
+<p>{{ context_stats.calls or 0 }} injects · {{ context_stats.tokens_sent or 0 }} tokens sent ·
+{{ context_stats.tokens_omitted or 0 }} tokens omitted (saved)</p>{% endif %}
 </body></html>"""
 
 
@@ -136,7 +144,9 @@ def build_report(state, pack=None, pdf: bool | None = None) -> Path:
         last_label=cps[-1]["label"] if cps else "",
         data_plan=state.data.get("data_plan") or [],
         redos=state.data.get("redos") or [],
-        stuck_asks=stuck_asks)
+        stuck_asks=stuck_asks,
+        llm_stats=state.data.get("llm_stats") or {},
+        context_stats=state.data.get("context_stats") or {})
     out = state.dir / "report.html"
     page = redact(html)
     for key, uri in images.items():

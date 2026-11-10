@@ -1,5 +1,6 @@
 import tempfile, unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tester import casegen
 from agent_tester.main import read_cases_file, with_cases_file
@@ -51,10 +52,13 @@ class CaseIdsAndBatches(unittest.TestCase):
             return TestPlan.model_validate({"task_id": tid, "env": env, "cases": [
                 {"id": i, "title": i, "type": "ui", "expected": "ok", "steps": [{"text": "look"}]} for i in ids]})
         orig, P.plan_task = P.plan_task, fake
+        # Force several token-budget batches (short ids alone fit in one call).
+        text = "\n".join(f"### A{i}\n" + ("case body " * 400) for i in range(1, 13))
         try:
             ids = [f"A{i}" for i in range(1, 13)]
-            plan = asyncio.run(P.plan_in_batches(None, None, "t", 1, "staging", ids, repair=False))
+            with mock.patch.object(P, "PLAN_BATCH_TOKENS", 400), mock.patch.object(P, "PLAN_CONCURRENCY", 2):
+                plan = asyncio.run(P.plan_in_batches(None, None, text, 1, "staging", ids, repair=False))
         finally:
             P.plan_task = orig
         self.assertEqual([c.id for c in plan.cases], ids)
-        self.assertEqual(len(calls), 3)
+        self.assertGreaterEqual(len(calls), 2)

@@ -103,6 +103,157 @@ def contact_lookup_brief_text(email: str, display_name: str | None = None) -> st
     )
 
 
+def _deterministic_contact(plan, case, state, testers: dict, app: str, email: str) -> bool:
+    """Try pack lookups (no LLM). Returns True when contact id was stored.
+
+    Uses a short-lived Playwright MCP session on the app's storage state when available.
+    Unit tests / missing MCP fall through to the LLM tester (returns False).
+    """
+    from .config import under_unit_tests
+    pack_cfg = state.data.get("pack_cfg") or {}
+    if not (pack_cfg.get("lookups") or {}).get("maps"):
+        return False
+    if os.environ.get("LOOKUP_DETERMINISTIC", "1").strip().lower() in ("0", "false", "no"):
+        return False
+    if under_unit_tests() and not os.environ.get("LOOKUP_FORCE"):
+        return False
+    base = None
+    for r in getattr(plan, "requirements", []) or []:
+        if r.value and str(r.key).startswith("env.") and str(r.key).endswith(f".{app}"):
+            base = r.value
+            break
+    if not base:
+        return False
+    platform = ((state.data.get("discovery") or {}).get(f"{case.area}:{app}") or {}).get("platform") \
+        or (pack_cfg.get("lookups") or {}).get("platform") or "suitecrm7"
+    tester = testers.get(app)
+    browser = getattr(tester, "lookup_browser", None) if tester is not None else None
+    close = None
+    import asyncio
+    from .lookups import find_contact_by_email
+    res = None
+    try:
+        if browser is None:
+            browser, close = _mcp_browser_for_lookup(state.dir, app)
+            if browser is None:
+                return False
+        res = asyncio.run(find_contact_by_email(
+            browser, base_url=base, email=email, platform=platform,
+            screenshot_name=str((state.dir / "shots" / f"contact-lookup-{case.id}.png").resolve())))
+    except Exception as e:  # noqa: BLE001
+        state.checkpoint(f"deterministic contact lookup failed: {type(e).__name__}: {e}")
+        return False
+    finally:
+        if close:
+            try:
+                close()
+            except Exception:  # noqa: BLE001
+                pass
+    if res is None or not res.ok or not res.record_id:
+        return False
+    store = state.data.setdefault("contact", {})
+    store.update({"email": email, "record_id": res.record_id,
+                  "email_on_record": res.values.get("email_on_record") or email,
+                  "app": app, "failed": False, "via": "deterministic"})
+    state.values[LOOKUP_VALUE] = {"value": res.record_id, "source": "contact_lookup_code"}
+    state.values[LOOKUP_EMAIL_VALUE] = {
+        "value": store["email_on_record"], "source": "contact_lookup_code"}
+    for ev in res.evidence or []:
+        state.data.setdefault("notes", []).append(f"contact lookup evidence: {ev}")
+    state.save()
+    state.checkpoint(f"contact lookup (code): {email} -> record {res.record_id}")
+    return True
+
+
+def _mcp_browser_for_lookup(run_dir, app: str):
+    """Return (McpBrowser, close_fn) or (None, None) when MCP/npx is unavailable."""
+    try:
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+        from .agents.tester import browser_env, headed, profile_path, storage_state_path
+        from .helpers import McpBrowser
+        import asyncio
+    except Exception:  # noqa: BLE001
+        return None, None
+    storage = storage_state_path(run_dir, app)
+    out = run_dir / "shots"
+    out.mkdir(parents=True, exist_ok=True)
+    if storage.is_file():
+        args = ["-y", "@playwright/mcp@latest", *([] if headed() else ["--headless"]),
+                "--isolated", "--storage-state", str(storage.resolve()),
+                "--output-dir", str(out), "--viewport-size", "1366,900"]
+    else:
+        profile = profile_path(run_dir, app)
+        profile.mkdir(parents=True, exist_ok=True)
+        args = ["-y", "@playwright/mcp@latest", *([] if headed() else ["--headless"]),
+                "--user-data-dir", str(profile),
+                "--output-dir", str(out), "--viewport-size", "1366,900"]
+
+    # Hold the session open across async lookup calls via a dedicated event loop runner.
+    class _SessionBrowser:
+        def __init__(self):
+            self._cm = None
+            self._sess = None
+            self.last_snapshot = ""
+
+        async def _ensure(self):
+            if self._sess is not None:
+                return
+            self._stdio = stdio_client(StdioServerParameters(
+                command="npx", args=args, env=browser_env()))
+            self._read_write = await self._stdio.__aenter__()
+            self._sess_cm = ClientSession(*self._read_write)
+            self._sess = await self._sess_cm.__aenter__()
+            await self._sess.initialize()
+
+        async def _do(self, tool, a):
+            await self._ensure()
+            res = await self._sess.call_tool(tool, a)
+            text = "\n".join(getattr(c, "text", "") or "" for c in (getattr(res, "content", None) or []))
+            return text
+
+        async def navigate(self, url: str) -> str:
+            return await self._do("browser_navigate", {"url": url})
+
+        async def snapshot(self) -> str:
+            self.last_snapshot = await self._do("browser_snapshot", {})
+            return self.last_snapshot
+
+        async def screenshot(self, filename: str) -> str:
+            from pathlib import Path
+            path = Path(filename)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            await self._do("browser_take_screenshot", {"filename": str(path.resolve()), "type": "png"})
+            return path.name
+
+        async def aclose(self):
+            try:
+                if self._sess is not None:
+                    await self._sess.call_tool("browser_close", {})
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                if self._sess_cm is not None:
+                    await self._sess_cm.__aexit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                if self._stdio is not None:
+                    await self._stdio.__aexit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
+
+    b = _SessionBrowser()
+
+    def close():
+        try:
+            asyncio.run(b.aclose())
+        except Exception:  # noqa: BLE001
+            pass
+
+    return b, close
+
+
 def ensure_contact(plan, case, state, testers: dict, rules: list[dict]) -> CaseResult | None:
     """Resolve the run's portal email to a CRM contact record id before mutating prep.
 
@@ -122,6 +273,10 @@ def ensure_contact(plan, case, state, testers: dict, rules: list[dict]) -> CaseR
         state.values[LOOKUP_VALUE] = {"value": store["record_id"], "source": "contact_lookup"}
         state.values[LOOKUP_EMAIL_VALUE] = {"value": store.get("email_on_record") or email,
                                             "source": "contact_lookup"}
+        return None
+
+    # Code path first (no LLM); fall back to the tester agent when it fails or has no browser.
+    if _deterministic_contact(plan, case, state, testers, app, email):
         return None
 
     tester = testers.get(app) if app else None

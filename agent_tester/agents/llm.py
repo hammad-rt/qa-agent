@@ -131,7 +131,7 @@ TRACE_CASE: contextvars.ContextVar[str | None] = contextvars.ContextVar("TRACE_C
 
 
 def _trace(path, ev) -> None:
-    """Append a masked one-line summary of an ADK event to trace.jsonl."""
+    """Append a masked one-line summary of an ADK event to trace.jsonl (incl. LiteLLM usage when present)."""
     from datetime import datetime
 
     from ..redact import redact, scrub_secrets
@@ -148,6 +148,23 @@ def _trace(path, ev) -> None:
         rec["responses"] = resps
     if text:
         rec["text"] = text if len(text) <= 8000 else text[:8000] + " …[cut: over 8000 characters]"
+    # LiteLLM / ADK usage (prompt + completion tokens) when the event carries it.
+    usage = getattr(ev, "usage_metadata", None) or getattr(ev, "usage", None)
+    if usage is None and getattr(ev, "content", None) is not None:
+        usage = getattr(ev, "custom_metadata", None)
+        if isinstance(usage, dict):
+            usage = usage.get("usage")
+    if usage is not None:
+        if isinstance(usage, dict):
+            rec["usage"] = {k: usage.get(k) for k in
+                            ("prompt_tokens", "completion_tokens", "total_tokens",
+                             "input_tokens", "output_tokens") if usage.get(k) is not None}
+        else:
+            rec["usage"] = {
+                "prompt_tokens": getattr(usage, "prompt_token_count", None) or getattr(usage, "prompt_tokens", None),
+                "completion_tokens": getattr(usage, "candidates_token_count", None) or getattr(usage, "completion_tokens", None),
+                "total_tokens": getattr(usage, "total_token_count", None) or getattr(usage, "total_tokens", None),
+            }
     line = scrub_secrets(redact(json.dumps(rec, default=str)))
     with open(path, "a") as f:
         f.write(line + "\n")

@@ -70,7 +70,7 @@ class MemoryStore:
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
         self._migrate()
-        self._ensure_discovery_maps()
+        self._ensure_side_tables()
         self.embedder = embedder
 
     def _migrate(self) -> None:
@@ -80,10 +80,12 @@ class MemoryStore:
                 self.db.execute(f"ALTER TABLE memories ADD COLUMN {col} {decl}")
         self.db.commit()
 
-    def _ensure_discovery_maps(self) -> None:
-        """Verified UI routes per checklist item (see discovery_map.py). Same DB file, separate table."""
+    def _ensure_side_tables(self) -> None:
+        """Extra tables in the same memory.db: discovery_maps + context_scores (no second migrations)."""
         from ..discovery_map import MAP_SCHEMA
+        from ..context.learning import SCHEMA as CONTEXT_SCHEMA
         self.db.executescript(MAP_SCHEMA)
+        self.db.executescript(CONTEXT_SCHEMA)
         self.db.commit()
 
     # ---- write -------------------------------------------------------------------

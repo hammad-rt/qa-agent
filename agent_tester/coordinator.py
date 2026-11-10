@@ -261,7 +261,11 @@ def _discovery_change_text(plan, case, state) -> str:
 
 def _log_discovery_reuse(state, key: str, reused: list[dict], live: list[str],
                          spot_checked: int = 0, calls_saved: int = 0) -> None:
-    """One progress.log line per area:app describing reuse vs live discovery."""
+    """One progress.log line per area:app describing reuse vs live discovery.
+
+    Coexists with Progress.finished token/timing lines: per-area lines go to progress.log
+    immediately; aggregate counts land in state.data['discovery_reuse_stats'] for the finish summary.
+    """
     from datetime import datetime
     from .discovery_map import age_days, estimate_calls_saved
     bits = []
@@ -281,6 +285,14 @@ def _log_discovery_reuse(state, key: str, reused: list[dict], live: list[str],
     saved = calls_saved or estimate_calls_saved(len(reused))
     line = f"discovery {key}: " + "; ".join(bits) + f"; ~{saved} tool calls saved"
     state.data.setdefault("notes", []).append(line)
+    stats = state.data.setdefault("discovery_reuse_stats", {
+        "areas": 0, "reused": 0, "live": 0, "spot_checked": 0, "calls_saved": 0,
+    })
+    stats["areas"] = int(stats.get("areas") or 0) + 1
+    stats["reused"] = int(stats.get("reused") or 0) + len(reused)
+    stats["live"] = int(stats.get("live") or 0) + len(live)
+    stats["spot_checked"] = int(stats.get("spot_checked") or 0) + int(spot_checked or 0)
+    stats["calls_saved"] = int(stats.get("calls_saved") or 0) + int(saved or 0)
     try:
         with (state.dir / "progress.log").open("a") as f:
             f.write(f"{datetime.now().isoformat(timespec='seconds')} {line}\n")
@@ -416,11 +428,14 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory,
             continue
         if decision == "spot_check":
             labels = list(row.get("key_labels") or [])
-            # Prefer an injectable navigator (tests); else check labels against empty → fail → live.
+            # Prefer injectable nav/snap (tests); else last auto page_state for this app if present.
             nav = (state.data.get("_spot_check_nav") or {}).get(app)
+            snap = ((state.data.get("_spot_check_snap") or {}).get(app)
+                    or (state.data.get("_page_state_by_app") or {}).get(app)
+                    or "")
             ok, missing, _snap = spot_check_route(
                 route_text=row.get("route_text") or "", key_labels=labels,
-                snapshot_text=(state.data.get("_spot_check_snap") or {}).get(app, ""),
+                snapshot_text=snap,
                 navigate_and_snapshot=nav,
             )
             spot_n += 1
@@ -877,14 +892,13 @@ def _run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge
     read_snapshot(plan, state, testers, "baseline")
     by_id = {c.id: c for c in plan.cases}
     pack_cfg = pack_cfg or state.data.get("pack_cfg") or {}
-    from .data_prep import ensure_data, after_case, ensure_contact
     from .guidance_redo import apply_redo, report_undelivered
-    from .placeholders import case_unresolved_tokens
 
     try:
         _resolve_upfront(plan, state, testers, memory, data_prep or [], pack_cfg)
 
         queue = list(execution_order(plan))
+        from .parallel import group_ids, parallel_enabled
         i = 0
         while i < len(queue):
             redone = apply_redo(state, plan, pack_cfg)
@@ -894,43 +908,42 @@ def _run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge
                 queue = queue[:i] + list(redone) + rest
                 continue
 
-            cid = queue[i]
-            i += 1
-            if state.result(cid):
-                continue
-            case = by_id.get(cid)
-            if case is None:
-                continue
-            from .agents.llm import TRACE_CASE
-            tok = TRACE_CASE.set(cid)
-            try:
-                result = _deps_block(case, state)
-                if result is None and not case.skip_reason:
-                    missing = case_unresolved_tokens(case, state, pack_cfg)
-                    if missing:
-                        result = CaseResult(
-                            case_id=case.id, verdict="BLOCKED", expected=case.expected,
-                            note=("prep-missing: placeholder(s) " + ", ".join(missing)
-                                  + " have no resolved value for this run (find/create failed or was skipped); "
-                                  "never search the page for the literal token"))
-                if result is None and not case.skip_reason:
-                    ensure_case_discovery(plan, case, state, testers, memory, data_prep or [])
-                    result = ensure_contact(plan, case, state, testers, data_prep or [])
-                if result is None and not case.skip_reason:
-                    result = ensure_data(plan, case, state, testers, data_prep or [])
+            # Conservative parallel: only when PARALLEL_READONLY=1 and pack marks cases safe.
+            if parallel_enabled():
+                batches = group_ids(plan.cases, queue[i:], pack_cfg)
+                batch_ids = batches[0] if batches else [queue[i]]
+            else:
+                batch_ids = [queue[i]]
+            i += len(batch_ids)
+
+            if len(batch_ids) == 1:
+                results = [_execute_one_case(plan, by_id.get(batch_ids[0]), state, testers, judge,
+                                             max_retries, manual_login, manual_login_apps, memory,
+                                             data_prep or [], pack_cfg)]
+            else:
+                state.checkpoint(f"parallel readonly batch: {', '.join(batch_ids)}")
+                results = _run_parallel_cases(batch_ids, plan, by_id, state, testers, judge,
+                                              max_retries, manual_login, manual_login_apps, memory,
+                                              data_prep or [], pack_cfg)
+            for result in results:
                 if result is None:
-                    result = _run_case(plan, case, state, testers, judge, max_retries, manual_login,
-                                       manual_login_apps, memory=memory, pack_cfg=pack_cfg)
-                    after_case(case, state, data_prep or [])
-            finally:
-                TRACE_CASE.reset(tok)
-            state.set_result(result)
-            if on_case_done:
-                on_case_done(result)
+                    continue
+                state.set_result(result)
+                if on_case_done:
+                    on_case_done(result)
 
         report_undelivered(state, plan)
         read_snapshot(plan, state, testers, "final")
         state.checkpoint("run finished", status="finished")
+        # Context-learning retrospective (scores in memory.db beside discovery_maps).
+        try:
+            from .context import ContextScores, update_scores_from_run
+            from .config import Settings
+            scores = ContextScores(Settings.load().memory_db)
+            update_scores_from_run(scores, state)
+            scores.close()
+        except Exception:  # noqa: BLE001
+            pass
         return {cid: state.result(cid) for cid in execution_order(plan)}
     finally:
         # Persist any verified/proposed discovery routes even on stop / crash / Ctrl-C.
@@ -940,6 +953,113 @@ def _run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge
         except Exception:  # noqa: BLE001
             pass
         state.data.pop("_memory_ref", None)
+
+
+def _execute_one_case(plan, case, state, testers, judge, max_retries, manual_login,
+                      manual_login_apps, memory, data_prep, pack_cfg):
+    if case is None:
+        return None
+    if state.result(case.id):
+        return state.result(case.id)
+    from .agents.llm import TRACE_CASE
+    from .data_prep import ensure_data, after_case, ensure_contact
+    from .placeholders import case_unresolved_tokens
+    tok = TRACE_CASE.set(case.id)
+    try:
+        result = _deps_block(case, state)
+        if result is None and not case.skip_reason:
+            missing = case_unresolved_tokens(case, state, pack_cfg)
+            if missing:
+                result = CaseResult(
+                    case_id=case.id, verdict="BLOCKED", expected=case.expected,
+                    note=("prep-missing: placeholder(s) " + ", ".join(missing)
+                          + " have no resolved value for this run (find/create failed or was skipped); "
+                          "never search the page for the literal token"))
+        if result is None and not case.skip_reason:
+            ensure_case_discovery(plan, case, state, testers, memory, data_prep)
+            result = ensure_contact(plan, case, state, testers, data_prep)
+        if result is None and not case.skip_reason:
+            result = ensure_data(plan, case, state, testers, data_prep)
+        if result is None:
+            result = _run_case(plan, case, state, testers, judge, max_retries, manual_login,
+                               manual_login_apps, memory=memory, pack_cfg=pack_cfg)
+            after_case(case, state, data_prep)
+        return result
+    finally:
+        TRACE_CASE.reset(tok)
+
+
+def _run_parallel_cases(batch_ids, plan, by_id, state, testers, judge, max_retries,
+                        manual_login, manual_login_apps, memory, data_prep, pack_cfg):
+    """Run 2–3 parallel-safe cases with separate browser contexts (thread pool).
+
+    Shared RunState is checkpoint-serialized; each case still uses its own Playwright profile
+    key (`<app>__<case_id>`) when testers support it — otherwise they serialize on the same app
+    profile (still correct, just less parallel).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    results = []
+    # Prep/discovery must stay serial (shared session / data plan); only the case body can fan out
+    # when every case in the batch is already discovered and contact-resolved.
+    prepared = []
+    for cid in batch_ids:
+        case = by_id.get(cid)
+        if case is None or state.result(cid):
+            continue
+        block = _deps_block(case, state)
+        if block is not None:
+            results.append(block)
+            continue
+        from .placeholders import case_unresolved_tokens
+        missing = case_unresolved_tokens(case, state, pack_cfg)
+        if missing:
+            results.append(CaseResult(
+                case_id=case.id, verdict="BLOCKED", expected=case.expected,
+                note="prep-missing: " + ", ".join(missing)))
+            continue
+        ensure_case_discovery(plan, case, state, testers, memory, data_prep)
+        from .data_prep import ensure_contact, ensure_data, after_case
+        blocked = ensure_contact(plan, case, state, testers, data_prep)
+        if blocked is not None:
+            results.append(blocked)
+            continue
+        blocked = ensure_data(plan, case, state, testers, data_prep)
+        if blocked is not None:
+            results.append(blocked)
+            continue
+        prepared.append(case)
+
+    if not prepared:
+        return results
+    if len(prepared) == 1:
+        results.append(_run_case(plan, prepared[0], state, testers, judge, max_retries,
+                                 manual_login, manual_login_apps, memory=memory, pack_cfg=pack_cfg))
+        from .data_prep import after_case
+        after_case(prepared[0], state, data_prep)
+        return results
+
+    def work(case):
+        from .agents.llm import TRACE_CASE
+        tok = TRACE_CASE.set(case.id)
+        try:
+            return _run_case(plan, case, state, testers, judge, max_retries, manual_login,
+                             manual_login_apps, memory=memory, pack_cfg=pack_cfg)
+        finally:
+            TRACE_CASE.reset(tok)
+
+    with ThreadPoolExecutor(max_workers=min(3, len(prepared))) as pool:
+        futs = {pool.submit(work, c): c for c in prepared}
+        for fut in as_completed(futs):
+            case = futs[fut]
+            try:
+                r = fut.result()
+            except Exception as e:  # noqa: BLE001
+                r = CaseResult(case_id=case.id, verdict="AGENT INCOMPLETE", expected=case.expected,
+                               note=f"parallel run failed: {type(e).__name__}: {e}")
+            results.append(r)
+            from .data_prep import after_case
+            after_case(case, state, data_prep)
+    return results
 
 
 def _deps_block(case, state) -> CaseResult | None:

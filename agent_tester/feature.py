@@ -17,7 +17,12 @@ def _norm(s: str) -> str:
 
 def _sig(c: PlannedCase) -> tuple:
     """Two cases are the same check when title, steps and expected result match (ignoring case/punctuation)."""
-    return (_norm(c.title), tuple(_norm(s.text) for s in c.steps), _norm(c.expected))
+    from .field_text import field_text
+    return (
+        _norm(field_text(c.title, sep=" ")),
+        tuple(_norm(field_text(s, sep=" ")) for s in c.steps),
+        _norm(field_text(c.expected, sep=" ")),
+    )
 
 
 def is_feature(bundles, feature_id: int) -> bool:

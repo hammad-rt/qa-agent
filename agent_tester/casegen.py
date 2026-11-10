@@ -41,10 +41,11 @@ _QUOTE = re.compile(r"[\"\u201c\u201d']([^\"\u201c\u201d]{6,})[\"\u201c\u201d']"
 
 def check_generated(plan: TestPlan, sources: dict[str, str]) -> list[str]:
     """Every generated expected result must quote text that really is in the task or facts (or be the user's)."""
+    from .field_text import field_text
     issues = []
     all_text = _norm(" ".join(sources.values()))
     for c in plan.cases:
-        if not c.generated or c.skip_reason or not c.expected.strip():
+        if not c.generated or c.skip_reason or not field_text(c.expected).strip():
             continue
         src = (c.expected_source or "").strip()
         if not src:
@@ -69,7 +70,14 @@ _LIMIT = re.compile(r"(?:more than|less than|over|under|above|below|at least|at 
 
 def coverage_notes(plan: TestPlan, task_text: str) -> list[str]:
     """Soft hints shown at the gate: limits in the task with no case touching the value or its neighbour."""
-    case_text = " ".join(c.title + " " + c.expected + " " + " ".join(s.text for s in c.steps) for c in plan.cases)
+    from .field_text import field_text
+    case_text = " ".join(
+        " ".join(p for p in [
+            field_text(c.title, sep=" "),
+            field_text(c.expected, sep=" "),
+            *(field_text(s, sep=" ") for s in c.steps),
+        ] if p)
+        for c in plan.cases)
     nums = set(re.findall(r"\d+(?:\.\d+)?", case_text))
     notes = []
     for v in dict.fromkeys(_LIMIT.findall(task_text or "")):
@@ -77,8 +85,10 @@ def coverage_notes(plan: TestPlan, task_text: str) -> list[str]:
         near = {v, f"{n + 1:g}", f"{n - 1:g}", f"{n + 0.01:g}", f"{n - 0.01:g}"}
         if not (near & nums):
             notes.append(f"the task mentions a limit of {v}, but no case tests {v} or the value next to it")
-    if plan.cases and not any(re.search(r"invalid|wrong|empty|missing|negative|error|not allowed|reject", c.title + c.expected, re.I)
-                              for c in plan.cases):
+    if plan.cases and not any(re.search(
+            r"invalid|wrong|empty|missing|negative|error|not allowed|reject",
+            field_text(c.title, sep=" ") + " " + field_text(c.expected, sep=" "), re.I)
+            for c in plan.cases):
         notes.append("no case checks invalid or missing input")
     return notes
 
@@ -139,16 +149,20 @@ def edit_cases(plan: TestPlan, input_fn=None, out=print) -> TestPlan:
 
 def to_textile(plan: TestPlan, subject: str = "") -> str:
     """Redmine body for a "Test Cases" child task. No values from the run, no secrets."""
+    from .field_text import field_text
     out = [f"Test cases written by qa-agent from the task description{f' ({subject})' if subject else ''} "
            "and reviewed at the plan gate.", ""]
     for c in plan.cases:
-        if c.skip_reason and not c.expected:
+        if c.skip_reason and not field_text(c.expected):
             continue
-        out += [f"h3. {c.id}: {c.title}", ""]
-        if c.preconditions:
-            out += ["*Preconditions:* " + "; ".join(c.preconditions), ""]
-        out += [f"# {s.text}" for s in c.steps if not s.inferred] or ["# (see title)"]
-        out += ["", f"*Expected:* {c.expected}", f"_Source: {c.expected_source or 'n/a'}_", ""]
+        out += [f"h3. {c.id}: {field_text(c.title)}", ""]
+        pre = field_text(c.preconditions, sep="; ")
+        if pre:
+            out += ["*Preconditions:* " + pre, ""]
+        step_lines = [f"# {field_text(s)}" for s in c.steps if not s.inferred and field_text(s)]
+        out += step_lines or ["# (see title)"]
+        out += ["", f"*Expected:* {field_text(c.expected)}",
+                f"_Source: {c.expected_source or 'n/a'}_", ""]
     return redact("\n".join(out))
 
 
@@ -193,7 +207,10 @@ def add_repair_case(plan: TestPlan, pack, extensions_changed: bool = False) -> T
     Generated cases are renumbered TC2.. and depend on TC1. Cases from a Redmine Test Cases task keep their ids;
     the repair is added as TC0 with inferred (labelled) steps and every case depends on it. Idempotent."""
     app = crm_app(pack)
-    if not app or not plan.cases or any(_QRR.search(c.title + " " + " ".join(x.text for x in c.steps)) for c in plan.cases):
+    from .field_text import field_text
+    if not app or not plan.cases or any(
+            _QRR.search(field_text(c.title, sep=" ") + " " + " ".join(field_text(x, sep=" ") for x in c.steps))
+            for c in plan.cases):
         return plan
     from_task = plan.cases_source == "task"    # a Redmine Test Cases child: keep its ids, add TC0 in front
     rid = "TC0" if from_task else REPAIR_ID

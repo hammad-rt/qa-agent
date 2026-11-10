@@ -272,10 +272,10 @@ placeholders:
       find_app: crm
       client_login_app: portal
       min_value: 0.01
-      envs: [staging, local]
+      envs: [staging, preprod, local]
       blocked_note: >-
         the case needs a rewards balance above the cap, and topping it up means paying an order, which the agent
-        never does on pre-prod or production; top up the test client's wallet by hand and rerun
+        never does on production; top up the test client's wallet by hand and rerun
       find: >-
         Open the CRM contact of the test client {client} and read Current Rewards. If it is at least the redeem cap of
         the order in values_so_far (order_multi / order_earn / test_order; cap = 10% of unpaid shipping) plus $5, it is
@@ -284,7 +284,7 @@ placeholders:
         - app: portal
           text: >-
             Earn rewards: take a QA-AGENT TEST shipping-only order of {client} and pay it on the portal with the
-            Stripe test card from the Payments facts (staging only, 4242).
+            Stripe test card from the Payments facts (staging/preprod/local, 4242). Never pay on production.
         - app: crm
           text: >-
             Move that paid order to "Order Delivered" so 5% is earned. Repeat via further orders until Current
@@ -293,7 +293,8 @@ placeholders:
             Payments subpanel, Create a Paid payment for the full balance, confirm the subpanel shows the linked Paid
             payment and balance 0, then move status to Order Delivered. Note in the run that payment was made in CRM.
 
-# Data preparation, every environment (test client only; payments on production are always skipped):
+# Data preparation, every environment (test client only; card pay OK on staging/preprod/local;
+# production never pays; M-Pesa needs an explicit phone):
 # before a matching case, find a usable record or create one, then check it on the portal.
 # Create is portal (customer places order) then CRM-only (parcel Received, status steps, invoice shipping).
 data_prep:
@@ -510,10 +511,10 @@ data_prep:
     when:
       areas: [rewards, portal]
       any: ["max(imum)?", "full cap", "\\bcap\\b", "more than", "exceed", "\\bWallet\\b"]
-    envs: [staging, local]          # earning needs a payment, which never happens on pre-prod/production
+    envs: [staging, preprod, local]   # card pay OK on preprod (4242); production never pays
     blocked_note: >-
       the case needs a rewards balance above the cap, and topping it up means paying an order, which the agent
-      never does on pre-prod or production; top up the test client's wallet by hand and rerun
+      never does on production; top up the test client's wallet by hand and rerun
     app: crm
     find_app: crm
     client_login_app: portal
@@ -528,8 +529,9 @@ data_prep:
       - app: portal
         text: >-
           Earn rewards: take a QA-AGENT TEST shipping-only order of {client} and pay it on the portal with the Stripe
-          test card from the Payments facts (staging only, 4242). Portal card payment is the default when the case
-          says pay on the portal.
+          test card from the Payments facts (staging/preprod/local, 4242). Portal card payment is the default when the
+          case says pay on the portal. Never pay on production. M-Pesa only when the case calls for M-Pesa and a phone
+          number is provided; otherwise skip (do not guess a number).
       - app: crm
         text: >-
           Move that paid order to "Order Delivered" so 5% is earned. Repeat until Current Rewards is enough, then
@@ -554,9 +556,9 @@ invariants:
 
 # Safety rules: always injected into every LLM call; never pruned or demoted by context learning.
 safety_rules:
-  - text: "Stripe test card 4242 4242 4242 4242 only (staging/local). Never use a real card."
+  - text: "Stripe test card 4242 4242 4242 4242 only (staging/preprod/local). Never use a real card. Never pay on production."
     always_send: true
-  - text: "Never pay with M-Pesa in rewards cases unless the user explicitly says otherwise."
+  - text: "M-Pesa only when the case itself calls for M-Pesa AND a phone number is provided for it; without a number, skip/BLOCKED with that reason — never guess a phone. Never M-Pesa in rewards cases unless the case explicitly requires it."
     always_send: true
   - text: "No SQL or direct DB writes except Quick Repair Execute after check_repair_sql + approval."
     always_send: true
@@ -567,7 +569,7 @@ safety_rules:
 numbered_rules:
   1: "Rewards earn rate is 5% of shipping after rewards; earned only when status CHANGES to Order Delivered."
   2: "Redemption cap is at most 10% of unpaid shipping (not order total)."
-  14: "Payments for earn: Stripe test card 4242 only. Never M-Pesa."
+  14: "Payments for earn: Stripe test card 4242 only (staging/preprod/local). M-Pesa only when the case calls for it with a phone; never guess."
 
 # Deterministic (no-LLM) record lookups for CUSTOMER / data-plan find and wallet field reads.
 lookups:

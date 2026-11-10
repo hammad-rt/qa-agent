@@ -690,17 +690,20 @@ class Handler(BaseHTTPRequestHandler):
                 d = self._run(parts[2])
                 if not d:
                     return self._send(404, {"error": "no such run"})
-                if parts[3] == "guide":            # a note for the agent while the run goes; read at its next model call
+                if parts[3] == "guide":            # note for the agent; live → next model call; idle → next resume/rerun
                     from ..redact import for_user
                     text = for_user(str(b.get("text", "")).strip())[:2000]
                     if not text:
                         return self._send(400, {"error": "write something for the agent first"})
-                    if not _live(d):
-                        return self._send(409, {"error": "this run isn't going, so nothing would read it"})
+                    live = _live(d)
                     from datetime import datetime
                     with open(d / "guidance.jsonl", "a") as f:
-                        f.write(json.dumps({"at": datetime.now().isoformat(timespec="seconds"), "text": text}) + "\n")
-                    return self._send(200, {"ok": True})
+                        f.write(json.dumps({
+                            "at": datetime.now().isoformat(timespec="seconds"),
+                            "text": text,
+                            "when": "live" if live else "queued",
+                        }) + "\n")
+                    return self._send(200, {"ok": True, "queued": not live})
                 if _live(d):
                     return self._send(409, {"error": "this run is still going; stop it first"})
                 if parts[3] == "delete":

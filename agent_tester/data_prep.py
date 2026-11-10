@@ -1,6 +1,7 @@
 """Data preparation before a case: find a record the case can use (e.g. an unpaid order),
-or create one, then check it is usable. Generic: everything project-specific comes from the pack's rules. Rules come from the pack's `data_prep` list. Staging/pre-prod only;
-on production too (only for the pack test user; payments stay skipped there)."""
+or create one, then check it is usable. Generic: everything project-specific comes from the pack's rules.
+Rules come from the pack's `data_prep` list. Card pay (4242) is allowed on staging/preprod/local;
+production never pays. M-Pesa only with an explicit phone on the case."""
 from __future__ import annotations
 
 import os
@@ -15,9 +16,15 @@ PREP_MAX_ACTIONS = int(os.environ.get("PREP_MAX_ACTIONS", "120"))
 DATA_FIND_MAX_STEPS = int(os.environ.get("DATA_FIND_MAX_STEPS", "12"))
 DATA_FIND_MAX_SEARCHES = int(os.environ.get("DATA_FIND_MAX_SEARCHES", "2"))
 
-# Create parts that pay (Stripe / card / M-Pesa) are refused on preprod/production.
+# Create parts that pay (Stripe / card / M-Pesa) are refused on production only.
+# Preprod may use the Stripe test card (4242); M-Pesa needs an explicit phone (see mpesa_gate).
 _PAY_CREATE = re.compile(r"(?i)\b(pay|stripe|4242|m-?pesa|card payment|complete payment)\b")
-_NO_PAY_ENVS = frozenset({"preprod", "pre-prod", "production", "prod"})
+_CARD_CREATE = re.compile(r"(?i)\b(pay|stripe|4242|card payment|complete payment)\b")
+_MPESA = re.compile(r"(?i)\bm-?pesa\b")
+_PHONE_HINT = re.compile(
+    r"(?i)\b(?:phone|msisdn|mobile|mpesa[_\s-]?number|till)\b[:\s#=]*([+]?\d[\d\s\-()]{7,}\d)"
+    r"|(?<!\d)(\+?\d{10,15})(?!\d)")
+_NO_PAY_ENVS = frozenset({"production", "prod"})
 
 
 def _case_text(case) -> str:
@@ -545,15 +552,95 @@ def _find_exhausted(sr, rec, state, case_id: str, key: str) -> bool:
     return False
 
 
-def _create_parts_for_env(plan, rule: dict, parts: list[dict]) -> list[dict] | str:
-    """Drop/refuse pay-bearing create parts on preprod/production. Returns parts or an error string."""
+def mpesa_phone(case=None, state=None, text: str = "") -> str | None:
+    """Return a phone number provided for M-Pesa, or None. Never invent one."""
+    blobs: list[str] = [text or ""]
+    if case is not None:
+        from .field_text import field_text
+        blobs.append(field_text(getattr(case, "title", None), sep=" "))
+        blobs.append(field_text(getattr(case, "expected", None), sep=" "))
+        blobs.append(field_text(getattr(case, "preconditions", None), sep=" "))
+        blobs.append(field_text(getattr(case, "notes", None), sep=" "))
+        for s in getattr(case, "steps", None) or []:
+            blobs.append(field_text(s, sep=" "))
+    if state is not None:
+        for v in (getattr(state, "values", None) or {}).values():
+            if isinstance(v, dict):
+                blobs.append(str(v.get("value") or ""))
+            else:
+                blobs.append(str(v or ""))
+        data = getattr(state, "data", None) or {}
+        for key in ("mpesa_phone", "phone", "msisdn", "mobile"):
+            if data.get(key):
+                blobs.append(str(data[key]))
+        for r in (data.get("plan") or {}).get("requirements") or []:
+            if isinstance(r, dict) and re.search(r"(?i)phone|mpesa|msisdn|mobile", str(r.get("key") or "")):
+                blobs.append(str(r.get("value") or ""))
+    env_phone = os.environ.get("MPESA_PHONE") or os.environ.get("QA_MPESA_PHONE")
+    if env_phone:
+        blobs.append(env_phone)
+    for blob in blobs:
+        if not blob:
+            continue
+        m = _PHONE_HINT.search(str(blob))
+        if m:
+            raw = next((g for g in m.groups() if g), None)
+            if raw:
+                digits = re.sub(r"[^\d+]", "", raw)
+                if len(re.sub(r"\D", "", digits)) >= 9:
+                    return digits
+    return None
+
+
+def case_calls_for_mpesa(case=None, text: str = "") -> bool:
+    """True when the case / step text itself asks for M-Pesa (not a generic pay)."""
+    from .field_text import field_text
+    parts = [text or ""]
+    if case is not None:
+        parts += [
+            field_text(getattr(case, "title", None), sep=" "),
+            field_text(getattr(case, "expected", None), sep=" "),
+            *(field_text(s, sep=" ") for s in (getattr(case, "steps", None) or [])),
+        ]
+    return bool(_MPESA.search(" ".join(p for p in parts if p)))
+
+
+def mpesa_gate(case=None, state=None, text: str = "") -> str | None:
+    """If M-Pesa is required but no phone was provided, return a BLOCKED/skip reason; else None."""
+    blob = text or ""
+    if case is not None and not blob:
+        from .field_text import field_text
+        blob = " ".join(p for p in [
+            field_text(getattr(case, "title", None), sep=" "),
+            field_text(getattr(case, "expected", None), sep=" "),
+            *(field_text(s, sep=" ") for s in (getattr(case, "steps", None) or [])),
+        ] if p)
+    if not _MPESA.search(blob):
+        return None
+    if mpesa_phone(case=case, state=state, text=blob):
+        return None
+    return ("M-Pesa is required but no phone number was provided for it; "
+            "skip this step (do not guess a number). Provide a phone on the case, "
+            "as MPESA_PHONE, or in run values, then rerun.")
+
+
+def _create_parts_for_env(plan, rule: dict, parts: list[dict], case=None, state=None) -> list[dict] | str:
+    """Refuse pay-bearing create parts on production; allow card on preprod; gate M-Pesa on phone."""
     env = (getattr(plan, "env", None) or "").lower()
-    if env not in _NO_PAY_ENVS:
-        return parts
     kept = []
     for p in parts:
         text = p.get("text") or ""
-        if _PAY_CREATE.search(text) and not re.search(r"(?i)do not pay|don't pay|never pay", text):
+        if re.search(r"(?i)do not pay|don't pay|never pay", text):
+            kept.append(p)
+            continue
+        # M-Pesa: only when the text calls for it AND a phone is provided; else skip/block.
+        if _MPESA.search(text):
+            why = mpesa_gate(case=case, state=state, text=text)
+            if why:
+                return why
+            kept.append(p)
+            continue
+        if env in _NO_PAY_ENVS and _CARD_CREATE.search(text):
             return (f"create needs a payment step, which is not allowed on {plan.env}; "
                     f"top up / pay by hand on this environment and rerun")
         kept.append(p)
@@ -779,7 +866,7 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
                 break
             if not parts:
                 return blocked(f"nothing fits and this rule has no create step. {(sr.notes or '') if sr else ''}".strip())
-            env_parts = _create_parts_for_env(plan, rule, parts)
+            env_parts = _create_parts_for_env(plan, rule, parts, case=case, state=state)
             if isinstance(env_parts, str):
                 return blocked(env_parts)
             # Multi-app create: run each pack-tagged part in order (e.g. portal then crm).

@@ -16,13 +16,16 @@ class LLMOutputError(RuntimeError):
     """The model kept returning output that could not be parsed or validated."""
 
 
-def model(settings: Settings, json_mode: bool = False, max_tokens: int | None = None, job: str = "tester"):
+def model(settings: Settings, json_mode: bool = False, max_tokens: int | None = None, job: str = "tester",
+          temperature: float | None = None):
     """json_mode asks the server for a syntactically valid JSON object (vLLM supports it). LLM_JSON_MODE=0 turns it off."""
     import os
     from google.adk.models.lite_llm import LiteLlm
     extra = {"max_tokens": max_tokens or int(os.environ.get("LLM_MAX_TOKENS", "8192"))}   # the server's default is only 512
     if json_mode and os.environ.get("LLM_JSON_MODE", "1") != "0":
         extra["response_format"] = {"type": "json_object"}
+    if temperature is not None:
+        extra["temperature"] = float(temperature)
     from ..redact import effective_api_key
     base, name, key = job_model(settings, job)
     # Placeholder keys (none/null/empty) become a dummy — vLLM often needs no real key.
@@ -98,10 +101,21 @@ def repair_json(raw: str) -> str:
     return s
 
 
+def _empty_llm_reply(raw: str, data: dict | None = None) -> str | None:
+    """Plain-language reason when the model returned nothing usable (empty text or {})."""
+    if data == {}:
+        return "empty object {}"
+    if not (raw or "").strip():
+        return "no text"
+    return None
+
+
 async def run_json(agent, prompt: str, settings: Settings, *, validate=None, label: str = "llm",
-                   raw_dir=None, trace_path=None, attempts: int = 3):
+                   raw_dir=None, trace_path=None, attempts: int = 3, on_attempt=None):
     """Run an agent that must answer with JSON. On a parse or validation error the raw reply is saved
-    (masked) and the model is asked to correct it, up to `attempts` times. Returns validate(data) or data."""
+    (masked) and the model is asked to correct it, up to `attempts` times. Returns validate(data) or data.
+
+    ``on_attempt(n, attempts, err, raw)`` is called after each failed try (for console/progress logs)."""
     from pydantic import ValidationError
 
     from ..redact import redact, scrub_secrets
@@ -110,18 +124,30 @@ async def run_json(agent, prompt: str, settings: Settings, *, validate=None, lab
         raw = await run_agent(agent, ask, settings, trace_path=trace_path, retry=True)
         try:
             data = extract_json(raw)
-            if data == {} and validate:
-                raise ValueError("the reply was an empty object {}; fill in every field of the schema")
+            empty = _empty_llm_reply(raw, data)
+            if empty and validate:
+                raise ValueError(f"the reply was an {empty}; fill in every field of the schema")
             return validate(data) if validate else data
         except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as e:
             last_err = str(e).splitlines()[0][:300] if isinstance(e, json.JSONDecodeError) else str(e)[:1500]
             if isinstance(e, json.JSONDecodeError) and _cut_off(raw):
                 last_err += " - the reply looks cut off; keep it shorter (short step texts, no extra fields)"
+            empty = _empty_llm_reply(raw, None if not (raw or "").strip() else ({} if (raw or "").strip() == "{}" else None))
+            if on_attempt:
+                try:
+                    on_attempt(n, attempts, last_err, raw or "")
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                why = empty or last_err
+                print(f"{label}: attempt {n}/{attempts} failed ({why})")
             if raw_dir:
                 from pathlib import Path
                 Path(raw_dir).mkdir(parents=True, exist_ok=True)
                 (Path(raw_dir) / f"{label}_raw_{n}.txt").write_text(scrub_secrets(redact(raw or "")))
-            ask = (f"{prompt}\n\nYour previous reply could not be used: {last_err}\n"
+            nudge = (" Return a JSON object with a non-empty cases array covering every requested id."
+                     if empty or "empty object" in last_err or "no text" in last_err else "")
+            ask = (f"{prompt}\n\nYour previous reply could not be used: {last_err}.{nudge}\n"
                    f"Previous reply:\n{(raw or '')[:20000]}\n\nReply again with ONLY the corrected JSON object, nothing else.")
     where = f" Raw replies are in {raw_dir}." if raw_dir else ""
     raise LLMOutputError(f"{label}: the model returned unusable JSON {attempts} times ({last_err}).{where}")

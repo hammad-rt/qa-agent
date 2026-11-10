@@ -46,6 +46,29 @@ class WebDomShell(unittest.TestCase):
         self.assertIn("prompt-pin", css)
         self.assertIn("max-height:min(30vh", css.replace(" ", ""))
 
+    def test_run_card_actions_stay_compact(self):
+        """Sidebar run cards: title row truncates, actions are a kebab, no Delete while running."""
+        css, _, rest = self.html.partition("</style>")
+        script = rest
+        self.assertIn(".run .tid", css)
+        self.assertIn("text-overflow:ellipsis", css)
+        self.assertIn(".run .tpills", css)
+        self.assertIn(".racts.open", css)
+        self.assertIn(".rmenu", css)
+        compact = css.replace(" ", "")
+        self.assertIn("run:hover.racts", compact)
+        self.assertIn("run.sel.racts", compact)
+        self.assertIn("run.is-run.racts", compact)
+        self.assertIn("function runCardHtml", script)
+        self.assertIn('aria-haspopup="menu"', script)
+        self.assertIn("Can't delete while this run is going", script)
+        self.assertIn("is-run", script)
+        # Two icon buttons in the title row would fight the pills; actions live in the menu.
+        self.assertNotRegex(
+            script,
+            r'class="racts"><button class="sm icon[^"]*" title="Rename"',
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

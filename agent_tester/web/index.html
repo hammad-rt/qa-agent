@@ -12,16 +12,18 @@
   --sans:"IBM Plex Sans","Segoe UI",system-ui,-apple-system,sans-serif;
   --mono:"JetBrains Mono","Fira Code",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   color-scheme:dark}
-*{box-sizing:border-box}html,body{height:100%}
-body{margin:0;font:15px/1.5 var(--sans);background:var(--bg);color:var(--text);display:flex;height:100vh;-webkit-font-smoothing:antialiased}
+*{box-sizing:border-box}
+html,body{height:100%;height:100dvh;max-height:100dvh;overflow:hidden}
+body{margin:0;font:15px/1.5 var(--sans);background:var(--bg);color:var(--text);display:flex;height:100dvh;max-height:100dvh;overflow:hidden;-webkit-font-smoothing:antialiased}
 svg.i{width:16px;height:16px;flex:0 0 16px;vertical-align:-3px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-aside{width:330px;flex:0 0 330px;min-width:0;overflow:hidden;border-right:1px solid var(--line);display:flex;flex-direction:column;background:var(--panel)}
-main{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--bg);position:relative}
-h1{font-size:15px;letter-spacing:.02em;margin:0;padding:16px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}
+aside{width:330px;flex:0 0 330px;min-width:0;min-height:0;height:100%;overflow:hidden;border-right:1px solid var(--line);display:flex;flex-direction:column;background:var(--panel)}
+main{flex:1 1 0;display:flex;flex-direction:column;min-width:0;min-height:0;height:100%;overflow:hidden;background:var(--bg);position:relative}
+main>.head,#phaseBar,#guideRow,.tabs,#nowDoing{flex:0 0 auto}
+h1{font-size:15px;letter-spacing:.02em;margin:0;padding:16px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;flex:0 0 auto}
 h1 .logo{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;background:linear-gradient(135deg,#15803d,#22c55e);color:#fff}
 h1 small{font-weight:400;color:var(--mute);font-size:12px;margin-left:auto}
 h2{font-size:16px;margin:0 0 8px;font-weight:600}
-.new{padding:14px 18px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:minmax(0,1fr);gap:8px}
+.new{padding:14px 18px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:minmax(0,1fr);gap:8px;flex:0 0 auto}
 .new .row{display:flex;gap:8px;min-width:0}.new .row>*{flex:1 1 0;min-width:0}.new .row select{flex:0 0 120px}.row.rbar>*{flex:none}
 .fl{font-size:12px;color:var(--mute);margin-bottom:-4px}
 input,select,button,textarea{min-width:0;max-width:100%;font:inherit;font-size:14px;color:var(--text);background:#0B1220;border:1px solid var(--line2);border-radius:var(--r-sm);padding:8px 10px;transition:border-color var(--t),background var(--t),box-shadow var(--t),transform var(--t)}
@@ -36,7 +38,7 @@ button.sec{background:transparent;border-color:var(--line2);color:var(--text)}bu
 button.dan{background:transparent;border-color:#7f1d1d;color:var(--bad)}button.dan:hover{background:var(--bad-bg);border-color:var(--bad)}
 button.ghost{background:transparent;border-color:transparent;color:var(--mute)}button.ghost:hover{background:var(--raise);color:var(--text)}
 .row{display:flex;gap:8px;align-items:center}.row>*{flex:1}
-#runs{overflow:auto;flex:1;padding:6px 8px 12px}
+#runs{overflow:auto;flex:1 1 0;min-height:0;padding:6px 8px 12px}
 .run{padding:10px 12px;margin:4px 0;border:1px solid transparent;border-radius:var(--r);cursor:pointer;transition:background var(--t),border-color var(--t)}
 .run:hover{background:var(--panel2);border-color:var(--line)}.run.sel{background:var(--raise);border-color:#166534;box-shadow:inset 3px 0 0 var(--acc)}
 .run .t{font-weight:600;display:flex;align-items:center;gap:6px}.run .t .grow{flex:1}
@@ -56,38 +58,52 @@ button.ghost{background:transparent;border-color:transparent;color:var(--mute)}b
 @keyframes pulse{50%{opacity:.25}}
 @keyframes pinIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
 @keyframes waitPulse{0%,100%{box-shadow:0 0 0 0 #fbbf2444}50%{box-shadow:0 0 0 6px #fbbf2400}}
-.tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);padding:0 14px;overflow-x:auto;background:var(--panel)}
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);padding:0 14px;overflow-x:auto;background:var(--panel);flex:0 0 auto;z-index:4}
 .tab{padding:11px 14px;cursor:pointer;color:var(--mute);border-bottom:2px solid transparent;display:flex;align-items:center;gap:7px;white-space:nowrap;font-weight:500;transition:color var(--t),border-color var(--t)}
 .tab:hover{color:var(--text)}.tab.on{color:var(--text);border-color:var(--acc)}
-.pane{flex:1;overflow:auto;padding:18px 20px;display:none}.pane.on{display:block}
-.head{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;background:var(--panel)}
+.pane{flex:1 1 0;min-height:0;overflow:auto;padding:18px 20px;display:none}.pane.on{display:block}
+.head{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;background:var(--panel);flex:0 0 auto}
 .head h2{display:flex;align-items:center;gap:8px;margin:0 0 2px}
 .head .acts{display:flex;gap:8px;flex-wrap:wrap}.head .acts>span{display:inline-flex;gap:8px;flex-wrap:wrap}
-.phasebar{display:flex;gap:0;align-items:center;padding:10px 20px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,#152033,#0F172A);overflow-x:auto}
+.phasebar{display:flex;gap:0;align-items:center;padding:10px 20px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,#152033,#0F172A);overflow-x:auto;flex:0 0 auto}
 .phase{display:flex;align-items:center;gap:8px;color:var(--mute);font-size:12.5px;font-weight:600;white-space:nowrap;padding:4px 0}
 .phase .dot{width:10px;height:10px;border-radius:50%;background:var(--line2);border:2px solid var(--line2);flex:0 0 10px}
 .phase.done{color:var(--ok)}.phase.done .dot{background:var(--ok);border-color:var(--ok)}
 .phase.active{color:var(--text)}.phase.active .dot{background:var(--acc);border-color:var(--acc);box-shadow:0 0 0 4px var(--acc-soft)}
 .phase.skipped{color:#475569;text-decoration:line-through}.phase.skipped .dot{background:transparent;border-style:dashed}
 .phase .chev{width:14px;height:14px;margin:0 10px;opacity:.45;flex:0 0 14px}
-.subwrap{padding:10px 20px 12px;border-bottom:1px solid var(--line);background:var(--panel)}
+.subwrap{padding:8px 20px 10px;border-bottom:1px solid var(--line);background:var(--panel);flex:0 1 auto;max-height:min(16vh,140px);overflow:auto;min-height:0}
 .pretasks{display:grid;gap:6px;margin:8px 0 4px}
 .pretask{display:grid;grid-template-columns:minmax(0,1.2fr) auto auto minmax(0,1.4fr);gap:10px;align-items:center;padding:8px 12px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--panel2);font-size:13px}
 .pretask.running{border-color:#0369a1;background:var(--run-bg)}
 .pretask .id{font-family:var(--mono);font-weight:600}
 .pretask .cur{color:var(--mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @media (max-width:900px){.pretask{grid-template-columns:1fr 1fr;}.pretask .cur{grid-column:1/-1}}
-.prompt-pin{position:sticky;top:0;z-index:20;padding:12px 20px 0;background:linear-gradient(180deg,var(--bg) 70%,transparent);animation:pinIn var(--t) both}
-.prompt-pin:empty{display:none;padding:0}
-.ask{display:flex;gap:10px;padding:14px;border:1px solid #a16207;border-radius:var(--r);background:var(--warn-bg);margin-bottom:12px;align-items:flex-start;box-shadow:var(--sh);animation:waitPulse 2s ease-in-out 2}
+.prompt-pin{z-index:20;padding:8px 20px 0;background:var(--bg);animation:pinIn var(--t) both;flex:0 1 auto;max-height:min(30vh,260px);overflow:auto;min-height:0}
+.prompt-pin:empty{display:none;padding:0;max-height:0}
+.ask{display:flex;gap:10px;padding:12px;border:1px solid #a16207;border-radius:var(--r);background:var(--warn-bg);margin-bottom:10px;align-items:flex-start;box-shadow:var(--sh);animation:waitPulse 2s ease-in-out 2}
 .ask.appr{border-color:var(--acc);background:#052e16}
 .ask.stuck{border-color:#c2410c;background:#431407}
 .ask .ask-head{font-weight:700;display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
 .ask .ask-body{white-space:pre-wrap;font-size:14px;line-height:1.45}
 .ask .ask-acts{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;margin-top:10px}
 .ask .cd{font-family:var(--mono);font-size:12px;color:var(--warn);margin-left:auto}
-.wait-banner{display:none;align-items:center;gap:10px;padding:8px 14px;margin:0 0 10px;border-radius:var(--r-sm);background:#422006;border:1px solid #a16207;color:#fde68a;font-weight:600}
+.ask .stuck-grid{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(140px,.7fr);gap:12px;align-items:start}
+.ask .stuck-meta{display:grid;gap:6px;font-size:13.5px}
+.ask .stuck-meta b{color:var(--text)}.ask .stuck-meta .k{color:var(--mute);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.ask .shot-thumb{width:100%;max-height:140px;object-fit:cover;object-position:top;border-radius:var(--r-sm);border:1px solid var(--line);cursor:zoom-in;background:#0B1220}
+.ask .sugs{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.ask .sugs button{font-size:12.5px;min-height:32px;padding:4px 10px}
+.chat{display:flex;flex-direction:column;gap:6px;max-height:120px;overflow:auto;margin:8px 0;padding:8px;border:1px solid var(--line);border-radius:var(--r-sm);background:#0B1220}
+.chat .m{font-size:13px;line-height:1.4}.chat .m.user{color:#bbf7d0}.chat .m.agent{color:#e2e8f0}
+.chat .who{font-size:11px;color:var(--mute);font-family:var(--mono)}
+.wait-banner{display:none;align-items:center;gap:10px;padding:6px 14px;margin:0 0 8px;border-radius:var(--r-sm);background:#422006;border:1px solid #a16207;color:#fde68a;font-weight:600;flex:0 0 auto}
 .wait-banner.on{display:flex}
+.now-doing{display:none;gap:12px;align-items:center;padding:8px 20px;border-bottom:1px solid var(--line);background:linear-gradient(90deg,#0c1a12,#0F172A 55%);flex:0 0 auto}
+.now-doing.on{display:flex}.now-doing .txt{flex:1;min-width:0}.now-doing .lbl{font-size:11px;color:var(--mute);text-transform:uppercase;letter-spacing:.04em}
+.now-doing .line{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.now-doing .page{font-size:12.5px;color:var(--mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.now-doing img{width:96px;height:54px;object-fit:cover;object-position:top;border-radius:6px;border:1px solid var(--line);cursor:zoom-in;background:#0B1220;flex:0 0 auto}
 .dataplan{border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;margin:0 0 12px;background:var(--panel)}
 .dataplan h3{margin:0 0 8px;font-size:14px;color:var(--acc)}
 .dataplan table{font-size:13px}
@@ -97,8 +113,8 @@ button.ghost{background:transparent;border-color:transparent;color:var(--mute)}b
 .attempts .att.cur{border-color:var(--acc);color:var(--text)}
 .casehist{font-size:12px;color:var(--mute);margin-top:4px}
 pre.console{background:#020617;border:1px solid var(--line);border-radius:var(--r);padding:12px;white-space:pre-wrap;max-height:42vh;overflow:auto;margin:0 0 12px;font:12.5px/1.55 var(--mono);color:#E2E8F0}
-.guide{display:flex;gap:8px;align-items:flex-start;margin:0 0 12px;padding:12px;border:1px dashed var(--line2);border-radius:var(--r);background:#0B1220}
-.guide textarea{flex:1;min-height:64px}
+.guide{display:flex;gap:8px;align-items:flex-start;margin:0;padding:10px 20px;border:0;border-bottom:1px dashed var(--line2);border-radius:0;background:#0B1220;flex:0 0 auto}
+.guide textarea{flex:1;min-height:48px;max-height:72px}
 .guide .hint{font-size:12.5px;color:var(--mute);margin-top:4px}
 .ev{border-left:2px solid var(--line2);padding:6px 12px;margin-left:6px;font-size:14px}
 .ev.step{border-color:var(--acc)}.ev.fin{border-color:var(--ok)}.ev.err{border-color:var(--bad);background:#2a1012}
@@ -137,7 +153,14 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc);cursor:point
 .mem textarea{width:100%;min-height:80px}.mfil{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
 .stats{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px}.stat{background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-sm);padding:4px 10px;font-size:13px}.stat b{font-size:15px;margin-right:4px}
 ::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:#334155;border-radius:10px;border:2px solid var(--bg)}::-webkit-scrollbar-thumb:hover{background:#475569}
-@media (max-width:900px){body{flex-direction:column;height:auto;min-height:100vh}aside{width:100%;flex:0 0 auto;max-height:45vh;border-right:0;border-bottom:1px solid var(--line)}.pane{overflow:visible}.prompt-pin{position:static}}
+@media (max-width:900px){
+  body{flex-direction:column;height:100dvh;max-height:100dvh;overflow:hidden}
+  aside{width:100%;flex:0 0 38dvh;max-height:38dvh;height:38dvh;border-right:0;border-bottom:1px solid var(--line)}
+  main{flex:1 1 0;min-height:0;height:auto}
+  .pane{overflow:auto}
+  .prompt-pin{max-height:min(28vh,220px)}
+  .ask .stuck-grid{grid-template-columns:1fr}
+}
 @media (prefers-reduced-motion:reduce){*,*::before{transition:none!important;animation:none!important}}
 </style></head><body>
 <aside>
@@ -148,19 +171,22 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc);cursor:point
     <input id="caseIds" aria-label="Cases to run" placeholder="Cases (optional), e.g. TC1,TC2">
     <input id="casesFile" aria-label="Test cases file" title="Use the cases in this file instead of the ticket's Redmine Test Cases task. Runs only this ticket." placeholder="Cases file (optional), e.g. /path/test-cases.md">
     <label class="mute" title="Ignore stored discovery maps and map the UI fresh"><input type="checkbox" id="rediscover"> Force rediscovery</label>
+    <label class="mute" title="Launch Playwright with a visible browser window so you can watch each step. Falls back to headless if no display is available."><input type="checkbox" id="headed"> Show browser (headed)</label>
     <div class="row"><button class="pri" onclick="start(false)"><svg class="i" viewBox="0 0 24 24"><path d="M6 4l14 8-14 8z"/></svg>Start run</button><button class="sec" onclick="start(true)" title="Draft the plan and answer its questions without testing. The next Start run of the same task and environment continues from this plan.">Plan only</button></div>
     <div id="startErr" class="mute" role="alert" style="color:var(--bad)"></div>
   </div>
   <div id="runs" aria-label="Runs"></div>
 </aside>
-<main><div id="staleBar" role="alert" style="display:none;position:fixed;left:50%;transform:translateX(-50%);bottom:16px;z-index:50;max-width:720px;box-shadow:0 6px 20px #0008;background:#3b2a05;color:#fde68a;border:1px solid #a16207;border-radius:8px;padding:8px 12px;margin:0 0 10px">The web UI server is running older code than this page, so some choices (like &ldquo;Only this ticket&rdquo;) are ignored. When no run is going, stop <code>agent_tester web</code> and start it again.</div>
+<main><div id="staleBar" role="alert" style="display:none;position:fixed;left:50%;transform:translateX(-50%);bottom:16px;z-index:50;max-width:720px;box-shadow:0 6px 20px #0008;background:#3b2a05;color:#fde68a;border:1px solid #a16207;border-radius:8px;padding:8px 12px;margin:0 0 10px;pointer-events:none">The web UI server is running older code than this page, so some choices (like &ldquo;Only this ticket&rdquo;) are ignored. When no run is going, stop <code>agent_tester web</code> and start it again.</div>
   <div class="head"><div><h2 id="title" aria-live="polite">Pick a run or start one</h2><div id="headMeta" class="mute"></div></div>
     <div class="acts"><button id="execBtn" class="pri" onclick="execPlan()" style="display:none" title="Run the cases of this plan-only draft, with the answers you already gave">Run this plan</button><button id="resumeBtn" onclick="resume()" style="display:none">Resume</button><span id="rerunBtns" style="display:none"><button id="rerunAll" onclick="rerun({})" title="Continue in this run window: archive the last attempt and rerun every case">Rerun all</button><button id="rerunFailed" onclick="rerun({failed:true})" title="Continue in this run window: only cases that did not pass">Rerun not passed</button><button onclick="rerun({new_run:true})" title="Same plan, but open a brand-new run folder">Start fresh</button><button onclick="fresh()" title="Plan this task again from scratch, then run">New plan</button></span><button id="stopBtn" class="dan" onclick="stopJob()" style="display:none">Stop</button></div></div>
   <div id="phaseBar" class="phasebar" aria-label="Run phase" style="display:none"></div>
+  <div id="nowDoing" class="now-doing" aria-live="polite"><div class="txt"><div class="lbl">Now doing</div><div class="line" id="nowLine">—</div><div class="page" id="nowPage"></div></div><img id="nowShot" alt="Latest page screenshot" style="display:none" onclick="zoom(this.src)"></div>
   <div id="promptPin" class="prompt-pin" aria-live="assertive"></div>
-  <div id="subwrap" class="subwrap" style="display:none"><div id="waitBanner" class="wait-banner" role="status"></div><div id="sub"></div></div>
-  <div id="guideRow" class="guide" aria-label="Guidance for the agent" style="margin:10px 20px 0"><div style="flex:1;display:flex;flex-direction:column;gap:4px;min-width:0"><textarea id="guideIn" rows="2" onkeydown="if(event.key=='Enter'&&(event.ctrlKey||event.metaKey))sendGuide()" aria-label="Guidance for the agent" placeholder="Guide the agent, e.g. &quot;the phone field is under Contact details&quot;. No passwords."></textarea><div id="guideHint" class="hint"></div></div><div style="display:flex;flex-direction:column;gap:6px"><button class="pri" onclick="sendGuide()">Send to agent</button><span id="guideMsg" class="mute" role="status"></span></div></div>
-  <div class="tabs" role="tablist"><div class="tab on" data-p="live" role="tab" tabindex="0" aria-selected="true" data-i="live">Live</div><div class="tab" data-p="cases" role="tab" tabindex="0" data-i="list">Cases</div><div class="tab" data-p="shots" role="tab" tabindex="0" data-i="img">Screenshots</div><div class="tab" data-p="log" role="tab" tabindex="0" data-i="act">Actions</div><div class="tab" data-p="report" role="tab" tabindex="0" data-i="doc">Report</div><div class="tab" data-p="know" role="tab" tabindex="0" data-i="book">Knowledge</div><div class="tab" data-p="mem" role="tab" tabindex="0" data-i="db">Memory</div></div>
+  <div id="waitBanner" class="wait-banner" role="status"></div>
+  <div id="subwrap" class="subwrap" style="display:none"><div id="sub"></div></div>
+  <div id="guideRow" class="guide" aria-label="Guidance for the agent"><div style="flex:1;display:flex;flex-direction:column;gap:4px;min-width:0"><textarea id="guideIn" rows="2" onkeydown="if(event.key=='Enter'&&(event.ctrlKey||event.metaKey))sendGuide()" aria-label="Guidance for the agent" placeholder="Guide the agent, e.g. &quot;the phone field is under Contact details&quot;. No passwords."></textarea><div id="guideHint" class="hint"></div></div><div style="display:flex;flex-direction:column;gap:6px"><button class="pri" onclick="sendGuide()">Send to agent</button><span id="guideMsg" class="mute" role="status"></span></div></div>
+  <div class="tabs" role="tablist" id="tabBar"><div class="tab on" data-p="live" role="tab" tabindex="0" aria-selected="true" data-i="live">Live</div><div class="tab" data-p="cases" role="tab" tabindex="0" data-i="list">Cases</div><div class="tab" data-p="shots" role="tab" tabindex="0" data-i="img">Screenshots</div><div class="tab" data-p="log" role="tab" tabindex="0" data-i="act">Actions</div><div class="tab" data-p="report" role="tab" tabindex="0" data-i="doc">Report</div><div class="tab" data-p="know" role="tab" tabindex="0" data-i="book">Knowledge</div><div class="tab" data-p="mem" role="tab" tabindex="0" data-i="db">Memory</div></div>
   <div id="live" class="pane on">
     <div id="consoleWrap" style="display:none"><div class="mute">Agent console</div><pre class="console" id="console"></pre></div>
     <div class="toolbar"><b>Steps</b><label><input type="checkbox" id="showReads" onchange="$('#events').classList.toggle('hideReads',!this.checked)"> show page reads</label><label><input type="checkbox" id="follow" checked> follow live</label></div><div id="events" class="hideReads"><div class="empty">No steps yet.</div></div>
@@ -239,19 +265,20 @@ async function loadRuns(){try{const rs=await api('/api/runs');const ids=new Set(
  window._runs=rs;
  setHTML('#runs',(rs.length?bar:'')+rs.map(r=>`<div class="run ${r.id==cur?'sel':''}" tabindex="0" role="button" aria-label="Run for task ${esc(r.task)}" onkeydown="if(event.key=='Enter')openRun('${r.id}')" onclick="openRun('${r.id}')"><div class="t"><input type="checkbox" class="rsel" ${sel.has(r.id)?'checked':''} onclick="event.stopPropagation();togSel('${r.id}',this.checked)"> #${esc(r.task)} <span class="pill ${r.status}">${esc(stLabel(r.status))}</span>${r.phase?`<span class="pill">${esc(r.phase)}</span>`:''}<span class="grow"></span><span class="racts"><button class="sm icon ghost" title="Rename" aria-label="Rename run" onclick="event.stopPropagation();renameRun('${r.id}')">${ic('edit')}</button><button class="sm icon dan" title="Delete" aria-label="Delete run" onclick="event.stopPropagation();delRun('${r.id}')">${ic('trash')}</button></span></div>${r.label?`<div class="lbl">${esc(r.label)}</div>`:''}${progress(r.counts,r.cases)}<div class="mute">${esc(r.env||'')} · ${r.done}/${r.cases} cases${r.current?` · now <b>${esc(String(r.current).split('.').slice(-1)[0])}</b>`:''}${r.elapsed_sec!=null?` · ${esc(fmtDur(r.elapsed_sec))}`:''} · ${esc((r.started||'').replace('T',' ').slice(0,16))}</div><div>${pills(r.counts)}</div></div>`).join('')||'<div class="empty">No runs yet. Enter a Redmine task number and start.</div>')}catch(e){}}
 function openRun(id){if(cur!==id){cur=id;showConsole();traceNext=0;blocks=[];openBlock=null;$('#events').innerHTML='';}loadRuns();refresh()}
-async function start(dry){$('#startErr').textContent='';try{job=await api('/api/start',{task:$('#task').value,env:$('#env').value,cases:$("#caseIds").value,cases_file:$('#casesFile').value,dry_run:dry,subtasks:$('#scope').value!=='only',rediscover:!!$('#rediscover')?.checked});outLen=0;jobOut='';jobBase='';cur=null;$('#events').innerHTML='';$('#title').textContent='Starting #'+$('#task').value+'…';pollJob()}catch(e){$('#startErr').textContent=e.message}}
+function headedOpt(){return!!($('#headed')&&$('#headed').checked)}
+async function start(dry){$('#startErr').textContent='';try{job=await api('/api/start',{task:$('#task').value,env:$('#env').value,cases:$("#caseIds").value,cases_file:$('#casesFile').value,dry_run:dry,subtasks:$('#scope').value!=='only',rediscover:!!$('#rediscover')?.checked,headed:headedOpt()});outLen=0;jobOut='';jobBase='';cur=null;$('#events').innerHTML='';$('#title').textContent='Starting #'+$('#task').value+'…';pollJob()}catch(e){$('#startErr').textContent=e.message}}
 async function rerun(o){if(!cur)return;if(job&&job.running){alert('A run is still going; stop it or wait for it to finish.');return}
  const what=o.new_run?'Start fresh in a new run folder (same plan)?':o.cases?'Rerun case '+o.cases+' in this same run window?':o.failed?'Rerun the cases that did not pass in this same run window?':$('#rerunAll').dataset.mode=='start'?'Start this task again (it stopped before planning)?':'Rerun all cases in this same run window (archives the last attempt)?';if(!confirm(what))return;
- try{const keep=cur;const b=o.failed?await baseFor(cur):'';job=await api('/api/start',{rerun:cur,...o});outLen=0;jobOut='';jobBase=b;
+ try{const keep=cur;const b=o.failed?await baseFor(cur):'';job=await api('/api/start',{rerun:cur,...o,headed:headedOpt()});outLen=0;jobOut='';jobBase=b;
   if(o.new_run){cur=null;$('#events').innerHTML='';$('#title').textContent='Starting fresh…'}
   else{cur=keep;traceNext=0;blocks=[];openBlock=null;$('#events').innerHTML='';$('#title').textContent='Rerunning (same run)…'}
   pollJob()}catch(e){alert(e.message||e)}}
 async function fresh(){if(!cur)return;if(job&&job.running){alert('A run is still going; stop it or wait for it to finish.');return}
  if(!confirm('Plan this task again from scratch and run it?'))return;
- try{job=await api('/api/start',{fresh:cur});outLen=0;jobOut='';jobBase='';cur=null;$('#events').innerHTML='';$('#title').textContent='Planning again…';pollJob()}catch(e){alert(e.message||e)}}
+ try{job=await api('/api/start',{fresh:cur,headed:headedOpt()});outLen=0;jobOut='';jobBase='';cur=null;$('#events').innerHTML='';$('#title').textContent='Planning again…';pollJob()}catch(e){alert(e.message||e)}}
 async function execPlan(){if(!cur)return;if(job&&job.running){alert('A run is still going; stop it or wait for it to finish.');return}
- try{const b=await baseFor(cur);job=await api('/api/start',{execute:cur});outLen=0;jobOut='';jobBase=b;cur=null;$('#events').innerHTML='';$('#title').textContent='Running the drafted plan…';pollJob()}catch(e){alert(e.message||e)}}
-async function resume(){try{const b=await baseFor(cur);job=await api('/api/start',{resume:cur});outLen=0;jobOut='';jobBase=b;pollJob()}catch(e){alert(e.message)}}
+ try{const b=await baseFor(cur);job=await api('/api/start',{execute:cur,headed:headedOpt()});outLen=0;jobOut='';jobBase=b;cur=null;$('#events').innerHTML='';$('#title').textContent='Running the drafted plan…';pollJob()}catch(e){alert(e.message||e)}}
+async function resume(){try{const b=await baseFor(cur);job=await api('/api/start',{resume:cur,headed:headedOpt()});outLen=0;jobOut='';jobBase=b;pollJob()}catch(e){alert(e.message)}}
 async function stopJob(){if(job&&confirm('Stop this run? It pauses and can be resumed.'))job=await api(`/api/jobs/${job.id}/stop`,{})}
 
 /* ---- Pending prompt (pinned) ---- */
@@ -272,42 +299,64 @@ function approvalCard(p,meta){if(!/\[y\/N\]:?\s*$/i.test(p||''))return '';
  const head=m?m[1]:p.replace(/\[y\/N\]:?\s*$/i,''),code=m?m[2]:'',tail=m?m[3].replace(/\[y\/N\]:?\s*$/i,''):'';
  const title=(meta&&meta.title)||(code?'New tool requested':'Approval needed');
  return `<div class="ask appr" style="flex-direction:column;align-items:stretch"><div class="ask-head">${ic('alert')}${esc(title)}<span class="cd" id="askCd"></span></div><div class="ask-body">${esc(head.trim())}</div>${code?`<pre style="max-height:280px;overflow:auto;background:#020617;padding:8px;border-radius:6px;margin:8px 0;font:12px var(--mono)">${esc(code)}</pre>`:''}<div class="ask-body">${esc(tail.trim())}</div><div class="ask-acts"><button class="dan" onclick="decide('n')">Decline</button><button class="pri" onclick="decide('y')">Approve</button></div></div>`}
-function stuckCard(p,meta){
- const body=esc((p||'').replace(/\s*Reply with 1:<text>[\s\S]*$/i,'').trim());
- return `<div class="ask stuck" style="flex-direction:column;align-items:stretch"><div class="ask-head">${ic('alert')}${(meta&&meta.title)||'Stuck — waiting for your answer'}<span class="cd" id="askCd"></span></div><div class="ask-body">${body}</div>
-  <label class="fl" for="stuckGuide">Guidance for the agent</label>
-  <textarea id="stuckGuide" rows="2" placeholder="e.g. open the Payments subpanel under the contact" aria-label="Guidance text"></textarea>
-  <div class="ask-acts"><button class="dan" onclick="stuckAct('stop')">${ic('stop')} Stop run</button><button class="sec" onclick="stuckAct('skip')">Skip case</button><button class="pri" onclick="stuckAct('guide')">${ic('bulb')} Send guidance</button></div>
-  <div class="mute" style="margin-top:6px">Primary: guide · Secondary: skip · Danger: stop. Same answers as 1:/2:/3: on the CLI.</div></div>`}
+function stuckShotUrl(name){if(!name||!cur)return'';return `/api/runs/${cur}/file?path=shots/${encodeURIComponent(name)}`}
+function chatHtml(thread){const rows=(thread||[]);if(!rows.length)return'<div class="mute">No messages yet — ask a question or pick a suggestion. The agent will not continue until you press Continue.</div>';
+ return rows.map(m=>`<div class="m ${esc(m.role||'')}"><div class="who">${esc(m.role==='user'?'You':'Agent')}</div>${esc(m.text||'')}</div>`).join('')}
+function stuckCard(p,meta,stuck){
+ stuck=stuck||{};
+ const shot=stuck.screenshot?`<img class="shot-thumb" alt="Latest page" src="${esc(stuckShotUrl(stuck.screenshot))}" onclick="zoom(this.src)"><div class="mute" style="margin-top:4px;font-size:11px">shots/${esc(stuck.screenshot)}</div>`:'<div class="mute">No screenshot yet</div>';
+ const tried=(stuck.tried||[]).map(t=>esc(t)).join('; ')||'—';
+ const seeing=(stuck.seeing||[]).map(t=>esc(t)).join('; ')||'—';
+ const sugs=(stuck.suggestions||[]).map((s,i)=>`<button class="sec" onclick="stuckSug(${i})">${esc(s)}</button>`).join('');
+ const body=stuck.case_id?'' : esc((p||'').replace(/\s*Reply with[\s\S]*$/i,'').trim());
+ const metaHtml=stuck.case_id?`<div class="stuck-meta">
+   <div><div class="k">Goal</div><b>${esc(stuck.case_id)}</b> · ${esc(stuck.step_label||'before step 1')}<div>${esc(stuck.goal||'')}</div></div>
+   <div><div class="k">Where</div>${esc(stuck.app||'')} · ${esc(stuck.page_title||'')} <code>${esc(stuck.page_path||'')}</code>${stuck.wizard_heading?` · Wizard: <b>${esc(stuck.wizard_heading)}</b>`:''}</div>
+   <div><div class="k">Tried</div>${tried}</div>
+   <div><div class="k">Sees</div>${seeing}</div>
+   <div><div class="k">Likely issue</div>${esc(stuck.guess||stuck.why||'')}</div>
+  </div>`:`<div class="ask-body">${body}</div>`;
+ return `<div class="ask stuck" style="flex-direction:column;align-items:stretch"><div class="ask-head">${ic('alert')}${(meta&&meta.title)||'Stuck — waiting for your answer'}<span class="cd" id="askCd"></span></div>
+  <div class="stuck-grid">${metaHtml}<div>${shot}</div></div>
+  ${sugs?`<div class="sugs" aria-label="Suggested replies">${sugs}</div>`:''}
+  <div class="ask-acts"><button class="dan" onclick="stuckAct('stop')">${ic('stop')} Stop run</button><button class="sec" onclick="stuckAct('skip')">Skip case</button><button class="sec" onclick="stuckAct('chat')">${ic('bulb')} Send</button><button class="pri" onclick="stuckAct('go')">${ic('play')} Continue</button></div>
+  <div class="chat" id="stuckChat">${chatHtml(stuck.thread||[])}</div>
+  <label class="fl" for="stuckGuide">Message to the agent</label>
+  <textarea id="stuckGuide" rows="2" placeholder="Ask a question or give guidance. It will reply; the case stays paused until Continue." aria-label="Stuck chat message" onkeydown="if(event.key=='Enter'&&(event.ctrlKey||event.metaKey))stuckAct('chat')"></textarea>
+  <div class="mute" style="margin-top:6px">Chat freely, then Continue / type go. Skip and Stop still end the case or run.</div></div>`}
 function genericAsk(p,secret,meta){
  return `<div class="ask" style="flex-direction:column;align-items:stretch"><div class="ask-head">${ic('alert')}${esc((meta&&meta.title)||'Waiting for your answer')}<span class="cd" id="askCd"></span></div><div class="ask-body">${esc(p)}</div><div class="ask-acts" style="align-items:center"><input id="ans" type="${secret?'password':'text'}" autocomplete="off" placeholder="Type an answer, or leave empty for the default" onkeydown="if(event.key=='Enter')answer()" style="flex:1"><button class="pri" onclick="answer()">Send</button></div></div>`}
 function askIdOf(j){return (j&&j.ask_id)||($('#promptPin')&&$('#promptPin').dataset.ask)||''}
 function renderPrompt(j){const pin=$('#promptPin'),banner=$('#waitBanner');
  if(!j||!j.waiting||!j.prompt){clearPromptUi();return}
  const meta={kind:j.prompt_kind||'question',title:j.prompt_title||'',timeout_sec:j.prompt_timeout_sec};
- const key=(j.ask_id||'')+'|'+(j.prompt||'')+(j.waiting_since||'');
- const isStuck=meta.kind==='stuck_ask'||/Options:\s*\(1\)\s*give guidance/i.test(j.prompt);
- const html=isStuck?stuckCard(j.prompt,meta):approvalCard(j.prompt,meta)||genericAsk(j.prompt,j.secret,meta);
+ const key=(j.ask_id||'')+'|'+(j.prompt||'')+(j.waiting_since||'')+'|'+JSON.stringify(j.stuck||{}).slice(0,80);
+ const isStuck=meta.kind==='stuck_ask'||meta.kind==='stuck_chat'||/Options:\s*\(1\)\s*(give guidance|send a chat)/i.test(j.prompt)||/^Stuck on\s+/i.test(j.prompt||'');
+ const html=isStuck?stuckCard(j.prompt,meta,j.stuck||{}):approvalCard(j.prompt,meta)||genericAsk(j.prompt,j.secret,meta);
  banner.classList.add('on');banner.innerHTML=`${ic('alert')} Waiting for your answer${meta.title?': '+esc(meta.title):''}`;
- if(pin.dataset.p===j.prompt&&pin.dataset.ask===(j.ask_id||'')&&pin.innerHTML){startCountdown($('#askCd'),j.waiting_since,meta.timeout_sec||(isStuck?600:null));return}
+ if(pin.dataset.p===j.prompt&&pin.dataset.ask===(j.ask_id||'')&&pin.innerHTML&&!j.stuck){startCountdown($('#askCd'),j.waiting_since,meta.timeout_sec||(isStuck?600:null));return}
  pin.dataset.p=j.prompt;pin.dataset.ask=j.ask_id||'';pin.innerHTML=html;
  startCountdown($('#askCd'),j.waiting_since,meta.timeout_sec||(isStuck?600:null));
- // Focus + surface when a new prompt appears (user asked not to hunt in the log).
  if(key!==lastPromptKey){lastPromptKey=key;startTitleFlash('Waiting for answer — QA Agent');maybeNotify(meta.title||'QA Agent needs input',j.prompt);
-  requestAnimationFrame(()=>{pin.scrollIntoView({block:'start',behavior:matchMedia('(prefers-reduced-motion:reduce)').matches?'auto':'smooth'});
+  requestAnimationFrame(()=>{try{pin.scrollTop=0}catch(e){}
    const focusEl=$('#stuckGuide')||$('#ans');if(focusEl)try{focusEl.focus({preventScroll:true})}catch(e){}})}}
 async function decide(v){if(!job)return;try{await api(`/api/jobs/${job.id}/input`,{text:v,ask_id:askIdOf(job)});clearPromptUi()}catch(e){alert(e.message||e)}}
 async function answer(){if(!job)return;const i=$('#ans');try{await api(`/api/jobs/${job.id}/input`,{text:i?i.value:'',ask_id:askIdOf(job)});clearPromptUi()}catch(e){alert(e.message||e)}}
+async function stuckSug(i){const s=((job&&job.stuck&&job.stuck.suggestions)||[])[i];if(!s)return;const g=$('#stuckGuide');if(g)g.value=s;stuckAct('chat')}
 async function stuckAct(kind){if(!job)return;let text='';
- if(kind==='guide'){const g=($('#stuckGuide')||{}).value||'';if(!g.trim()){($('#stuckGuide')||{focus(){}}).focus();return}text='1:'+g.trim()}
+ if(kind==='chat'||kind==='guide'){const g=($('#stuckGuide')||{}).value||'';if(!g.trim()){($('#stuckGuide')||{focus(){}}).focus();return}text=g.trim()}
+ else if(kind==='go'){text='go'}
  else if(kind==='skip'){const r=prompt('Reason to skip this case (optional):','')??null;if(r===null)return;text='2:'+(r||'skipped from UI')}
  else{if(!confirm('Stop the whole run?'))return;const r=prompt('Reason to stop (optional):','')??'';text='3:'+(r||'stopped from UI')}
- try{await api(`/api/jobs/${job.id}/input`,{text,ask_id:askIdOf(job)});clearPromptUi()}catch(e){alert(e.message||e)}}
+ try{await api(`/api/jobs/${job.id}/input`,{text,ask_id:askIdOf(job)});
+  if(kind==='go'||kind==='skip'||kind==='stop')clearPromptUi();
+  else{const g=$('#stuckGuide');if(g)g.value='';/* chat: keep pin; next ASK redraws the thread */}}
+ catch(e){alert(e.message||e)}}
 async function pollJob(){try{
  if(!job||!job.running){const js=await api('/api/jobs');const r=js.find(x=>x.running);if(r&&(!job||r.id!==job.id)){job=r;outLen=0;jobOut='';jobBase=''}}
  if(!job)return;const j=await api(`/api/jobs/${job.id}/out?since=${outLen}`);outLen=j.len;job=j;jobOut+=j.out;
  if(j.run_dir&&cur!==j.run_dir&&(cur===null||(j.waiting&&followed!==j.prompt))){if(j.waiting)followed=j.prompt;cur=j.run_dir;traceNext=0;blocks=[];openBlock=null;$('#events').innerHTML='';loadRuns()}
- if(j.waiting)renderPrompt(j);else if($('#promptPin').dataset.p)clearPromptUi();
+ if(j.waiting){job.stuck=j.stuck||job.stuck;renderPrompt(j)}else if($('#promptPin').dataset.p)clearPromptUi();
  $('#stopBtn').style.display=j.running?'':'none';guideShow();if(!j.running){if($('#promptPin').innerHTML)clearPromptUi();loadRuns()}showConsole()}catch(e){
  // The web server was restarted: its old job is gone. Drop it so the run going now (and its Stop button) is picked up.
  if(job&&/no job/.test(e.message||'')){job=null;outLen=0;jobOut='';jobBase='';clearPromptUi()}}}
@@ -379,6 +428,16 @@ function drawBlocks(){const box=$('#events');const open=new Set([...box.querySel
    const r=lastResults[b.id]||{},v=b.verdict||r.verdict,jr=b.judgeFromResults?(r.verdict?verdictHtml(r):'<div class="verdict mute">Waiting for the judge\'s saved verdict…</div>'):'';
    return `<details class="blk" data-id="${esc(b.id)}" ${o?'open':''}><summary><b>${esc(b.id)}</b> <span>${esc(b.title||caseTitle(b.id))}</span> ${v?vpill(v):(isLast&&!b.closed&&b.id!='plan'?'<span class="pill running">in progress</span>':'')}</summary><div class="body">${b.html}${jr}</div></details>`}).join('')||'<div class="empty">No steps yet. Steps appear here while the agent works.</div>');
   {const p=$('#live');if($('#follow').checked&&p._stick!==false)p.scrollTop=p.scrollHeight}}
+function renderNowDoing(nd,shots){
+  const box=$('#nowDoing');if(!box)return;
+  if(!nd||!(nd.line||nd.screenshot||(shots&&shots.length))){box.classList.remove('on');return}
+  box.classList.add('on');
+  setHTML('#nowLine',esc(nd.line||nd.case_id||'—'));
+  setHTML('#nowPage',esc(nd.page||nd.page_path||''));
+  const img=$('#nowShot');const name=nd.screenshot||(shots&&shots.length?shots[shots.length-1]:'');
+  if(img&&name&&cur){img.src=stuckShotUrl(name);img.style.display='';img.alt='Latest: '+name}
+  else if(img){img.style.display='none';img.removeAttribute('src')}
+}
 async function refresh(){if(!cur)return;let d;
  try{d=await api(`/api/runs/${cur}`)}catch(e){return}
  lastPlan=d.plan;picked=(d.mode||{}).cases||null;lastResults=d.results||{};lastPhase=d.phase||null;
@@ -388,6 +447,7 @@ async function refresh(){if(!cur)return;let d;
   setHTML('#headMeta',`${s.elapsed_sec!=null?ic('clock')+' '+esc(fmtDur(s.elapsed_sec))+' · ':''}${esc(s.last||'')}`);
   const steps=(d.phase&&d.phase.steps)||s.phase_steps||[];
   const pb=$('#phaseBar');if(steps.length){pb.style.display='flex';setHTML(pb,phaseHtml(steps))}else pb.style.display='none';
+  renderNowDoing(d.now_doing,d.shots);
   const sw=$('#subwrap');sw.style.display='block';
   const pre=(d.phase&&d.phase.pre_tasks)||s.pre_tasks||[];
   const curCase=(d.phase&&d.phase.current_case)||s.current;

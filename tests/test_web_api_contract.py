@@ -21,6 +21,7 @@ DETAIL_KEYS = {
     "summary", "plan", "results", "values", "checkpoints", "ledger", "action_log",
     "shots", "progress", "reports", "model", "mode", "data_plan", "phase",
     "attempt", "attempt_history", "data_reuse", "previous_attempts",
+    "now_doing", "stuck_chat",
 }
 PHASE_KEYS = {"active", "steps", "pre_tasks", "current_case"}
 
@@ -124,6 +125,41 @@ class WebApiContract(unittest.TestCase):
                 lines = (d / "guidance.jsonl").read_text().strip().splitlines()
                 self.assertEqual(json.loads(lines[-1])["text"], "use Advanced Search")
                 self.assertEqual(json.loads(lines[-1])["when"], "queued")
+
+    def test_start_accepts_headed_flag(self):
+        """Web UI checkbox wires --headed into the Job argv (resume/rerun/start)."""
+        started = []
+
+        class FakeJob:
+            def __init__(self, args):
+                started.append(list(args))
+                self.id = "j1"
+                self.args = args
+            def info(self, since=0):
+                return {"id": self.id, "args": self.args, "running": False, "out": "", "len": 0,
+                        "waiting": False, "prompt": "", "ask_id": ""}
+
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            d = _fixture(root)
+            with mock.patch.object(W, "RUNS", root), mock.patch.object(W, "Job", FakeJob), \
+                    mock.patch.object(W, "JOBS", {}):
+                class H(W.Handler):
+                    def __init__(self):
+                        self.path = "/api/start"
+                        self.headers = {"Content-Length": "0"}
+                        self._code = self._resp = None
+                    def _body(self):
+                        return {"resume": d.name, "headed": True}
+                    def _run(self, name):
+                        return d if name == d.name else None
+                    def _send(self, code, obj, **kw):
+                        self._code, self._resp = code, obj
+                h = H()
+                h.do_POST()
+                self.assertEqual(h._code, 200)
+                self.assertTrue(started)
+                self.assertIn("--headed", started[0])
 
 
 if __name__ == "__main__":

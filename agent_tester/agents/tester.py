@@ -260,7 +260,23 @@ def browser_env() -> dict:
 
 
 def headed() -> bool:
-    return os.environ.get("QA_HEADED", "") in ("1", "true", "yes")
+    """True when the user asked for a visible browser and a display is available.
+
+    QA_HEADED=1 / --headed request headed mode. With no DISPLAY / WAYLAND_DISPLAY we fall back to
+    headless and warn instead of crashing (CI, SSH, headless VMs).
+    """
+    want = os.environ.get("QA_HEADED", "") in ("1", "true", "yes")
+    if not want:
+        return False
+    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        return True
+    if not getattr(headed, "_warned", False):
+        headed._warned = True  # type: ignore[attr-defined]
+        msg = ("QA_HEADED=1 / --headed requested but neither DISPLAY nor WAYLAND_DISPLAY is set; "
+               "falling back to headless so the run can continue.")
+        log.warning(msg)
+        print(f"WARNING: {msg}", file=sys.stderr)
+    return False
 
 
 def browser_home(run_dir: Path) -> Path:
@@ -468,6 +484,8 @@ class TesterSession:
         self.actions = 0                # calls that act on the browser/app; capped by max_calls
         self.since_progress = 0         # actions since the last new mark_step
         self._sigs: dict[str, int] = {} # call signature -> repeats since the last new mark_step
+        self._sig_page: dict[str, str] = {}  # intent/sig -> page hash when last counted
+        self._need_fresh_snap = False        # set after a click/fill that changed the page
         self.result = StepResult(case_id=self.case_id, app=app)
         self.finished = False
         self.keep_emails = keep_emails
@@ -951,12 +969,18 @@ class TesterSession:
         now = time.monotonic()
         last_act, last_snap = getattr(self, "_last_act", 0.0), getattr(self, "_last_snap", 0.0)
         if name in ACTING_TOOLS:
+            # After a prior click/fill that changed the page, refuse the next action until a fresh snapshot.
+            # Use `is True` so MagicMock attributes in unit tests do not look truthy by accident.
+            if getattr(self, "_need_fresh_snap", False) is True and name != "browser_navigate":
+                return {"error": "The page changed after your last click/fill. Take a fresh browser_snapshot "
+                                 "and use only refs from that snapshot before acting again."}
             self._last_act = now
             self._page_fresh = False
         elif name in ("browser_snapshot", "browser_take_screenshot", "browser_find"):
             if last_act and now - last_act < settle:          # pages update 3-8 s late: let them settle
                 time.sleep(settle - (now - last_act))
             self._last_snap = time.monotonic()
+            self._need_fresh_snap = False
         elif name == "record_value" and last_act and last_act > last_snap:
             # Auto page state after a click/type updates _last_snap; only insist on a fresh read when it did not.
             if not getattr(self, "_page_fresh", False):
@@ -970,6 +994,23 @@ class TesterSession:
             self.unread_input = ref or None
         elif name in ("browser_snapshot", "browser_find", "record_value"):
             self.unread_input = None
+        # Stale refs: refuse element targets missing from the latest snapshot.
+        if name in ("browser_click", "browser_type", "browser_fill_form", "browser_select_option",
+                    "browser_hover", "paste_text"):
+            ref = str(args.get("target") or args.get("ref") or "").removeprefix("ref=").strip()
+            snap = self.last_snapshot if isinstance(self.last_snapshot, str) else ""
+            if ref and snap and not self._ref_in_snapshot(ref, snap):
+                return {"error": (
+                    f"Element ref {ref!r} is not in the latest snapshot (stale after a page/wizard change). "
+                    "Call browser_snapshot, then act only on refs from that fresh read."
+                )}
+            label = str(args.get("element") or args.get("name") or "")
+            if name == "browser_click" and _SUBMIT.search(label) and self._control_disabled(label, snap):
+                return {"error": (
+                    f"{label!r} is disabled on the current page. Do not click it again. "
+                    "Find the unfilled required choice on this wizard/step (radio, checkbox, or dropdown), "
+                    "fill it, take a fresh browser_snapshot, then click Continue/Next only when it is enabled."
+                )}
         entered = self.state.data.setdefault("entered_values", {}).setdefault(self.case_id, {})
         if name in ("browser_type", "paste_text") and args.get("text") is not None:
             key = f"{re.sub(r'[^a-z0-9 ]', '', str(args.get('element') or '').lower()).strip()}={args.get('text')}"
@@ -1164,8 +1205,18 @@ class TesterSession:
             self.actions += 1
             self.since_progress += 1
             sig = _call_sig(name, args)
-            self._sigs[sig] = self._sigs.get(sig, 0) + 1
             intent = _intent_sig(name, args, self.last_snapshot)   # same target reached by reworded calls/refs
+            # Same element after a page/wizard change is not a true repeat — reset that intent's counter.
+            page_h = getattr(self, "_page_hash", None) or ""
+            self._sig_page = getattr(self, "_sig_page", {}) or {}
+            for key in (sig, intent):
+                if not key:
+                    continue
+                prev_page = self._sig_page.get(key)
+                if prev_page and page_h and prev_page != page_h:
+                    self._sigs[key] = 0
+                self._sig_page[key] = page_h
+            self._sigs[sig] = self._sigs.get(sig, 0) + 1
             if intent:
                 self._sigs[intent] = self._sigs.get(intent, 0) + 1
             n = max(self._sigs[sig], self._sigs.get(intent, 0) if intent else 0)
@@ -1273,35 +1324,90 @@ class TesterSession:
             return bool(sys.stdin and sys.stdin.isatty())
         return bool(sys.stdin and sys.stdin.isatty())
 
-    def _stuck_question(self, why: str) -> str:
-        tried = [t for t in dict.fromkeys(getattr(self, "_recent", [])) if t][-6:]
-        page = ""
-        if isinstance(self.last_snapshot, dict):
-            page = str(self.last_snapshot.get("url") or self.last_snapshot.get("title") or "")[:120]
-        elif isinstance(self.last_snapshot, str):
-            page = self.last_snapshot[:120]
-        return (
-            f"Stuck on {self.case_id} (step {self.current_step or '?'}): {why}.\n"
-            f"Tried: {'; '.join(tried) or 'none'}.\n"
-            f"Page: {page or '(unknown)'}.\n"
-            f"Options: (1) give guidance (free text)  (2) skip this case  (3) stop the run\n"
-            f"Reply with 1:<text>, 2:<reason>, or 3:<reason> (wait up to {STUCK_ASK_TIMEOUT_SEC}s): "
+    def _stuck_summary(self, why: str, thread: list | None = None) -> dict:
+        from ..stuck_summary import build_stuck_summary
+        brief = dict(self.brief or {})
+        if getattr(self, "result", None) is not None:
+            brief["steps_done"] = list(self.result.steps_done or [])
+        return build_stuck_summary(
+            brief=brief, case_id=self.case_id, app=self.app or "",
+            current_step=self.current_step, why=why,
+            recent=list(getattr(self, "_recent", []) or []),
+            snapshot=self.last_snapshot, run_dir=self.state.dir,
+            screenshots=list(getattr(self.result, "screenshots", None) or []),
+            timeout_sec=STUCK_ASK_TIMEOUT_SEC, thread=thread or [],
         )
 
+    def _stuck_question(self, why: str, thread: list | None = None) -> str:
+        from ..stuck_summary import format_stuck_prompt
+        return format_stuck_prompt(self._stuck_summary(why, thread=thread))
+
+    def _ask_stuck_line(self, prompt: str, ask_id: str, *, summary: dict | None = None) -> str:
+        """One interactive stuck prompt (web ASK carries structured summary for the UI)."""
+        from ..auto import ask_line, web_mode
+        import signal
+        ans = ""
+
+        def _timeout(signum, frame):  # noqa: ARG001
+            raise TimeoutError("stuck ask timed out")
+
+        old = None
+        try:
+            old = signal.signal(signal.SIGALRM, _timeout)
+            signal.alarm(max(1, STUCK_ASK_TIMEOUT_SEC))
+        except (ValueError, AttributeError, OSError):
+            old = None
+        try:
+            if web_mode() and summary is not None:
+                # Enrich the ASK marker so the web UI can render chat + screenshot + suggestions.
+                payload = {"prompt": prompt.strip(), "secret": False, "ask_id": ask_id,
+                           "kind": "stuck_chat", "stuck": summary}
+                sys.stdout.write("\x1eASK " + json.dumps(payload) + "\n")
+                sys.stdout.flush()
+                # Read the matching answer the same way ask_line does (without re-emitting ASK).
+                from ..auto import flush_stdin, _parse_answer_line
+                flush_stdin()
+                while True:
+                    line = sys.stdin.readline()
+                    if not line:
+                        raise EOFError("no answer (the web UI closed the run)")
+                    text, got_id = _parse_answer_line(line)
+                    if got_id and got_id != ask_id:
+                        continue
+                    ans = text
+                    break
+            else:
+                ans = ask_line(f"\n{prompt}", ask_id=ask_id)
+        finally:
+            try:
+                signal.alarm(0)
+                if old is not None:
+                    signal.signal(signal.SIGALRM, old)
+            except (ValueError, AttributeError, OSError):
+                pass
+        return (ans or "").strip()
+
     def _maybe_stuck_ask(self, *, why: str, name: str, repeats: int) -> dict | None:
-        """After explore (or a 2nd loop), ask the user before blocking. Returns a tool error to continue,
-        or None to proceed with the normal stop. Unattended auto: log the would-be question and return None."""
-        # Only after exploring already ran, or when a prior stuck-ask already happened this case (2nd loop).
+        """After explore (or a 2nd loop), open a conversational stuck ask before blocking.
+
+        Interactive / web: chat until the user says go/continue (or skip/stop). Everything said
+        becomes guidance. Non-interactive: log the would-be question and return None (no block).
+        """
+        from ..stuck_summary import (agent_chat_reply, format_stuck_prompt, is_continue,
+                                     load_thread, persist_thread)
+        from ..redact import scrub_user_answer
+
         explored = bool(getattr(self, "_explored", False))
         asks = int(getattr(self, "_stuck_asks", 0))
         if not explored and asks == 0:
             return None
         if asks >= STUCK_ASK_MAX_PER_CASE:
             return None
-        q = self._stuck_question(why)
         self._stuck_asks = asks + 1
+        thread = load_thread(self.state.dir, self.case_id)
+        summary = self._stuck_summary(why, thread=thread)
+        q = format_stuck_prompt(summary)
         if not self._can_stuck_ask():
-            # Unattended: keep current stop behaviour but put the question in the report / progress.log.
             note = f"Stuck ask (unattended, no answerer): {q.strip()}"
             self.state.data.setdefault("notes", []).append(note)
             self.state.log_action(case_id=self.case_id, app=self.app, tool="stuck_ask",
@@ -1313,84 +1419,112 @@ class TesterSession:
                     f.write(f"{datetime.now().isoformat(timespec='seconds')} {note}\n")
             except OSError:
                 pass
+            persist_thread(self.state.dir, self.case_id, thread, summary)
             self.state.save()
             return None
-        from ..auto import ask_line
+
         import uuid
-        ask_id = f"stuck-{self.case_id}-{uuid.uuid4().hex[:8]}"
-        ans = ""
-        try:
-            # Best-effort timeout: alarm is Unix-only; without it, ask_line blocks until answer/EOF.
-            import signal
-
-            def _timeout(signum, frame):  # noqa: ARG001
-                raise TimeoutError("stuck ask timed out")
-
-            old = None
+        guidance_bits: list[str] = []
+        deadline = time.time() + max(1, STUCK_ASK_TIMEOUT_SEC)
+        final_kind, final_rest = None, ""
+        while time.time() < deadline:
+            left = max(1, int(deadline - time.time()))
+            summary = self._stuck_summary(why, thread=thread)
+            summary["timeout_sec"] = left
+            q = format_stuck_prompt(summary)
+            ask_id = f"stuck-{self.case_id}-{uuid.uuid4().hex[:8]}"
             try:
-                old = signal.signal(signal.SIGALRM, _timeout)
-                signal.alarm(max(1, STUCK_ASK_TIMEOUT_SEC))
-            except (ValueError, AttributeError, OSError):
-                old = None
-            try:
-                # ask_line flushes buffered stdin and tags the prompt so a prior stuck-ask answer
-                # (e.g. CONTACT-*) cannot auto-answer PREP-*-create.
-                ans = ask_line(f"\n{q}", ask_id=ask_id).strip()
-            finally:
-                try:
-                    signal.alarm(0)
-                    if old is not None:
-                        signal.signal(signal.SIGALRM, old)
-                except (ValueError, AttributeError, OSError):
-                    pass
-        except (EOFError, TimeoutError):
-            ans = ""
-        from ..redact import scrub_user_answer
-        safe_ans = scrub_user_answer(ans)[:500]
-        self.state.log_action(case_id=self.case_id, app=self.app, tool="stuck_ask",
-                              args={"why": why, "question": q[:500], "answer": safe_ans, "ask_id": ask_id},
-                              plan_step=self.current_step, outcome="answered" if ans else "timeout")
-        self.state.data.setdefault("notes", []).append(
-            f"Stuck ask on {self.case_id}: {why}; ask_id={ask_id}; answer={safe_ans[:200] or '(none)'}")
-        self.state.save()
-        if not ans:
-            return None  # fall through to normal block
-        # Parse 1:/2:/3: or bare keywords off the raw answer (not the scrubbed display form).
-        kind, rest = "guidance", ans
-        m = re.match(r"^\s*([123])\s*[:.\-\s]\s*(.*)$", ans, re.S)
-        if m:
-            kind = {"1": "guidance", "2": "skip", "3": "stop"}[m.group(1)]
-            rest = (m.group(2) or "").strip()
-        elif re.match(r"(?i)^\s*(skip|block)\b", ans):
-            kind, rest = "skip", re.sub(r"(?i)^\s*(skip|block)\b[:\s]*", "", ans).strip()
-        elif re.match(r"(?i)^\s*(stop|abort|quit)\b", ans):
-            kind, rest = "stop", re.sub(r"(?i)^\s*(stop|abort|quit)\b[:\s]*", "", ans).strip()
-        elif re.match(r"(?i)^\s*(guide|guidance|help)\b", ans):
-            kind, rest = "guidance", re.sub(r"(?i)^\s*(guide|guidance|help)\b[:\s]*", "", ans).strip()
+                ans = self._ask_stuck_line(q, ask_id, summary=summary)
+            except (EOFError, TimeoutError):
+                ans = ""
+            safe_ans = scrub_user_answer(ans)[:500]
+            self.state.log_action(case_id=self.case_id, app=self.app, tool="stuck_ask",
+                                  args={"why": why, "question": q[:500], "answer": safe_ans,
+                                        "ask_id": ask_id, "chat": True},
+                                  plan_step=self.current_step,
+                                  outcome="answered" if ans else "timeout")
+            if not ans:
+                persist_thread(self.state.dir, self.case_id, thread, summary)
+                self.state.save()
+                return None
+            kind, rest = "chat", ans
+            m = re.match(r"^\s*([123])\s*[:.\-\s]\s*(.*)$", ans, re.S)
+            if m:
+                kind = {"1": "chat", "2": "skip", "3": "stop"}[m.group(1)]
+                rest = (m.group(2) or "").strip()
+            elif re.match(r"(?i)^\s*s([123])\b", ans):
+                sm = re.match(r"(?i)^\s*s([123])\b[:\s]*(.*)$", ans)
+                idx = int(sm.group(1)) - 1 if sm else 0
+                sug = (summary.get("suggestions") or [])
+                rest = (sm.group(2) or "").strip() or (sug[idx] if idx < len(sug) else ans)
+                kind = "chat"
+            elif re.match(r"(?i)^\s*(skip|block)\b", ans):
+                kind, rest = "skip", re.sub(r"(?i)^\s*(skip|block)\b[:\s]*", "", ans).strip()
+            elif re.match(r"(?i)^\s*(stop|abort|quit)\b", ans):
+                kind, rest = "stop", re.sub(r"(?i)^\s*(stop|abort|quit)\b[:\s]*", "", ans).strip()
+            elif is_continue(ans) or is_continue(rest):
+                kind, rest = "go", rest or "go"
 
-        if kind == "skip":
+            if kind == "skip":
+                final_kind, final_rest = "skip", rest
+                break
+            if kind == "stop":
+                final_kind, final_rest = "stop", rest
+                break
+            if kind == "go":
+                final_kind, final_rest = "go", "\n".join(guidance_bits + ([rest] if rest and rest.lower() not in {"go", "continue"} else []))
+                break
+
+            # Conversational turn: reply, persist, do NOT continue the case yet.
+            user_text = rest or ans
+            thread.append({"role": "user", "text": scrub_user_answer(user_text)[:500]})
+            guidance_bits.append(user_text)
+            reply = agent_chat_reply(summary, user_text)
+            thread.append({"role": "agent", "text": reply})
+            persist_thread(self.state.dir, self.case_id, thread, summary)
+            self.state.data.setdefault("notes", []).append(
+                f"Stuck chat on {self.case_id}: user={scrub_user_answer(user_text)[:200]}")
+            self.state.save()
+            # Loop: ask again with the updated thread in the prompt.
+            continue
+        else:
+            persist_thread(self.state.dir, self.case_id, thread, summary)
+            return None
+
+        if final_kind == "skip":
             self.result.limit_hit = True
             self.result.stuck = True
             self.result.loop = True
-            self.result.notes = f"BLOCKED: skipped by user after stuck ask: {rest or why}"
+            self.result.notes = f"BLOCKED: skipped by user after stuck ask: {final_rest or why}"
             self.finished = True
-            return {"error": f"User skipped this case: {rest or why}. Call finish(notes, stuck=True) now."}
-        if kind == "stop":
+            persist_thread(self.state.dir, self.case_id, thread, summary)
+            return {"error": f"User skipped this case: {final_rest or why}. Call finish(notes, stuck=True) now."}
+        if final_kind == "stop":
             self.result.limit_hit = True
             self.result.stuck = True
-            self.result.notes = f"Run stop requested after stuck ask: {rest or why}"
+            self.result.notes = f"Run stop requested after stuck ask: {final_rest or why}"
             self.finished = True
+            persist_thread(self.state.dir, self.case_id, thread, summary)
             from ..coordinator import RunPaused
-            raise RunPaused(f"User stopped the run at {self.case_id}: {rest or why}")
-        # guidance: reset loop counters once and feed GUIDANCE into the same session
+            raise RunPaused(f"User stopped the run at {self.case_id}: {final_rest or why}")
+
+        # go / continue: reset counters and feed the full conversation as guidance.
         self._sigs, self._recent, self.since_progress, self._reads = {}, [], 0, 0
+        self._sig_page = {}
         self._explored = False
         self.result.limit_hit = False
         self.result.loop = False
-        guidance = rest or ans
-        self._guidance_notes = getattr(self, "_guidance_notes", []) + [f"GUIDANCE FROM THE USER (stuck ask): {guidance}"]
+        guidance = (final_rest or "\n".join(guidance_bits) or why).strip()
+        thread.append({"role": "user", "text": "go", "continue": True})
+        persist_thread(self.state.dir, self.case_id, thread, summary)
+        self._guidance_notes = getattr(self, "_guidance_notes", []) + [
+            f"GUIDANCE FROM THE USER (stuck chat; continue):\n{guidance}"
+        ]
+        self.state.data.setdefault("notes", []).append(
+            f"Stuck ask on {self.case_id}: continued with guidance ({len(guidance_bits)} turns)")
+        self.state.save()
         return {"error": (
-            f"GUIDANCE FROM THE USER (stuck ask; loop counters reset once):\n- {guidance}\n"
+            f"GUIDANCE FROM THE USER (stuck chat; loop counters reset once):\n- {guidance}\n"
             f"Your {name} call was NOT run. Follow the guidance, then continue. "
             f"Approvals and safety rules still apply."
         )}
@@ -1500,6 +1634,7 @@ class TesterSession:
         """Trim, store hash, mark fresh; return trimmed text."""
         trimmed = trim_page(text or "", MAX_PAGE_CHARS)
         h = page_hash(trimmed)
+        prev = getattr(self, "_page_hash", None)
         self.last_snapshot = trimmed
         self._page_state = trimmed
         self._page_hash = h
@@ -1511,7 +1646,52 @@ class TesterSession:
             by_app[self.app or ""] = trimmed
         except Exception:  # noqa: BLE001
             pass
+        if prev and h and prev != h:
+            # Page body changed: same-element clicks on the *new* page are not a true repeat.
+            self._sig_page = {}
+            self._publish_now_doing()
+        else:
+            self._publish_now_doing()
         return trimmed
+
+    def _publish_now_doing(self) -> None:
+        """Write a plain-language Live strip into state.json (case, step, page, latest shot)."""
+        try:
+            from ..stuck_summary import build_now_doing
+            brief = dict(self.brief or {})
+            if getattr(self, "result", None) is not None:
+                brief["steps_done"] = list(self.result.steps_done or [])
+            info = build_now_doing(
+                brief=brief, case_id=self.case_id, app=self.app or "",
+                current_step=self.current_step, snapshot=self.last_snapshot,
+                screenshots=list(getattr(self.result, "screenshots", None) or []),
+                run_dir=self.state.dir, status="running",
+            )
+            self.state.data["now_doing"] = info
+            self.state.save()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _ref_in_snapshot(self, ref: str, snapshot: str | None = None) -> bool:
+        snap = snapshot if snapshot is not None else (
+            self.last_snapshot if isinstance(self.last_snapshot, str) else "")
+        if not ref or not snap:
+            return False
+        ref = str(ref).removeprefix("ref=").strip()
+        return f"ref={ref}]" in snap or f"ref={ref} " in snap or f"[ref={ref}]" in snap
+
+    def _control_disabled(self, label: str, snapshot: str | None = None) -> bool:
+        snap = snapshot if snapshot is not None else (
+            self.last_snapshot if isinstance(self.last_snapshot, str) else "")
+        if not label or not snap:
+            return False
+        lab = re.escape(re.sub(r"\s+", " ", label).strip())
+        if not lab:
+            return False
+        for ln in snap.splitlines():
+            if re.search(lab, ln, re.I) and re.search(r"(?i)\[disabled", ln):
+                return True
+        return False
 
     def after_tool(self, tool, args, tool_context, tool_response):
         t0 = getattr(self, "_tool_t0", None)
@@ -1565,7 +1745,10 @@ class TesterSession:
             # Auto page state: after every state-changing tool, return a trimmed snapshot with the result
             # so the model never needs a separate browser_snapshot turn.
             if is_state_changing(tool.name, text) and not err:
-                if result_already_has_page(text):
+                before_h = getattr(self, "_page_hash", None)
+                captured = ""
+                had_page = result_already_has_page(text)
+                if had_page:
                     trimmed = self._remember_page(text)
                     out = merge_page_into_result(out, trimmed, keep_emails=self.keep_emails, cap=MAX_PAGE_CHARS)
                 else:
@@ -1578,9 +1761,18 @@ class TesterSession:
                         # Still attach last known state so the model does not immediately re-snapshot.
                         out = merge_page_into_result(out, self._page_state, keep_emails=self.keep_emails,
                                                      cap=MAX_PAGE_CHARS)
+                after_h = getattr(self, "_page_hash", None)
+                if tool.name in ("browser_click", "browser_type", "browser_fill_form",
+                                 "browser_select_option", "browser_press_key"):
+                    # Wizard / SPA step changes: next action must use refs from a fresh snapshot.
+                    if before_h and after_h and before_h != after_h:
+                        self._need_fresh_snap = True
+                    elif not had_page and not captured:
+                        self._need_fresh_snap = True
             elif tool.name == "browser_snapshot":
                 trimmed = getattr(self, "_page_state", "") or trim_page(text, MAX_PAGE_CHARS)
                 out = _cap_obj(_redact_obj({"result": trimmed}, self.keep_emails), MAX_PAGE_CHARS)
+                self._need_fresh_snap = False
             return out
         return None
 

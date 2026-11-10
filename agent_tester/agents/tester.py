@@ -1034,6 +1034,14 @@ class TesterSession:
         if name == "record_value" and not (last_act and last_act > last_snap):
             self.since_progress, self._sigs = 0, {}          # a value read back is progress too
         if name == "mark_step" and args.get("n") not in self.result.steps_done:
+            # Refuse "done" when the agent only hammered the same control with no verified progress.
+            same = self._identical_action_tail(LOOP_STOP)
+            if same:
+                return {"error": (
+                    f"Cannot mark this step done: the last {LOOP_STOP} actions were identical "
+                    f"({same}) with no verified progress. Try a different control, or "
+                    f"finish(notes, stuck=True)."
+                )}
             self.since_progress, self._sigs, self.saves, self.misses = 0, {}, 0, 0          # real progress: fresh per-step allowance
             self._explored, self._recent, self._reads = False, [], 0
         # Hard denies before the stuck-attempt budget so known-bad URLs don't burn attempts.
@@ -1045,6 +1053,12 @@ class TesterSession:
                     name, args,
                     "this URL already returned an XSRF / acceptable-referer page; "
                     "open the screen via the discovery menu path instead of deep-linking again")
+        # Prefer a stable element label before repeat counting (models often pass only a changing ref).
+        if name in ("browser_click", "browser_type", "browser_select_option") and not str(args.get("element") or "").strip():
+            snap = self.last_snapshot if isinstance(self.last_snapshot, str) else ""
+            lab = _label_of(str(args.get("target") or args.get("ref") or "").removeprefix("ref=").strip(), snap)
+            if lab:
+                args["element"] = lab
         limit = self._budget_check(name, args)
         if limit:
             return limit
@@ -1159,6 +1173,14 @@ class TesterSession:
                                                       args=logged, plan_step=self.current_step).seq
         return None
 
+    def _identical_action_tail(self, n: int = LOOP_STOP) -> str | None:
+        """If the last n non-free actions share one stable key, return that key (else None)."""
+        recent = [x for x in (getattr(self, "_recent", []) or []) if x]
+        if len(recent) < n:
+            return None
+        tail = recent[-n:]
+        return tail[0] if len(set(tail)) == 1 else None
+
     def _budget_check(self, name: str, args: dict):
         """Progress-based budget. Reads (snapshots, screenshots, recording) are free; actions are capped per plan
         step (reset by each new mark_step) and in total; the same call repeated without progress is a loop."""
@@ -1208,18 +1230,15 @@ class TesterSession:
             self.since_progress += 1
             sig = _call_sig(name, args)
             intent = _intent_sig(name, args, self.last_snapshot)   # same target reached by reworded calls/refs
-            # Same element after a page/wizard change is not a true repeat — reset that intent's counter.
-            # Discovery (and resumed discovery) often toggles chrome (All menu) without real progress;
-            # keep counting across page-hash flips so STUCK_MAX_ATTEMPTS still fires.
+            # Identical action+label always counts as a repeat across ANY step (discovery / contact /
+            # prep / tester), even when the page hash or snapshot text changes between clicks.
+            # Do not reset counters on page-hash flips — that let identical menu-label loops run for
+            # minutes with no stuck ask.
             page_h = getattr(self, "_page_hash", None) or ""
             self._sig_page = getattr(self, "_sig_page", {}) or {}
-            disco = bool(self.brief.get("discovery"))
             for key in (sig, intent):
                 if not key:
                     continue
-                prev_page = self._sig_page.get(key)
-                if (not disco) and prev_page and page_h and prev_page != page_h:
-                    self._sigs[key] = 0
                 self._sig_page[key] = page_h
             self._sigs[sig] = self._sigs.get(sig, 0) + 1
             if intent:
@@ -1277,10 +1296,8 @@ class TesterSession:
                         f"alert/status messages near the form before clicking {submit_label!r} again. "
                         f"(Attempt {n}/{stop_at} on this control.)"
                     )}
-            # Discovery loops: skip the explore ladder (it resets counters) and ask after STUCK_MAX.
-            if (n >= stop_at or cycling) and not getattr(self, "_explored", False) and not disco:
-                return self._start_exploring(name, "the same actions kept repeating" if cycling else
-                                             f"{name} was repeated {n} times")
+            # Identical / cycling actions: stuck-ask at STUCK_MAX immediately. Do not explore-first —
+            # _start_exploring resets counters and let portal/CRM loops run for minutes.
             if cycling:
                 n = stop_at
             if n >= stop_at:
@@ -1405,8 +1422,10 @@ class TesterSession:
 
         explored = bool(getattr(self, "_explored", False))
         asks = int(getattr(self, "_stuck_asks", 0))
-        # Discovery (incl. resumed DISCO-* cases) asks on first stop_at hit; other cases explore first.
-        if not explored and asks == 0 and not self.brief.get("discovery"):
+        # Identical-action loops (repeats >= STUCK_MAX) ask immediately in every mode (discovery /
+        # contact / prep / tester). Explore-first is only for non-identical action-budget stalls.
+        if (not explored and asks == 0 and repeats < LOOP_STOP
+                and not self.brief.get("discovery")):
             return None
         if asks >= STUCK_ASK_MAX_PER_CASE:
             return None

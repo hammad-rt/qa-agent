@@ -145,15 +145,14 @@ Page URL: https://portal/shipping
         outs = []
         for _ in range(T.STUCK_MAX_ATTEMPTS):
             outs.append(s._budget_check("browser_click", {"element": "Continue", "ref": "e9"}))
-        # At warn_at, feed validation (still counts as an attempt); at max → lookup ladder / explore.
+        # At warn_at, feed validation (still counts as an attempt); at max → stop / stuck ask.
         self.assertTrue(any(o and "Package weight is required" in o.get("error", "") for o in outs))
-        self.assertTrue(any(o and "Explore before you act" in o.get("error", "") for o in outs))
-        self.assertFalse(s.result.loop)
-        self.assertFalse(any(
-            a.get("tool") == "loop_detected" for a in st.data["action_log"]))
-        self.assertTrue(any(
-            a.get("tool") == "stuck_lookup" or a.get("tool") == "explore"
-            for a in st.data["action_log"]))
+        blob = " ".join((o or {}).get("error", "") for o in outs if o)
+        self.assertTrue(any(k in blob for k in ("Stop now", "repeated", "GUIDANCE", "Stuck")), outs)
+        self.assertTrue(
+            s.result.loop
+            or any(a.get("tool") in ("loop_detected", "stuck_ask") for a in st.data["action_log"]),
+            st.data["action_log"])
 
 
 class WebAnswerAskId(unittest.TestCase):

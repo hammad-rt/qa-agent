@@ -71,23 +71,23 @@ class StaleRefs(unittest.TestCase):
         self.assertIsInstance(out, dict)
         self.assertIn("fresh browser_snapshot", out["error"])
 
-    def test_page_change_resets_repeat_counter(self):
+    def test_page_change_keeps_identical_repeat_counter(self):
+        """Same label across page-hash flips still counts toward STUCK_MAX (smoke regression)."""
         self.s._explored = False
         args = {"element": "Continue", "target": "f1e151"}
-        # Count three clicks on page A.
         self.s.last_snapshot = SNAP1
         self.s._page_hash = "pageA"
         for _ in range(2):
             self.s._budget_check("browser_click", args)
         self.assertGreaterEqual(self.s._sigs.get("click:button continue", 0)
                                 or max(self.s._sigs.values()), 2)
-        # Same label on a new page: counter resets, so we do not immediately stop.
+        # Same label on a new page: counter must NOT reset.
         self.s._page_hash = "pageB"
         self.s.last_snapshot = SNAP2.replace("[disabled] ", "")
         out = self.s._budget_check("browser_click", {"element": "Continue", "target": "e30"})
-        # Should warn at most, not hard-stop on first click of the new page.
-        if out:
-            self.assertNotIn("repeated", (out.get("error") or "").lower())
+        self.assertIsNotNone(out)
+        err = (out.get("error") or "").lower()
+        self.assertTrue("repeated" in err or "stuck" in err or "stop now" in err, out)
 
 
 if __name__ == "__main__":

@@ -57,6 +57,37 @@ def matching_rules(case, rules: list[dict]) -> list[dict]:
     return out
 
 
+def case_is_read_only(case) -> bool:
+    """True when the case is a read-only / final-check style case (must not silently create data)."""
+    title = getattr(case, "title", "") or ""
+    if re.search(r"(?i)read[\s-]*only", title):
+        return True
+    steps = list(getattr(case, "steps", None) or [])
+    if any(getattr(s, "changes_data", False) or getattr(s, "costs_money", False) for s in steps):
+        return False
+    blob = " ".join(
+        [title]
+        + [getattr(s, "text", "") or "" for s in steps]
+        + [getattr(case, "expected", "") or ""]
+    )
+    return bool(re.search(r"(?i)read[\s-]*only|final checks?|do not (change|edit|modify|create)", blob))
+
+
+def _approve_prep_create(case, key: str) -> bool:
+    """Ask a person before data-creating PREP on a read-only case. Never auto-approve."""
+    from .auto import ask_line
+    prompt = (
+        f"Case {case.id} looks read-only ({getattr(case, 'title', '')!r}), but data prep "
+        f"'{key}' needs to CREATE or change data (PREP-{key}-create). "
+        f"Approve this create? [y/N]: "
+    )
+    try:
+        ans = ask_line(prompt)
+    except EOFError:
+        return False
+    return bool(re.match(r"^\s*y(es)?\s*$", ans or "", re.I))
+
+
 def client_label(name: str | None, user: str | None, record_id: str | None = None) -> str | None:
     """CRM contact label for prep find/create text.
 
@@ -869,6 +900,28 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
             env_parts = _create_parts_for_env(plan, rule, parts, case=case, state=state)
             if isinstance(env_parts, str):
                 return blocked(env_parts)
+            # Read-only cases (e.g. "Final checks (read-only)"): creating data needs an explicit yes.
+            # Auto mode must NOT silently approve — ask_line always reaches a person / web UI.
+            if case_is_read_only(case):
+                state.checkpoint(
+                    f"data prep {key}: case {case.id} is read-only; asking before PREP create")
+                if not _approve_prep_create(case, key):
+                    return blocked(
+                        f"read-only case {case.id}: data-creating prep '{key}' was not approved")
+                try:
+                    state.log_action(
+                        case_id=case.id,
+                        app=find_app or (env_parts[0].get("app") if env_parts else "") or "",
+                        tool="request_approval",
+                        args={"action_type": "prep_create", "description": f"PREP-{key}-create",
+                              "how": "approved", "via": "read_only_prep_gate"},
+                        plan_step=None, approval="approved")
+                except Exception:  # noqa: BLE001 — thin test fakes may omit log_action
+                    state.data.setdefault("action_log", []).append({
+                        "case_id": case.id, "tool": "request_approval",
+                        "args": {"action_type": "prep_create", "via": "read_only_prep_gate"},
+                        "approval": "approved",
+                    })
             # Multi-app create: run each pack-tagged part in order (e.g. portal then crm).
             for i, part in enumerate(env_parts):
                 papp, ptext = part.get("app"), part.get("text") or ""

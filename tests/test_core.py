@@ -349,15 +349,22 @@ class TesterCallbacks(unittest.TestCase):
         import agent_tester.agents.tester as T
         self.s.max_calls = 100
         args = {"expression": "1+1"}
-        # STUCK_MAX_ATTEMPTS=3 → warn at 2, ladder/explore at 3.
+        # STUCK_MAX_ATTEMPTS=3 → warn at 2, stop/stuck-ask at 3 (no explore-first for identical calls).
         n = T.STUCK_MAX_ATTEMPTS
-        rs = [self.s.before_tool(self.t("calculate"), dict(args), None) for _ in range(n)]
+        rs = []
+        hard = None
+        for _ in range(n):
+            try:
+                rs.append(self.s.before_tool(self.t("calculate"), dict(args), None))
+            except T.TesterHardStop as e:
+                hard = str(e)
+                break
         self.assertIsNone(rs[0])
-        self.assertIn("did not move", rs[n - 2]["error"])
-        self.assertIn("Explore before you act", rs[n - 1]["error"])  # first stall: lookup ladder + explore
-        self.assertFalse(self.s.result.limit_hit)
-        rs = [self.s.before_tool(self.t("calculate"), dict(args), None) for _ in range(n)]
-        self.assertIn("Stop now", rs[n - 1]["error"])                # same loop after exploring: stop
+        self.assertIn("did not move", rs[1]["error"])
+        self.assertTrue(
+            hard is not None
+            or any(k in (rs[-1] or {}).get("error", "") for k in ("Stop now", "repeated", "GUIDANCE")),
+            (rs, hard))
         self.assertTrue(self.s.result.loop and self.s.result.limit_hit)
 
     def test_idle_rereads_explore_then_stop(self):
@@ -382,10 +389,18 @@ class TesterCallbacks(unittest.TestCase):
         self.assertTrue(T._is_cycle(["x", "a", "b", "c"] + ["a", "b", "c"] * 2))
         self.assertFalse(T._is_cycle(["a", "b", "c", "d", "e", "f"]))
         self.s.max_calls = 100
-        r = [self.s.before_tool(self.t("calculate"), {"expression": e}, None) for e in ["1", "2"] * 3]
-        # STUCK_MAX_ATTEMPTS may warn on a repeated expression before the A/B cycle completes;
-        # either path must enter the lookup ladder / explore.
-        self.assertTrue(any(x and "Explore before you act" in x.get("error", "") for x in r), r)
+        r = []
+        hard = None
+        for e in ["1", "2"] * 3:
+            try:
+                r.append(self.s.before_tool(self.t("calculate"), {"expression": e}, None))
+            except T.TesterHardStop as ex:
+                hard = str(ex)
+                break
+        # Identical / A-B cycle must stop or stuck-ask (no silent longer retry).
+        blob = " ".join((x or {}).get("error", "") for x in r if x) + (hard or "")
+        self.assertTrue(any(k in blob for k in ("Stop now", "repeated", "Blocked", "GUIDANCE", "Stopped by code")),
+                        (r, hard))
 
     def test_label_from_snapshot(self):
         import agent_tester.agents.tester as T
@@ -508,11 +523,18 @@ class StatusWalk(unittest.TestCase):
                 self.assertTrue(r is None or "Explore" not in r.get("error", "") and "Stop now" not in r.get("error", ""), r)
 
     def test_save_with_same_value_still_loops(self):
+        import agent_tester.agents.tester as T
         t = TesterCallbacks("test_loop_warn_then_stop"); t.setUp()
         s = t.s; s.max_calls = 200
         errs = []
-        for _ in range(5):
-            for r in (s.before_tool(t.t("browser_select_option"), {"target": "f5e554", "values": ["Shipped"]}, None),
-                      s.before_tool(t.t("browser_click"), {"target": "f5e114"}, None)):
-                if r: errs.append(r.get("error", ""))
-        self.assertTrue(any("Explore" in e or "did not move" in e for e in errs))
+        try:
+            for _ in range(5):
+                for r in (s.before_tool(t.t("browser_select_option"), {"target": "f5e554", "values": ["Shipped"]}, None),
+                          s.before_tool(t.t("browser_click"), {"target": "f5e114", "element": "Save"}, None)):
+                    if r:
+                        errs.append(r.get("error", ""))
+        except T.TesterHardStop as e:
+            errs.append(str(e))
+        self.assertTrue(
+            any(k in e for e in errs for k in ("Explore", "did not move", "Stop now", "repeated", "Stopped by code")),
+            errs)

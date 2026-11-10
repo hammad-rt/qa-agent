@@ -4,35 +4,74 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import time
 import uuid
 
 from ..config import Settings, job_model
 
 _sem: asyncio.Semaphore | None = None
 
+# Hard caps so a hung provider cannot hold the LLM semaphore forever.
+# LiteLLM: timeout = whole response; stream_timeout = wait for next chunk (docs.litellm.ai).
+LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", os.environ.get("LLM_CALL_TIMEOUT", "180")))
+LLM_STREAM_TIMEOUT = float(os.environ.get("LLM_STREAM_TIMEOUT", "60"))
+# No usable text from ADK events for this long → fail the attempt (empty keepalive events don't count).
+LLM_IDLE_TIMEOUT = float(os.environ.get("LLM_IDLE_TIMEOUT", "90"))
+
 
 class LLMOutputError(RuntimeError):
     """The model kept returning output that could not be parsed or validated."""
 
 
-def model(settings: Settings, json_mode: bool = False, max_tokens: int | None = None, job: str = "tester"):
+def model(settings: Settings, json_mode: bool = False, max_tokens: int | None = None, job: str = "tester",
+          temperature: float | None = None):
     """json_mode asks the server for a syntactically valid JSON object (vLLM supports it). LLM_JSON_MODE=0 turns it off."""
-    import os
     from google.adk.models.lite_llm import LiteLlm
     extra = {"max_tokens": max_tokens or int(os.environ.get("LLM_MAX_TOKENS", "8192"))}   # the server's default is only 512
     if json_mode and os.environ.get("LLM_JSON_MODE", "1") != "0":
         extra["response_format"] = {"type": "json_object"}
+    if temperature is not None:
+        extra["temperature"] = float(temperature)
+    # Pass through to litellm so hung HTTP streams are cancelled (not only checked between retries).
+    if LLM_TIMEOUT > 0:
+        extra["timeout"] = LLM_TIMEOUT
+    if LLM_STREAM_TIMEOUT > 0:
+        extra["stream_timeout"] = LLM_STREAM_TIMEOUT
     from ..redact import effective_api_key
     base, name, key = job_model(settings, job)
     # Placeholder keys (none/null/empty) become a dummy — vLLM often needs no real key.
     return LiteLlm(model=f"openai/{name}", api_base=base, api_key=effective_api_key(key), **extra)
 
 
+async def _iter_events_with_idle(aiter, *, idle_sec: float, call_deadline: float | None = None):
+    """Yield ADK events; fail when no event arrives within idle_sec, or past call_deadline."""
+    while True:
+        left = idle_sec
+        if call_deadline is not None:
+            left = min(left, max(0.05, call_deadline - time.monotonic()))
+        try:
+            ev = await asyncio.wait_for(aiter.__anext__(), timeout=left)
+        except StopAsyncIteration:
+            return
+        except asyncio.TimeoutError as e:
+            if call_deadline is not None and time.monotonic() >= call_deadline:
+                raise LLMOutputError(
+                    f"LLM call hit the {LLM_TIMEOUT:.0f}s per-call timeout") from e
+            raise LLMOutputError(
+                f"no text for {LLM_IDLE_TIMEOUT:.0f}s (stream idle / empty ADK events)") from e
+        yield ev
+
+
 async def run_agent(agent, prompt: str, settings: Settings, state: dict | None = None, app_name: str = "qa-agent",
                     trace_path=None, retry: bool = False, follow_up=None, max_follow_ups: int = 2) -> str:
     """Run one agent to completion and return its final text. retry=True only for agents without side
-    effects (planner, reviewer, judge); testers are never replayed automatically."""
+    effects (planner, reviewer, judge); testers are never replayed automatically.
+
+    Each turn is bounded by LLM_TIMEOUT (LiteLLM + asyncio) and LLM_IDLE_TIMEOUT (no text in events).
+    Cancellation releases the shared LLM semaphore so retries are not starved behind hung calls.
+    """
     if retry:
         from ..reliability import with_retries
         return await with_retries(lambda: run_agent(agent, prompt, settings, state, app_name, trace_path, False))
@@ -49,19 +88,53 @@ async def run_agent(agent, prompt: str, settings: Settings, state: dict | None =
     runner = Runner(agent=agent, app_name=app_name, session_service=svc)
     final = ""
     msg, left = prompt, max_follow_ups
-    async with _sem:
-        while msg:
-            async for ev in runner.run_async(user_id="qa", session_id=sid,
-                                             new_message=types.Content(role="user", parts=[types.Part(text=msg)])):
-                if trace_path:
-                    _trace(trace_path, ev)
-                if ev.content and ev.content.parts:
-                    text = "".join(p.text or "" for p in ev.content.parts if getattr(p, "text", None))
-                    if text and ev.is_final_response():
-                        final = text
-            # follow_up(final) -> a message to continue the same session (history kept), or None to stop.
-            msg = follow_up(final) if (follow_up and left > 0) else None
-            left -= 1
+    idle = max(0.05, LLM_IDLE_TIMEOUT)
+    call_cap = max(idle + 0.05, LLM_TIMEOUT)
+
+    async def _one_turn(user_msg: str) -> str:
+        turn_final = ""
+        saw_text = False
+        last_text_at = time.monotonic()
+        deadline = time.monotonic() + call_cap
+        stream = runner.run_async(
+            user_id="qa", session_id=sid,
+            new_message=types.Content(role="user", parts=[types.Part(text=user_msg)]))
+        async for ev in _iter_events_with_idle(stream.__aiter__(), idle_sec=idle, call_deadline=deadline):
+            if trace_path:
+                _trace(trace_path, ev)
+            text = ""
+            if ev.content and ev.content.parts:
+                text = "".join(p.text or "" for p in ev.content.parts if getattr(p, "text", None))
+            if text:
+                saw_text = True
+                last_text_at = time.monotonic()
+                if ev.is_final_response():
+                    turn_final = text
+            elif time.monotonic() - last_text_at >= idle:
+                # Empty keepalive ADK events must not reset the idle clock forever.
+                raise LLMOutputError(
+                    f"no text for {LLM_IDLE_TIMEOUT:.0f}s (empty ADK events)")
+        if not saw_text and not (turn_final or "").strip():
+            # Completed with only empty keepalive-style events.
+            raise LLMOutputError("no text for the whole LLM call (empty ADK events)")
+        return turn_final
+
+    try:
+        async with _sem:
+            while msg:
+                try:
+                    final = await asyncio.wait_for(_one_turn(msg), timeout=call_cap)
+                except asyncio.TimeoutError as e:
+                    raise LLMOutputError(
+                        f"LLM call hit the {LLM_TIMEOUT:.0f}s per-call timeout") from e
+                except asyncio.CancelledError:
+                    # Propagate so plan deadline / SIGINT can free the semaphore promptly.
+                    raise
+                # follow_up(final) -> a message to continue the same session (history kept), or None to stop.
+                msg = follow_up(final) if (follow_up and left > 0) else None
+                left -= 1
+    except asyncio.CancelledError:
+        raise
     return final
 
 
@@ -98,10 +171,21 @@ def repair_json(raw: str) -> str:
     return s
 
 
+def _empty_llm_reply(raw: str, data: dict | None = None) -> str | None:
+    """Plain-language reason when the model returned nothing usable (empty text or {})."""
+    if data == {}:
+        return "empty object {}"
+    if not (raw or "").strip():
+        return "no text"
+    return None
+
+
 async def run_json(agent, prompt: str, settings: Settings, *, validate=None, label: str = "llm",
-                   raw_dir=None, trace_path=None, attempts: int = 3):
+                   raw_dir=None, trace_path=None, attempts: int = 3, on_attempt=None):
     """Run an agent that must answer with JSON. On a parse or validation error the raw reply is saved
-    (masked) and the model is asked to correct it, up to `attempts` times. Returns validate(data) or data."""
+    (masked) and the model is asked to correct it, up to `attempts` times. Returns validate(data) or data.
+
+    ``on_attempt(n, attempts, err, raw)`` is called after each failed try (for console/progress logs)."""
     from pydantic import ValidationError
 
     from ..redact import redact, scrub_secrets
@@ -110,18 +194,30 @@ async def run_json(agent, prompt: str, settings: Settings, *, validate=None, lab
         raw = await run_agent(agent, ask, settings, trace_path=trace_path, retry=True)
         try:
             data = extract_json(raw)
-            if data == {} and validate:
-                raise ValueError("the reply was an empty object {}; fill in every field of the schema")
+            empty = _empty_llm_reply(raw, data)
+            if empty and validate:
+                raise ValueError(f"the reply was an {empty}; fill in every field of the schema")
             return validate(data) if validate else data
         except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as e:
             last_err = str(e).splitlines()[0][:300] if isinstance(e, json.JSONDecodeError) else str(e)[:1500]
             if isinstance(e, json.JSONDecodeError) and _cut_off(raw):
                 last_err += " - the reply looks cut off; keep it shorter (short step texts, no extra fields)"
+            empty = _empty_llm_reply(raw, None if not (raw or "").strip() else ({} if (raw or "").strip() == "{}" else None))
+            if on_attempt:
+                try:
+                    on_attempt(n, attempts, last_err, raw or "")
+                except Exception:  # noqa: BLE001
+                    pass
+            elif empty or label == "planner":
+                # Keep non-planner jobs quiet (old behaviour); planner empty/{} stalls must be visible.
+                print(f"{label}: attempt {n}/{attempts} failed ({empty or last_err})")
             if raw_dir:
                 from pathlib import Path
                 Path(raw_dir).mkdir(parents=True, exist_ok=True)
                 (Path(raw_dir) / f"{label}_raw_{n}.txt").write_text(scrub_secrets(redact(raw or "")))
-            ask = (f"{prompt}\n\nYour previous reply could not be used: {last_err}\n"
+            nudge = (" Return a JSON object with a non-empty cases array covering every requested id."
+                     if empty or "empty object" in last_err or "no text" in last_err else "")
+            ask = (f"{prompt}\n\nYour previous reply could not be used: {last_err}.{nudge}\n"
                    f"Previous reply:\n{(raw or '')[:20000]}\n\nReply again with ONLY the corrected JSON object, nothing else.")
     where = f" Raw replies are in {raw_dir}." if raw_dir else ""
     raise LLMOutputError(f"{label}: the model returned unusable JSON {attempts} times ({last_err}).{where}")

@@ -66,6 +66,9 @@ class PlannedCase(BaseModel):
     open_question: str | None = None  # asked at the plan gate when the task does not say what should happen
     source_task: int | None = None    # feature mode: the subtask this case came from
     covers: list[int] = Field(default_factory=list)   # feature mode: every subtask this (deduplicated) case checks
+    # From the cases-file / task markdown (not the LLM title): section heading + read-only marker.
+    source_section: str | None = None
+    read_only: bool = False
 
 
 class TestPlan(BaseModel):

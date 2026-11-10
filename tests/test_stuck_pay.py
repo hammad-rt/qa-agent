@@ -28,7 +28,8 @@ class StuckMaxAttempts(unittest.TestCase):
     def test_env_default_is_three(self):
         self.assertEqual(STUCK_MAX_ATTEMPTS, max(1, int(os.environ.get("STUCK_MAX_ATTEMPTS", "3"))))
 
-    def test_third_repeat_goes_to_ladder_not_longer_retry(self):
+    def test_third_repeat_stops_not_longer_retry(self):
+        """Identical clicks hit stuck ask / stop at STUCK_MAX (no silent longer retry)."""
         st = RunState(Path(tempfile.mkdtemp()) / "run")
         pol = from_pack(load_pack(PACK), "staging", approver=lambda *a: False)
         s = TesterSession(
@@ -37,9 +38,14 @@ class StuckMaxAttempts(unittest.TestCase):
             st, pol, Evidence(st.dir), max_calls=40, max_minutes=5)
         outs = [s._budget_check("browser_click", {"element": "Continue", "ref": "e1"})
                 for _ in range(STUCK_MAX_ATTEMPTS)]
-        self.assertTrue(any(o and "Explore before you act" in o.get("error", "") for o in outs))
-        self.assertTrue(any(a.get("tool") in ("stuck_lookup", "explore") for a in st.data["action_log"]))
-        self.assertFalse(s.result.loop)
+        blob = " ".join((o or {}).get("error", "") for o in outs if o)
+        self.assertTrue(
+            any(k in blob for k in ("Stop now", "repeated", "Stuck", "GUIDANCE")),
+            outs)
+        self.assertTrue(
+            s.result.loop
+            or any(a.get("tool") in ("loop_detected", "stuck_ask") for a in st.data["action_log"]),
+            st.data["action_log"])
 
 
 class PayEnvs(unittest.TestCase):

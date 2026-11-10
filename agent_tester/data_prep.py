@@ -57,8 +57,20 @@ def matching_rules(case, rules: list[dict]) -> list[dict]:
     return out
 
 
+_RO_MARK = re.compile(r"(?i)read[\s-]*only|final checks?|do not (change|edit|modify|create)")
+
+
 def case_is_read_only(case) -> bool:
-    """True when the case is a read-only / final-check style case (must not silently create data)."""
+    """True when the case is a read-only / final-check style case (must not silently create data).
+
+    Prefer the source-file flag / section heading stamped at plan time (planner may rename the
+    title and drop 'Final checks (read-only)'); fall back to title/steps/expected text.
+    """
+    if getattr(case, "read_only", False):
+        return True
+    section = getattr(case, "source_section", None) or ""
+    if section and _RO_MARK.search(section):
+        return True
     title = getattr(case, "title", "") or ""
     if re.search(r"(?i)read[\s-]*only", title):
         return True
@@ -66,11 +78,11 @@ def case_is_read_only(case) -> bool:
     if any(getattr(s, "changes_data", False) or getattr(s, "costs_money", False) for s in steps):
         return False
     blob = " ".join(
-        [title]
+        [title, section]
         + [getattr(s, "text", "") or "" for s in steps]
         + [getattr(case, "expected", "") or ""]
     )
-    return bool(re.search(r"(?i)read[\s-]*only|final checks?|do not (change|edit|modify|create)", blob))
+    return bool(_RO_MARK.search(blob))
 
 
 def _approve_prep_create(case, key: str) -> bool:

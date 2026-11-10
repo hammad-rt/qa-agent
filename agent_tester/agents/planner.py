@@ -270,7 +270,8 @@ async def plan_in_batches(settings, pack, task_text: str, task_id: int, env: str
     if repair:
         from ..casegen import add_repair_case
         plan = add_repair_case(plan, pack)
-    return plan
+    from ..case_source import apply_source_case_markers
+    return apply_source_case_markers(plan, task_text)
 
 
 async def plan_task(settings: Settings, pack, task_text: str, task_id: int, env: str, only_case: str | None = None,
@@ -289,6 +290,8 @@ async def plan_task(settings: Settings, pack, task_text: str, task_id: int, env:
             if repair:
                 from ..casegen import add_repair_case
                 cached = add_repair_case(cached, pack)
+            from ..case_source import apply_source_case_markers
+            cached = apply_source_case_markers(cached, task_text)
             try:
                 save_plan_cache(run_dir, fp, cached)
             except OSError:
@@ -302,6 +305,7 @@ async def plan_task(settings: Settings, pack, task_text: str, task_id: int, env:
             plan = await plan_in_batches(settings, pack, task_text, task_id, env, batch_ids, max_rounds=max_rounds,
                                          lessons=lessons, trace_path=trace_path, answers=answers,
                                          preapprovable=preapprovable, repair=repair, run_dir=run_dir)
+            # plan_in_batches already applies source markers
             if reuse_plan and run_dir is not None:
                 from ..plan_cache import plan_fingerprint, save_plan_cache
                 try:
@@ -359,6 +363,8 @@ async def plan_task(settings: Settings, pack, task_text: str, task_id: int, env:
         fixed_issues = [i for i in check_plan(plan) if not i.startswith("requirement ")]
         problems = ([] if review.get("ok") else list(review.get("problems", []))) + fixed_issues
         if not problems:
+            from ..case_source import apply_source_case_markers
+            plan = apply_source_case_markers(plan, task_text)
             if reuse_plan and run_dir is not None and batch_ids:
                 from ..plan_cache import plan_fingerprint, save_plan_cache
                 try:
@@ -367,4 +373,5 @@ async def plan_task(settings: Settings, pack, task_text: str, task_id: int, env:
                     pass
             return plan
         feedback = "\n\nProblems to fix (reviewer and plan checks):\n- " + "\n- ".join(problems)
-    return plan
+    from ..case_source import apply_source_case_markers
+    return apply_source_case_markers(plan, task_text)

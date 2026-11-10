@@ -970,10 +970,26 @@ class TesterSession:
         settle = _settle_seconds(getattr(self, "app", ""), getattr(self, "pack", None))
         now = time.monotonic()
         last_act, last_snap = getattr(self, "_last_act", 0.0), getattr(self, "_last_snap", 0.0)
+        # Count click/type/select attempts BEFORE fresh-snap / stale-ref / policy early returns.
+        # Smoke (171ca8d): those returns skipped _budget_check + log_action, so Administrator menu /
+        # Log out / Create shipment loops never stuck-asked (trace had 10/19/14; action_log 1/1/0).
+        counted = False
+        if name in ("browser_click", "browser_type", "browser_select_option", "browser_fill_form", "paste_text"):
+            if not str(args.get("element") or "").strip():
+                snap0 = self.last_snapshot if isinstance(self.last_snapshot, str) else ""
+                lab0 = _label_of(str(args.get("target") or args.get("ref") or "").removeprefix("ref=").strip(), snap0)
+                if lab0:
+                    args["element"] = lab0
+            limit = self._budget_check(name, args)
+            counted = True
+            if limit:
+                return limit
         if name in ACTING_TOOLS:
             # After a prior click/fill that changed the page, refuse the next action until a fresh snapshot.
             # Use `is True` so MagicMock attributes in unit tests do not look truthy by accident.
             if getattr(self, "_need_fresh_snap", False) is True and name != "browser_navigate":
+                self.state.log_action(case_id=self.case_id, app=self.app, tool=name, args=_safe_args(args),
+                                      plan_step=self.current_step, outcome="need_fresh_snap")
                 return {"error": "The page changed after your last click/fill. Take a fresh browser_snapshot "
                                  "and use only refs from that snapshot before acting again."}
             self._last_act = now
@@ -996,18 +1012,22 @@ class TesterSession:
             self.unread_input = ref or None
         elif name in ("browser_snapshot", "browser_find", "record_value"):
             self.unread_input = None
-        # Stale refs: refuse element targets missing from the latest snapshot.
+        # Stale refs: refuse element targets missing from the latest snapshot (already counted above).
         if name in ("browser_click", "browser_type", "browser_fill_form", "browser_select_option",
                     "browser_hover", "paste_text"):
             ref = str(args.get("target") or args.get("ref") or "").removeprefix("ref=").strip()
             snap = self.last_snapshot if isinstance(self.last_snapshot, str) else ""
             if ref and snap and not self._ref_in_snapshot(ref, snap):
+                self.state.log_action(case_id=self.case_id, app=self.app, tool=name, args=_safe_args(args),
+                                      plan_step=self.current_step, outcome="stale_ref")
                 return {"error": (
                     f"Element ref {ref!r} is not in the latest snapshot (stale after a page/wizard change). "
                     "Call browser_snapshot, then act only on refs from that fresh read."
                 )}
             label = str(args.get("element") or args.get("name") or "")
             if name == "browser_click" and _SUBMIT.search(label) and self._control_disabled(label, snap):
+                self.state.log_action(case_id=self.case_id, app=self.app, tool=name, args=_safe_args(args),
+                                      plan_step=self.current_step, outcome="disabled_control")
                 return {"error": (
                     f"{label!r} is disabled on the current page. Do not click it again. "
                     "Find the unfilled required choice on this wizard/step (radio, checkbox, or dropdown), "
@@ -1034,7 +1054,7 @@ class TesterSession:
         if name == "record_value" and not (last_act and last_act > last_snap):
             self.since_progress, self._sigs = 0, {}          # a value read back is progress too
         if name == "mark_step" and args.get("n") not in self.result.steps_done:
-            # Refuse "done" when the agent only hammered the same control with no verified progress.
+            # Refuse "done" when the agent only hammered the same control (incl. refused repeats).
             same = self._identical_action_tail(LOOP_STOP)
             if same:
                 return {"error": (
@@ -1053,15 +1073,16 @@ class TesterSession:
                     name, args,
                     "this URL already returned an XSRF / acceptable-referer page; "
                     "open the screen via the discovery menu path instead of deep-linking again")
-        # Prefer a stable element label before repeat counting (models often pass only a changing ref).
-        if name in ("browser_click", "browser_type", "browser_select_option") and not str(args.get("element") or "").strip():
-            snap = self.last_snapshot if isinstance(self.last_snapshot, str) else ""
-            lab = _label_of(str(args.get("target") or args.get("ref") or "").removeprefix("ref=").strip(), snap)
-            if lab:
-                args["element"] = lab
-        limit = self._budget_check(name, args)
-        if limit:
-            return limit
+        if not counted:
+            # Prefer a stable element label before repeat counting (models often pass only a changing ref).
+            if name in ("browser_click", "browser_type", "browser_select_option") and not str(args.get("element") or "").strip():
+                snap = self.last_snapshot if isinstance(self.last_snapshot, str) else ""
+                lab = _label_of(str(args.get("target") or args.get("ref") or "").removeprefix("ref=").strip(), snap)
+                if lab:
+                    args["element"] = lab
+            limit = self._budget_check(name, args)
+            if limit:
+                return limit
         if isinstance(args.get("target"), str) and args["target"].startswith("ref="):
             args["target"] = args["target"][4:]              # models often copy "ref=e15"; the tool wants "e15"
         if isinstance(args.get("ref"), str) and args["ref"].startswith("ref="):

@@ -64,6 +64,17 @@ th{background:#f5f5f5;text-align:left}h2{border-bottom:2px solid #eee;padding-bo
 {% if learned %}<h2>Learned this run</h2><p>Approved: {{ learned.approved | length }}, rejected: {{ learned.rejected | length }},
 promoted to core: {{ learned.promoted | length }}, new open bugs saved: {{ learned.open_bugs_saved | length }}</p>{% endif %}
 {% if tool_requests %}<h2>Tools the agent asked for</h2><ul>{% for t in tool_requests %}<li><b>{{ t.name }}</b> ({{ t.case_id }}): {{ t.purpose }} — {{ "approved" if t.approved else "not approved, saved for review" }} <code>{{ t.path }}</code></li>{% endfor %}</ul>{% endif %}
+{% if data_plan %}<h2>Data plan</h2>
+<table><tr><th>Placeholder</th><th>Find app</th><th>Create parts</th><th>Status</th><th>Resolved</th></tr>
+{% for r in data_plan %}<tr>
+<td>{{ r.token }}<br><span class="muted">{{ r.description or '' }}</span></td>
+<td>{{ r.find_app or '' }}</td>
+<td>{% for p in r.create or [] %}[{{ p.app }}] {{ p.text }}<br>{% else %}(find only){% endfor %}</td>
+<td>{{ r.status or '' }}{% if r.error %}<br><span class="muted">{{ r.error }}</span>{% endif %}</td>
+<td>{{ r.resolved or '' }}</td>
+</tr>{% endfor %}</table>{% endif %}
+{% if redos %}<h2>Redos from guidance</h2><ul>{% for r in redos %}<li>{{ r.cases | join(', ') }}: {{ r.text }}</li>{% endfor %}</ul>{% endif %}
+{% if stuck_asks %}<h2>Stuck asks</h2><ul>{% for a in stuck_asks %}<li>{{ a.case_id }} ({{ a.app }}): {{ a.args.why if a.args else '' }} — {{ a.outcome }}{% if a.args and a.args.answer %}: {{ a.args.answer }}{% endif %}</li>{% endfor %}</ul>{% endif %}
 {% if notes %}<h2>Run notes</h2><ul>{% for n in notes %}<li>{{ n }}</li>{% endfor %}</ul>{% endif %}
 </body></html>"""
 
@@ -112,6 +123,7 @@ def build_report(state, pack=None, pdf: bool | None = None) -> Path:
     selected = [c.id for c in plan.cases if not only or c.id in only]
     not_run = [cid for cid in selected if cid not in results]
     cps = state.data.get("checkpoints") or []
+    stuck_asks = [a for a in state.data.get("action_log", []) if a.get("tool") == "stuck_ask"]
     html = Environment(autoescape=select_autoescape(default=True)).from_string(TEMPLATE).render(
         plan=plan, results=results, counts=counts, order=ORDER, run_id=state.dir.name,
         pack_name=pack.config.get("name") if pack else None, drafts=drafts, done=done,
@@ -121,7 +133,10 @@ def build_report(state, pack=None, pdf: bool | None = None) -> Path:
         learned=state.data.get("learned"), model=state.data.get("model"), notes=state.data.get("notes", []), tool_requests=state.data.get("tool_requests", []),
         evidence_items=evidence_items, partial=bool(not_run), not_run=not_run, selected=selected,
         done_count=len([c for c in selected if c in results]), run_status=state.data.get("status"),
-        last_label=cps[-1]["label"] if cps else "")
+        last_label=cps[-1]["label"] if cps else "",
+        data_plan=state.data.get("data_plan") or [],
+        redos=state.data.get("redos") or [],
+        stuck_asks=stuck_asks)
     out = state.dir / "report.html"
     page = redact(html)
     for key, uri in images.items():

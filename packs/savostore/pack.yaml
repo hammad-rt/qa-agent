@@ -90,39 +90,248 @@ helpers:
   crm_add_parcel:       {path: null, fields: {}, submit_label: null, success_text: null, read_labels: []}
   crm_ship_parcel:      {path: null, fields: {}, submit_label: null, success_text: null, read_labels: []}
 
+# Placeholder tokens used in suite cases. Resolved up front (find, else create); values live in run state only.
+# Create is a sequence of app-tagged parts: customer places the order on the portal; CRM does parcel/status/invoice.
+placeholders:
+  token_pattern: '(?i)\b(?:ORDER-[A-Z][A-Z0-9_-]*|CUSTOMER|Wallet)\b'
+  items:
+    - placeholder: CUSTOMER
+      description: >-
+        The run's portal login, and the CRM contact with that email. Conditions: Savo Rewards enabled (E1, E2).
+      value: customer_email
+      mutating: false
+      area: rewards
+      app: crm
+      client_login_app: portal
+      find_app: crm
+      find: >-
+        Confirm the CRM contact for {client} exists and Savo Rewards is enabled on that contact. Record the
+        contact's login/email as the value (not a fixed person name).
+      create: []
+      aliases: []
+    - placeholder: ORDER-EARN
+      description: >-
+        USD Shipping Only order of CUSTOMER; shipping invoiced (S_e e.g. about $1,000), unpaid (no Paid payment,
+        balance = total), no rewards redeemed, status not Order Delivered. Used by E1 (consumes it).
+      value: order_earn
+      aliases: [test_order]
+      mutating: true
+      area: rewards
+      app: crm
+      find_app: crm
+      client_login_app: portal
+      record_hint: the CRM record id from the page URL, the record=... part
+      find: >-
+        In the CRM, open Invoices (AOS_Invoices = shipping-only orders) and find one for the test client {client}
+        that is USD, status "Invoiced & Shipped", shipping invoiced, unpaid (balance = total, no Paid payment),
+        no rewards redeemed, status not Order Delivered. Give the number with its letter prefix exactly as shown.
+      create:
+        - app: portal
+          text: >-
+            As the portal test client, create a new USD Shipping Only order (one package). Put "QA-AGENT TEST" in
+            the description/notes if there is a field for it. Do not pay on the portal in this prep step. Record
+            the new order number when shown.
+        - app: crm
+          text: >-
+            For that new shipping-only order of {client}: set its parcel to Received, then move status one step at
+            a time (save each): Shipped to Warehouse > On Warehouse floor > Ready to Ship > Shipped >
+            Invoiced & Shipped ("Shipped" alone does not create the invoice). Invoice the shipping in the CRM.
+            Do not pay and do not apply rewards. Record the order number and CRM record id.
+      verify:
+        app: portal
+        text: >-
+          browser_navigate to <portal URL>/shipping-only/invoice/{record}. Usable if balance > 0 and Pay By Card
+          is shown. Do not pay. This case fills the wallet, so a Savo Rewards box that says "no Savo Rewards" is fine.
+      consumed_by: ["complete payment", "pay with", "\\bpays?\\b", "4242", "earn"]
+    - placeholder: ORDER-MULTI
+      description: >-
+        USD Shipping Only order of CUSTOMER with exactly 1 package; shipping invoiced (S_m e.g. about $1,000),
+        unpaid, no rewards redeemed/applied. Later cases (A2, A9) add a second package (~$400) in the CRM.
+        Used by B1-B7, B9, B12, B15, B16-3, A1-A4, A7, A9-A14. B5 pays it, so unpaid-needing cases run before B5.
+      value: order_multi
+      aliases: [test_order]
+      mutating: true
+      area: rewards
+      app: crm
+      find_app: crm
+      client_login_app: portal
+      record_hint: the CRM record id from the page URL, the record=... part
+      find: >-
+        In the CRM, open Invoices (AOS_Invoices = shipping-only orders) and find one for the test client {client}
+        that is USD, status "Invoiced & Shipped", exactly one package, shipping invoiced (~$1,000), unpaid,
+        no rewards redeemed/applied. Give the number with its letter prefix exactly as shown.
+      create:
+        - app: portal
+          text: >-
+            As the portal test client, create a new USD Shipping Only order with exactly one package. Put
+            "QA-AGENT TEST" in the description/notes if there is a field for it. Do not pay. Record the new order number.
+        - app: crm
+          text: >-
+            For that new shipping-only order of {client}: set its parcel to Received, then move status one step at
+            a time (save each): Shipped to Warehouse > On Warehouse floor > Ready to Ship > Shipped >
+            Invoiced & Shipped. Invoice the shipping in the CRM. Leave exactly one package. Do not pay and do not
+            apply rewards. Record the order number and CRM record id.
+      verify:
+        app: portal
+        text: >-
+          browser_navigate to <portal URL>/shipping-only/invoice/{record}. Usable if balance > 0 and Pay By Card
+          is shown.{condition}
+        condition:
+          when: ["\\breward", "\\bredeem", "use up to", "wallet"]
+          unless: ["without (any |the |savo )*rewards", "no (savo )?rewards (applied|used)", "(do not|don't|not) (apply|use) (any |savo )*rewards"]
+          then: >-
+            {space}It must also show the Savo Rewards box with "You can use up to $X" (X > 0). Reload once if the box
+            says "no Savo Rewards".
+          else: >-
+            {space}A Savo Rewards box that says "no Savo Rewards" is fine for this case. Do not apply rewards.
+        keep_record_if:
+          reason: "no savo rewards|rewards box|use up to|wallet|no rewards"
+          only_when_condition: true
+          note: the client's Savo Rewards wallet is empty or negative (top it up with the earn case first)
+      consumed_by: ["complete payment", "pay with", "\\bpays?\\b", "4242"]
+    - placeholder: ORDER-KES
+      description: >-
+        KES Shipping Only order of CUSTOMER; shipping invoiced (S_k), some non-shipping charges N_k
+        (protection, next-day delivery or misc), unpaid, no rewards redeemed.
+      value: order_kes
+      aliases: [test_order]
+      mutating: true
+      area: rewards
+      app: crm
+      find_app: crm
+      client_login_app: portal
+      record_hint: the CRM record id from the page URL, the record=... part
+      find: >-
+        In the CRM, open Invoices (AOS_Invoices) and find a KES shipping-only order for {client} at
+        "Invoiced & Shipped", shipping invoiced, with some non-shipping charges, unpaid, no rewards redeemed.
+      create:
+        - app: portal
+          text: >-
+            As the portal test client, create a new KES (Kenyan Shillings) Shipping Only order. Put "QA-AGENT TEST"
+            in the description/notes if possible. Do not pay.
+        - app: crm
+          text: >-
+            For that KES shipping-only order of {client}: set parcel to Received; move status step by step to
+            Invoiced & Shipped; invoice shipping; ensure some non-shipping charges exist (protection, next-day or
+            misc). Do not pay and do not apply rewards.
+      verify:
+        app: portal
+        text: >-
+          Open the portal invoice for {record}. Usable if balance > 0 in KES and Pay By Card is shown.{condition}
+        condition:
+          when: ["\\breward", "\\bredeem", "use up to", "wallet"]
+          unless: ["without (any |the |savo )*rewards", "no (savo )?rewards (applied|used)", "(do not|don't|not) (apply|use) (any |savo )*rewards"]
+          then: >-
+            {space}It must also show the Savo Rewards box with "You can use up to $X" (X > 0).
+          else: >-
+            {space}A Savo Rewards box that says "no Savo Rewards" is fine. Do not apply rewards.
+      consumed_by: ["complete payment", "pay with", "\\bpays?\\b", "4242"]
+    - placeholder: ORDER-BAS
+      description: >-
+        KES Buy & Ship quote (CRM AOS_Quotes) of CUSTOMER; status Awaiting Payment, shipping S_bs,
+        payable > 0, no rewards redeemed. Used by A8/C3.
+      value: order_bas
+      aliases: [test_quote]
+      mutating: true
+      area: rewards
+      app: crm
+      find_app: crm
+      client_login_app: portal
+      record_hint: the CRM record id from the page URL, the record=... part
+      find: >-
+        In the CRM, open Quotes (AOS_Quotes = Buy & Ship) and find one for {client} at "Awaiting Payment"
+        (or "Shipping Fee Invoiced") with payable > 0 and no rewards redeemed.
+      create:
+        - app: crm
+          text: >-
+            Create a Buy & Ship quote for {client} only, with "QA-AGENT TEST" in its description, and move it to
+            "Awaiting Payment" (or "Shipping Fee Invoiced"). Do not pay and do not apply rewards.
+      verify:
+        app: portal
+        text: >-
+          Log in to the portal and open Buy & Ship order {value}. It is usable if it shows a balance > 0.{condition}
+        condition:
+          when: ["\\breward", "\\bredeem", "use up to", "wallet"]
+          unless: ["without (any |the |savo )*rewards", "no (savo )?rewards (applied|used)", "(do not|don't|not) (apply|use) (any |savo )*rewards"]
+          then: >-
+            {space}It must also show the Savo Rewards box with "You can use up to $X" (X > 0).
+          else: >-
+            {space}A Savo Rewards box that says "no Savo Rewards" is fine. Do not apply rewards.
+      consumed_by: ["complete payment", "pay with", "\\bpays?\\b", "4242"]
+    - placeholder: Wallet
+      description: >-
+        CUSTOMER Current rewards >= cap(S_m), and enough in KES for ORDER-KES; else run E1 first.
+      value: wallet_ready
+      mutating: true
+      area: rewards
+      app: crm
+      find_app: crm
+      client_login_app: portal
+      min_value: 0.01
+      envs: [staging, local]
+      blocked_note: >-
+        the case needs a rewards balance above the cap, and topping it up means paying an order, which the agent
+        never does on pre-prod or production; top up the test client's wallet by hand and rerun
+      find: >-
+        Open the CRM contact of the test client {client} and read Current Rewards. If it is at least the redeem cap of
+        the order in values_so_far (order_multi / order_earn / test_order; cap = 10% of unpaid shipping) plus $5, it is
+        enough: record_value('wallet_ready', '<Current Rewards>'). If negative, zero or less than that: 'none'.
+      create:
+        - app: portal
+          text: >-
+            Earn rewards: take a QA-AGENT TEST shipping-only order of {client} and pay it on the portal with the
+            Stripe test card from the Payments facts (staging only, 4242).
+        - app: crm
+          text: >-
+            Move that paid order to "Order Delivered" so 5% is earned. Repeat via further orders until Current
+            Rewards is enough, then record_value('wallet_ready', '<Current Rewards>').
+            CRM payment alternative (only when portal card payment cannot be made): on the order DetailView open the
+            Payments subpanel, Create a Paid payment for the full balance, confirm the subpanel shows the linked Paid
+            payment and balance 0, then move status to Order Delivered. Note in the run that payment was made in CRM.
+
 # Data preparation, every environment (test client only; payments on production are always skipped):
 # before a matching case, find a usable record or create one, then check it on the portal.
+# Create is portal (customer places order) then CRM-only (parcel Received, status steps, invoice shipping).
 data_prep:
   - id: shipping_only_order
+    placeholder: ORDER-EARN
     area: rewards
     when:
-      areas: [rewards, portal]        # portal-area cases (B1, B3, B12, B15, B16) open an invoice too
-      any: ["shipping[- ]only", "pay by card", "stripe", "abandon", "invoice", "order-[a-z]+"]
-      none: ["buy ?& ?ship", "\\bKES\\b", "shilling"]
+      areas: [rewards, portal]
+      any: ["ORDER-EARN", "earn on a paid", "shipping[- ]only", "pay by card", "stripe", "abandon"]
+      none: ["buy ?& ?ship", "\\bKES\\b", "shilling", "ORDER-MULTI", "multi[- ]package", "second package", "2nd package"]
     app: crm
-    client_login_app: portal          # the portal login picked at the start is the only CRM contact identity
+    find_app: crm
+    client_login_app: portal
     record_hint: the CRM record id from the page URL, the record=... part
-    value: test_order
+    value: order_earn
+    aliases: [test_order]
+    mutating: true
     find: >-
       In the CRM, open Invoices (AOS_Invoices = shipping-only orders) and find one for the test client {client}
-      (match by that login/email or by the orders it owns) that is at
-      status "Invoiced & Shipped", has an invoice, nothing paid and unpaid shipping > 0. Give the number with its letter prefix, e.g. A1142. An order with rewards
-      still pending from an earlier run is still a fit (the check clears them).
-    create: >-
-      Create a shipping-only order for the test client {client} only, with "QA-AGENT TEST" in its description,
-      set its parcel to Received, then move the status one step at a time: Shipped to Warehouse > On Warehouse
-      floor > Ready to Ship > Shipped > Invoiced & Shipped ("Shipped" alone does not create the invoice).
-      Do not pay and do not apply rewards.
+      that is USD, status "Invoiced & Shipped", shipping invoiced, unpaid (balance = total, no Paid payment),
+      no rewards redeemed, status not Order Delivered. Give the number with its letter prefix exactly as shown.
+    create:
+      - app: portal
+        text: >-
+          As the portal test client, create a new USD Shipping Only order (one package). Put "QA-AGENT TEST" in
+          the description/notes if there is a field for it. Do not pay on the portal in this prep step.
+      - app: crm
+        text: >-
+          For that new shipping-only order of {client}: set its parcel to Received, then move status one step at
+          a time (save each): Shipped to Warehouse > On Warehouse floor > Ready to Ship > Shipped >
+          Invoiced & Shipped ("Shipped" alone does not create the invoice). Invoice the shipping in the CRM.
+          Do not pay and do not apply rewards.
     verify:
       app: portal
       text: >-
-        Follow recipe R1 step 4: browser_navigate straight to <portal URL>/shipping-only/invoice/{record} (the
+        Follow recipe R1: browser_navigate straight to <portal URL>/shipping-only/invoice/{record} (the
         portal invoice address uses the CRM record id; do not use View Invoice). If {record} is unknown, open
         Shipping Only orders and find order {value}. Do not click Make a Payment or Pay By Card. Wait about 4 seconds, then
         read the page: it is usable if it shows a balance > 0 and a Pay By Card button.{condition}
         If rewards from an earlier run are still applied (a pending amount with an X), click the X to remove them,
         re-read the page and judge it again; that order is still usable.
-      condition:                     # fills {condition}: does this case use Savo Rewards?
+      condition:
         when: ["\\breward", "\\bredeem", "use up to", "wallet"]
         unless: ["without (any |the |savo )*rewards", "no (savo )?rewards (applied|used)", "(do not|don't|not) (apply|use) (any |savo )*rewards"]
         then: >-
@@ -131,31 +340,85 @@ data_prep:
         else: >-
           {space}This case pays without rewards (it may be the case that fills the wallet), so a Savo Rewards box
           that says "no Savo Rewards" is fine and does not make the order unusable. Do not apply rewards.
-      keep_record_if:                # order is fine but the wallet is empty: keep the order, block the case
+      keep_record_if:
+        reason: "no savo rewards|rewards box|use up to|wallet|no rewards"
+        only_when_condition: true
+        note: the client's Savo Rewards wallet is empty or negative (top it up with the earn case first)
+    consumed_by: ["complete payment", "pay with", "\\bpays?\\b", "4242", "earn"]
+  - id: shipping_only_order_multi
+    placeholder: ORDER-MULTI
+    area: rewards
+    when:
+      areas: [rewards, portal]
+      any: ["ORDER-MULTI", "multi[- ]package", "second package", "2nd package", "additional parcel"]
+      none: ["buy ?& ?ship", "\\bKES\\b", "shilling", "ORDER-EARN"]
+    app: crm
+    find_app: crm
+    client_login_app: portal
+    record_hint: the CRM record id from the page URL, the record=... part
+    value: order_multi
+    aliases: [test_order]
+    mutating: true
+    find: >-
+      In the CRM, open Invoices (AOS_Invoices = shipping-only orders) and find one for the test client {client}
+      that is USD, status "Invoiced & Shipped", exactly one package, shipping invoiced, unpaid, no rewards
+      redeemed/applied. Give the number with its letter prefix exactly as shown.
+    create:
+      - app: portal
+        text: >-
+          As the portal test client, create a new USD Shipping Only order with exactly one package. Put
+          "QA-AGENT TEST" in the description/notes if there is a field for it. Do not pay.
+      - app: crm
+        text: >-
+          For that new shipping-only order of {client}: set its parcel to Received, then move status one step at
+          a time (save each): Shipped to Warehouse > On Warehouse floor > Ready to Ship > Shipped >
+          Invoiced & Shipped. Invoice the shipping in the CRM. Leave exactly one package. Do not pay and do not
+          apply rewards.
+    verify:
+      app: portal
+      text: >-
+        browser_navigate straight to <portal URL>/shipping-only/invoice/{record}. Do not click Make a Payment or
+        Pay By Card. Wait about 4 seconds, then read the page: usable if balance > 0 and a Pay By Card button.{condition}
+      condition:
+        when: ["\\breward", "\\bredeem", "use up to", "wallet"]
+        unless: ["without (any |the |savo )*rewards", "no (savo )?rewards (applied|used)", "(do not|don't|not) (apply|use) (any |savo )*rewards"]
+        then: >-
+          {space}It must also show the Savo Rewards box with "You can use up to $X" (X > 0). Reload once if the box
+          says "no Savo Rewards".
+        else: >-
+          {space}A Savo Rewards box that says "no Savo Rewards" is fine. Do not apply rewards.
+      keep_record_if:
         reason: "no savo rewards|rewards box|use up to|wallet|no rewards"
         only_when_condition: true
         note: the client's Savo Rewards wallet is empty or negative (top it up with the earn case first)
     consumed_by: ["complete payment", "pay with", "\\bpays?\\b", "4242"]
   - id: shipping_only_order_kes
+    placeholder: ORDER-KES
     area: rewards
     when:
-      areas: [rewards, portal]        # portal-area cases (B1, B3, B12, B15, B16) open an invoice too
-      any: ["\\bKES\\b", "shilling"]
+      areas: [rewards, portal]
+      any: ["ORDER-KES", "\\bKES\\b", "shilling"]
       none: ["buy ?& ?ship"]
     app: crm
-    client_login_app: portal          # the portal login picked at the start is the only CRM contact identity
+    find_app: crm
+    client_login_app: portal
     record_hint: the CRM record id from the page URL, the record=... part
-    value: test_order
+    value: order_kes
+    aliases: [test_order]
+    mutating: true
     find: >-
       In the CRM, open Invoices (AOS_Invoices = shipping-only orders) and find one for the test client {client}
-      (match by that login/email or by the orders it owns) that is at
-      status "Invoiced & Shipped", in KES (Kenyan Shillings), has an invoice, nothing paid and unpaid shipping > 0. Give the number with its letter prefix, e.g. A1142. An order with rewards
-      still pending from an earlier run is still a fit (the check clears them).
-    create: >-
-      Create a shipping-only order in KES (Kenyan Shillings) for the test client {client} only, with "QA-AGENT TEST" in its description,
-      set its parcel to Received, then move the status one step at a time: Shipped to Warehouse > On Warehouse
-      floor > Ready to Ship > Shipped > Invoiced & Shipped ("Shipped" alone does not create the invoice).
-      Do not pay and do not apply rewards.
+      that is at status "Invoiced & Shipped", in KES (Kenyan Shillings), has an invoice, nothing paid and unpaid
+      shipping > 0. Give the number with its letter prefix exactly as shown.
+    create:
+      - app: portal
+        text: >-
+          As the portal test client, create a new KES (Kenyan Shillings) Shipping Only order. Put "QA-AGENT TEST"
+          in the description/notes if possible. Do not pay.
+      - app: crm
+        text: >-
+          For that KES shipping-only order of {client}: set parcel to Received; move status one step at a time to
+          Invoiced & Shipped; invoice the shipping. Do not pay and do not apply rewards.
     verify:
       app: portal
       text: >-
@@ -180,20 +443,26 @@ data_prep:
         note: the client's Savo Rewards wallet is empty or negative (top it up with the earn case first)
     consumed_by: ["complete payment", "pay with", "\\bpays?\\b", "4242"]
   - id: buy_ship_order
+    placeholder: ORDER-BAS
     area: rewards
     when:
       areas: [rewards, portal]
-      any: ["buy ?& ?ship"]
+      any: ["ORDER-BAS", "buy ?& ?ship"]
     app: crm
+    find_app: crm
     client_login_app: portal
     record_hint: the CRM record id from the page URL, the record=... part
-    value: test_quote
+    value: order_bas
+    aliases: [test_quote]
+    mutating: true
     find: >-
       In the CRM, open Quotes (AOS_Quotes = Buy & Ship orders) and find one for the test client {client} at status
       "Awaiting Payment" or "Shipping Fee Invoiced" with an unpaid balance > 0 (the rewards box only shows then).
-    create: >-
-      Create a Buy & Ship order for the test client {client} only, with "QA-AGENT TEST" in its description, and move
-      it to "Awaiting Payment" (or "Shipping Fee Invoiced"). Do not pay and do not apply rewards.
+    create:
+      - app: crm
+        text: >-
+          Create a Buy & Ship order for the test client {client} only, with "QA-AGENT TEST" in its description, and move
+          it to "Awaiting Payment" (or "Shipping Fee Invoiced"). Do not pay and do not apply rewards.
     verify:
       app: portal
       text: >-
@@ -232,26 +501,38 @@ data_prep:
         note: the client's Savo Rewards wallet is empty or negative (top it up with the earn case first)
     consumed_by: ["complete payment", "pay with", "\\bpays?\\b", "4242"]
   - id: wallet_topup
+    placeholder: Wallet
     area: rewards
     when:
       areas: [rewards, portal]
-      any: ["max(imum)?", "full cap", "\\bcap\\b", "more than", "exceed"]
+      any: ["max(imum)?", "full cap", "\\bcap\\b", "more than", "exceed", "\\bWallet\\b"]
     envs: [staging, local]          # earning needs a payment, which never happens on pre-prod/production
     blocked_note: >-
       the case needs a rewards balance above the cap, and topping it up means paying an order, which the agent
       never does on pre-prod or production; top up the test client's wallet by hand and rerun
     app: crm
+    find_app: crm
+    client_login_app: portal
     value: wallet_ready
     min_value: 0.01        # checked in code: a negative or zero wallet is never "ready"
     find: >-
       Open the CRM contact of the test client {client} and read Current Rewards. If it is at least the redeem cap of
-      the order in values_so_far (test_order / test_quote; cap = 10% of unpaid shipping) plus $5, it is enough:
-      record_value('wallet_ready', '<Current Rewards>'). If it is negative, zero or less than that, it is not
-      enough: record_value('wallet_ready', 'none').
-    create: >-
-      Earn rewards: take a QA-AGENT TEST shipping-only order of {client}, pay it on the portal with the Stripe test
-      card from the Payments facts (staging only), then move it to "Order Delivered" in the CRM so 5% is earned.
-      Repeat until Current Rewards is enough, then record_value('wallet_ready', '<Current Rewards>').
+      the order in values_so_far (order_multi / order_earn / test_order / test_quote; cap = 10% of unpaid shipping)
+      plus $5, it is enough: record_value('wallet_ready', '<Current Rewards>'). If it is negative, zero or less than
+      that, it is not enough: record_value('wallet_ready', 'none').
+    create:
+      - app: portal
+        text: >-
+          Earn rewards: take a QA-AGENT TEST shipping-only order of {client} and pay it on the portal with the Stripe
+          test card from the Payments facts (staging only, 4242). Portal card payment is the default when the case
+          says pay on the portal.
+      - app: crm
+        text: >-
+          Move that paid order to "Order Delivered" so 5% is earned. Repeat until Current Rewards is enough, then
+          record_value('wallet_ready', '<Current Rewards>'). CRM payment alternative (only when portal card payment
+          cannot be made): on the order DetailView open the Payments subpanel, Create a Paid payment for the full
+          balance, confirm the subpanel shows the linked Paid payment and balance 0, then move status to Order
+          Delivered. Note in the run that payment was made in CRM.
 
 # Each app's stack: testers call lookup_docs for these when a screen or workflow is unfamiliar (cached in docs/).
 stack:

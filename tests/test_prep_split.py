@@ -78,9 +78,10 @@ class PrepSplit(unittest.TestCase):
             rules = yaml.safe_load(fh)["data_prep"]
         rule = next(r for r in rules if r["id"] == "shipping_only_order")
         email = "equipmentventures@gmail.com"
+        value = rule["value"]
         for env in ("staging", "preprod", "local", "prod"):
-            f = Fake({"find": [{"test_order": "A1", "test_order_record": "r1"}],
-                      "check": [{"test_order_ok": "yes"}]})
+            f = Fake({"find": [{value: "A1", f"{value}_record": "r1"}],
+                      "check": [{f"{value}_ok": "yes"}]})
             st = State()
             plan = N(env=env, requirements=[N(key="account.portal.customer", value=email)], task_id=1)
             with mock.patch("agent_tester.coordinator.brief_for",
@@ -147,10 +148,51 @@ class PrepSplit(unittest.TestCase):
         rules = yaml.safe_load(open("packs/savostore/pack.yaml"))["data_prep"]
         c = PlannedCase(id="B12", title="Apply / remove does not stack", area="portal",
                         steps=[Step(text="Open the invoice for ORDER-MULTI", app="portal")])
-        self.assertIn("shipping_only_order", [r["id"] for r in D.matching_rules(c, rules)])
+        self.assertIn("shipping_only_order_multi", [r["id"] for r in D.matching_rules(c, rules)])
         e1 = PlannedCase(id="E1", title="Earn on a paid order", area="rewards",
                          steps=[Step(text="Open the ORDER-EARN invoice on the portal", app="portal")])
+        self.assertIn("shipping_only_order", [r["id"] for r in D.matching_rules(e1, rules)])
         self.assertNotIn("paid_order_new_parcel", [r["id"] for r in D.matching_rules(e1, rules)])
+
+    def test_multi_app_create_parts(self):
+        import yaml
+        from agent_tester.placeholders import create_parts
+        rules = yaml.safe_load(open("packs/savostore/pack.yaml"))["data_prep"]
+        rule = next(r for r in rules if r["id"] == "shipping_only_order")
+        parts = create_parts(rule)
+        self.assertEqual([p["app"] for p in parts], ["portal", "crm"])
+        self.assertIn("portal", parts[0]["text"].lower())
+        self.assertIn("Received", parts[1]["text"])
+
+    def test_create_sequence_runs_each_app(self):
+        rule = dict(RULE, create=[
+            {"app": "portal", "text": "make on portal for {client}"},
+            {"app": "crm", "text": "finish in crm for {client}"},
+        ])
+        # Multi-part create uses PREP-…-create-0 / create-1; map those onto the create script.
+        class SeqFake(Fake):
+            def __call__(self, app, brief, state):
+                cid = brief["case_id"]
+                if "-create-" in cid or cid.endswith("-create"):
+                    kind = "create"
+                else:
+                    kind = cid.rsplit("-", 1)[-1]
+                self.calls.append((kind, brief["read_only"], brief["steps"][0]["text"], app))
+                v = self.script[kind].pop(0)
+                return N(values=v, notes="", stuck=False, limit_hit=False)
+
+        f = SeqFake({"find": [{"test_order": "none"}],
+                     "create": [{"test_order": "tmp"}, {"test_order": "A9", "test_order_record": "r9"}],
+                     "check": [{"test_order_ok": "yes"}]})
+        st = State()
+        plan = N(env="local", requirements=[], task_id=1)
+        with mock.patch("agent_tester.coordinator.brief_for",
+                        side_effect=lambda p, c, s, st: {"case_id": c.id, "steps": [{"text": c.steps[0].text}]}):
+            r = D._ensure_one(plan, case(), st, {"crm": f, "portal": f}, rule)
+        self.assertIsNone(r)
+        self.assertEqual([c[0] for c in f.calls], ["find", "create", "create", "check"])
+        self.assertEqual([c[3] for c in f.calls if c[0] == "create"], ["portal", "crm"])
+        self.assertEqual(st.data["prep"]["o"]["value"], "A9")
 
 
 if __name__ == "__main__":

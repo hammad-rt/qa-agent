@@ -172,7 +172,7 @@ class Environments(unittest.TestCase):
     def test_plan_gate_on_prod_offers_nothing(self):
         plan = TestPlan(task_id=1, env="prod", preapprovable_actions=["create_test_order"])
         lines = []
-        ok, pre = gate.plan_gate(plan, input_fn=lambda p: "y", out=lines.append, policy=self._policy("prod"))
+        ok, pre, _corr = gate.plan_gate(plan, input_fn=lambda p: "y", out=lines.append, policy=self._policy("prod"))
         self.assertEqual(pre, [])
         self.assertTrue(any("ask you before each" in l for l in lines))
 

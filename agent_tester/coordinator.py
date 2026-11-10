@@ -153,62 +153,133 @@ def mark_discovery_stale(state, area: str | None, app: str, why: str = "") -> No
 
 
 DISCOVERY_TRIES = 2
+DISCOVERY_BASE_CALLS = 30
+DISCOVERY_CALLS_PER_ITEM = 5
+DISCOVERY_CALLS_CAP = 60
 _NO_PROGRESS = re.compile(r"maximum repeated|did not respond|no screens were mapped|unable to|could not reach|stuck",
                           re.I)
 
 
-def ensure_discovery(plan, case, app: str, state, testers: dict, memory) -> dict:
+def discovery_checklist(plan, app: str, state, *, area: str | None = None,
+                        data_prep: list[dict] | None = None) -> list[str]:
+    """Short deduped checklist for this area:app from ALL selected cases + up-front data-plan parts."""
+    from .placeholders import (checklist_from_cases, discovery_items_from_plan, merge_checklist)
+    cases = [c for c in plan.cases if (area is None or c.area == area)]
+    # Prefer all plan cases that touch this app (not only current area) so later cases are covered.
+    cases_for_app = [c for c in plan.cases
+                     if any((s.app or "none") == app for s in c.steps)]
+    case_items = checklist_from_cases(cases_for_app or cases, app, limit=10)
+    data_plan = state.data.get("_data_plan_rules") or state.data.get("data_plan") or []
+    plan_items = discovery_items_from_plan(data_plan, app)
+    # Also pull create apps from matching data_prep rules (legacy).
+    prep_items = []
+    if data_prep:
+        from .data_prep import matching_rules, _create_parts
+        for c in cases_for_app or cases:
+            for rule in matching_rules(c, data_prep):
+                for p in _create_parts(rule):
+                    if p.get("app") == app:
+                        prep_items.append(f"prep create on {app}: {(p.get('text') or '')[:60]}")
+                if (rule.get("find_app") or rule.get("app")) == app and rule.get("find"):
+                    prep_items.append(f"prep find on {app}")
+    return merge_checklist(case_items, plan_items, prep_items, limit=10)
+
+
+def _checklist_covered(entry: dict, checklist: list[str]) -> list[str]:
+    """Return checklist items not obviously mentioned in prior discovery notes/recipes."""
+    blob = " ".join([
+        str(entry.get("notes") or ""),
+        " ".join(entry.get("checklist") or []),
+        " ".join(entry.get("recipes") or []),
+    ]).lower()
+    missing = []
+    for item in checklist:
+        # Token overlap: require at least one distinctive word (>3 chars) from the item.
+        words = [w for w in re.findall(r"[a-z0-9]{4,}", item.lower()) if w not in
+                 {"from", "with", "their", "this", "that", "open", "list", "and"}]
+        if not words or not any(w in blob for w in words):
+            missing.append(item)
+    return missing
+
+
+def ensure_discovery(plan, case, app: str, state, testers: dict, memory,
+                     data_prep: list[dict] | None = None,
+                     checklist: list[str] | None = None) -> dict:
     """Always run a bounded read-only discovery pass for this area/app (once per key this run).
 
     Prior pack/memory recipes are HINTS only — they never skip discovery. Re-runs when the env
     fingerprint (CRM/portal host) changed or when a recipe used this run was marked failed/stale.
-    Returns {source, recipes, notes, hints, env} stored under state.data['discovery'][key]."""
+    Checklist is built from ALL selected cases + data-plan parts for this app (not just this case).
+    If a later need is missing from the cached map, runs a small incremental pass for those items.
+    Returns {source, recipes, notes, hints, env, checklist} stored under state.data['discovery'][key]."""
     key = discovery_key(case.area, app)
     store = state.data.setdefault("discovery", {})
     fp = env_fingerprint(plan, [app])
     stale = (state.data.get("discovery_stale") or {}).get(key)
     cached = store.get(key)
+    want = list(checklist) if checklist is not None else discovery_checklist(
+        plan, app, state, area=case.area, data_prep=data_prep)
     if cached and not stale and cached.get("env") == fp:
-        return cached
+        missing = _checklist_covered(cached, want)
+        if not missing:
+            return cached
+        # Incremental discovery for just the missing items.
+        return _run_discovery(plan, case, app, state, testers, memory, fp, key, store,
+                              want=missing, incremental=True, prior=cached)
     if cached and (stale or cached.get("env") != fp):
         why = stale or f"env changed ({cached.get('env')!r} -> {fp!r})"
         state.checkpoint(f"discovery re-run for {key}: {why}")
         store.pop(key, None)
         (state.data.get("discovery_stale") or {}).pop(key, None)
 
+    return _run_discovery(plan, case, app, state, testers, memory, fp, key, store,
+                          want=want, incremental=False, prior=None)
+
+
+def _run_discovery(plan, case, app, state, testers, memory, fp, key, store, *,
+                   want: list[str], incremental: bool, prior: dict | None) -> dict:
     from . import learned
-    # Lean hints only (ranked + budgeted). learned.md is never injected wholesale.
     hints = recipes_covering(memory, case.area, app, state=state, title=case.title or "",
                              pack_root=state.data.get("pack_root"))
     tester = testers.get(app)
     if tester is None:
         entry = {"source": "skipped", "recipes": list(hints), "hints": list(hints),
-                 "notes": f"no tester for {app}", "env": fp}
+                 "notes": f"no tester for {app}", "env": fp, "checklist": want}
         store[key] = entry
         state.save()
         return entry
 
     from .models import Step
-    goal = case.title or case.id
-    disco_case_id = f"DISCO-{case.area or app}"
+    goal_lines = list(want) if want else [case.title or case.id]
+    goal = "; ".join(goal_lines[:10])
+    disco_case_id = f"DISCO-{case.area or app}" + ("-inc" if incremental else "")
     hint_note = ""
     if hints:
         hint_note = (
             f" Prior recipes/routes for this area are HINTS only ({len(hints)}): verify each against the live UI; "
             "ignore stale or wrong paths; map the real menus, search and screens you see now.")
+    need_detail = any(re.search(r"(?i)detail|subpanel|payment|status|record", x) for x in goal_lines)
+    detail_note = ""
+    if need_detail:
+        detail_note = (
+            " When the checklist needs record-level actions, open ONE existing record's DetailView (read-only) "
+            "and note its subpanels and their Create/Select controls. Never save.")
     steps = [Step(
-        text=(f"Map how to reach the screens/actions needed for: {goal}. "
+        text=(f"Map how to reach these screens/actions (checklist): {goal}. "
               "Note menu labels, search/filter paths and URLs (ID only). Do not change data, settings, or pay."
-              + hint_note),
+              + detail_note + hint_note),
         app=app)]
     pseudo = PlannedCase(id=disco_case_id, title=f"discover UI for {case.area or app}",
                          area=case.area, steps=steps, type=case.type)
     brief = brief_for(plan, pseudo, [0], state)
     brief["discovery"] = True
     brief["read_only"] = True
-    brief["max_tool_calls"] = 30
+    n_extra = max(0, len(goal_lines) - 1)
+    brief["max_tool_calls"] = min(DISCOVERY_CALLS_CAP,
+                                  DISCOVERY_BASE_CALLS + DISCOVERY_CALLS_PER_ITEM * n_extra)
     brief["discovery_goal"] = goal
-    brief["recipes"] = list(hints)          # hints for the discovery turn; never a skip
+    brief["discovery_checklist"] = goal_lines
+    brief["recipes"] = list(hints)
     brief["discovery_hints"] = list(hints)
     notes, blocked = "", False
     try:
@@ -220,7 +291,6 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory) -> dict
     except Exception as e:  # noqa: BLE001
         notes = f"discovery failed: {type(e).__name__}: {e}"
         state.data.setdefault("notes", []).append(notes)
-    # Collect recipes proposed during this run for the area (status proposed)
     proposed = []
     if memory is not None:
         try:
@@ -230,11 +300,15 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory) -> dict
                     proposed.append(r["text"])
         except Exception:  # noqa: BLE001
             pass
-    # Live discovery notes win; keep prior hints so later turns still see them, after fresh findings.
-    recipes = list(dict.fromkeys(proposed + list(hints)))
-    entry = {"source": "discovery", "recipes": recipes, "hints": list(hints),
-             "notes": notes, "blocked": blocked, "env": fp}
-    # Platform / version live on the discovery fingerprint (env-bound), never as lasting facts.
+    prior_notes = (prior or {}).get("notes") or ""
+    prior_recipes = list((prior or {}).get("recipes") or [])
+    prior_checklist = list((prior or {}).get("checklist") or [])
+    combined_notes = (prior_notes + ("\n" if prior_notes and notes else "") + notes).strip()
+    recipes = list(dict.fromkeys(proposed + prior_recipes + list(hints)))
+    checklist = list(dict.fromkeys(prior_checklist + goal_lines))
+    entry = {"source": "discovery" + ("-inc" if incremental else ""), "recipes": recipes,
+             "hints": list(hints), "notes": combined_notes, "blocked": blocked, "env": fp,
+             "checklist": checklist}
     try:
         from .platform_detect import detect, fingerprint_patch
         from .memory.seeds import ensure_seeds
@@ -258,8 +332,6 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory) -> dict
                                     and not _NO_PROGRESS.search(notes))
     tries = state.data.setdefault("discovery_tries", {})
     tries[key] = tries.get(key, 0) + 1
-    # Always cache for this run so ensure_case_discovery + _run_case do not double-fire the same key.
-    # Re-run only on env fingerprint change or mark_discovery_stale (failed recipe this run).
     store[key] = entry
     if useful and notes:
         learned.add(state.data.get("pack_root"), case.area, app,
@@ -273,14 +345,15 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory) -> dict
         f"version: {entry.get('platform_version')} ({entry.get('version_confidence')})\n"
     )
     (ddir / f"{safe}.md").write_text(
-        f"# Discovery {key}\n\nsource: discovery\nenv: {fp}\n{plat_line}\n## Notes\n{notes}\n\n## Hints\n"
+        f"# Discovery {key}\n\nsource: {entry['source']}\nenv: {fp}\n{plat_line}"
+        f"\n## Checklist\n" + "\n".join(f"- {c}" for c in checklist)
+        + f"\n\n## Notes\n{combined_notes}\n\n## Hints\n"
         + "\n".join(f"- {r}" for r in hints) + "\n\n## Recipes\n"
         + "\n".join(f"- {r}" for r in proposed) + "\n")
     state.checkpoint(f"discovery done for {key}" + (" (blocked)" if blocked else "")
-                     + (f" ({len(hints)} hint(s))" if hints else "")
+                     + (" (incremental)" if incremental else "")
+                     + (f" ({len(want)} item(s))" if want else "")
                      + (f" platform={entry.get('platform')}" if entry.get("platform") else ""))
-    # Pause the run only when login/transport blocked discovery repeatedly — empty notes alone
-    # must not stop the suite (case body / hints can still try).
     hard = blocked or notes.startswith("discovery failed")
     if not useful and hard and tries[key] >= DISCOVERY_TRIES:
         raise RunPaused(f"Discovery for {key} found no way to the screen after {tries[key]} tries "
@@ -289,27 +362,41 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory) -> dict
     return entry
 
 
-def apps_needing_discovery(case, data_prep: list[dict] | None = None) -> list[str]:
-    """Apps that need a discovery pass before mutating prep / the case body (case steps + matching prep)."""
+def apps_needing_discovery(case, data_prep: list[dict] | None = None,
+                           data_plan: list[dict] | None = None) -> list[str]:
+    """Apps that need a discovery pass before mutating prep / the case body (case steps + prep + data plan)."""
     apps: list[str] = []
     for s in case.steps:
         a = s.app or "none"
         if a not in ("none", "redmine") and a not in apps:
             apps.append(a)
     if data_prep:
-        from .data_prep import matching_rules
+        from .data_prep import matching_rules, _create_parts
         for rule in matching_rules(case, data_prep):
-            for a in (rule.get("app"), (rule.get("verify") or {}).get("app")):
+            for a in (rule.get("find_app"), rule.get("app"), (rule.get("verify") or {}).get("app")):
                 if a and a not in ("none", "redmine") and a not in apps:
                     apps.append(a)
+            for p in _create_parts(rule):
+                a = p.get("app")
+                if a and a not in ("none", "redmine") and a not in apps:
+                    apps.append(a)
+    for row in data_plan or []:
+        for a in (row.get("find_app"), row.get("verify_app")):
+            if a and a not in ("none", "redmine") and a not in apps:
+                apps.append(a)
+        for p in row.get("create") or []:
+            a = p.get("app") if isinstance(p, dict) else None
+            if a and a not in ("none", "redmine") and a not in apps:
+                apps.append(a)
     return apps
 
 
 def ensure_case_discovery(plan, case, state, testers: dict, memory, data_prep: list[dict] | None = None) -> dict:
-    """Read-only self-discovery for every app this case (and its prep) will use, before any mutate."""
+    """Read-only self-discovery for every app this case (and its prep / data plan) will use, before any mutate."""
     out = {}
-    for app in apps_needing_discovery(case, data_prep):
-        out[app] = ensure_discovery(plan, case, app, state, testers, memory)
+    data_plan = state.data.get("_data_plan_rules") or state.data.get("data_plan") or []
+    for app in apps_needing_discovery(case, data_prep, data_plan):
+        out[app] = ensure_discovery(plan, case, app, state, testers, memory, data_prep=data_prep)
     return out
 
 
@@ -423,39 +510,111 @@ def run_plan(plan: TestPlan, state: RunState, *args, **kwargs) -> dict[str, Case
             pass
 
 
+def _resolve_upfront(plan, state, testers, memory, data_prep, pack_cfg) -> None:
+    """Discover apps used by the data plan, resolve CRM contact once, then find/create every placeholder."""
+    from .placeholders import build_data_plan
+    from .data_prep import resolve_data_plan, ensure_contact, contact_needed
+    if state.data.get("data_plan_resolved"):
+        return
+    corrections = state.data.get("data_plan_corrections") or {}
+    data_plan = state.data.get("_data_plan_rules") or build_data_plan(plan, pack_cfg, corrections=corrections)
+    state.data["_data_plan_rules"] = data_plan
+    # Discovery for every app the data plan (and first cases) will touch, before mutating create.
+    seen_apps: list[str] = []
+    for row in data_plan:
+        for a in [row.get("find_app"), row.get("verify_app")] + [
+                p.get("app") for p in (row.get("create") or []) if isinstance(p, dict)]:
+            if a and a not in ("none", "redmine") and a not in seen_apps:
+                seen_apps.append(a)
+    seed_case = plan.cases[0] if plan.cases else None
+    rules_for_contact = list(data_prep or [])
+    for row in data_plan:
+        if row.get("rule"):
+            rules_for_contact.append(row["rule"])
+    # Apps needed for contact lookup must be discovered before the contact turn.
+    for rule in rules_for_contact:
+        a = rule.get("app") or rule.get("find_app")
+        if a and a not in ("none", "redmine") and a not in seen_apps:
+            # Only if some selected case actually needs this contact rule.
+            if seed_case is not None and any(contact_needed(c, [rule]) for c in plan.cases):
+                seen_apps.append(a)
+    if seed_case is not None:
+        for app in seen_apps:
+            ensure_discovery(plan, seed_case, app, state, testers, memory, data_prep=data_prep or [])
+        for c in plan.cases:
+            if contact_needed(c, rules_for_contact) is None:
+                continue
+            blocked = ensure_contact(plan, c, state, testers, rules_for_contact)
+            if blocked is not None:
+                state.data.setdefault("notes", []).append(f"up-front contact lookup: {blocked.note}")
+            break
+    if data_plan:
+        resolve_data_plan(plan, state, testers, data_plan)
+    state.data["data_plan_resolved"] = True
+    state.save()
+
+
 def _run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge: Judge,
              on_case_done: Callable[[CaseResult], None] | None = None, max_retries: int = 1,
              manual_login: Callable[[str, str], bool] | None = None,
              manual_login_apps: list[str] | None = None, memory=None,
-             data_prep: list[dict] | None = None) -> dict[str, CaseResult]:
+             data_prep: list[dict] | None = None,
+             pack_cfg: dict | None = None) -> dict[str, CaseResult]:
     state.checkpoint("run started", status="running")
     read_snapshot(plan, state, testers, "baseline")
     by_id = {c.id: c for c in plan.cases}
-    for cid in execution_order(plan):
+    pack_cfg = pack_cfg or state.data.get("pack_cfg") or {}
+    from .data_prep import ensure_data, after_case, ensure_contact
+    from .guidance_redo import apply_redo, report_undelivered
+    from .placeholders import case_unresolved_tokens
+
+    _resolve_upfront(plan, state, testers, memory, data_prep or [], pack_cfg)
+
+    queue = list(execution_order(plan))
+    i = 0
+    while i < len(queue):
+        redone = apply_redo(state, plan, pack_cfg)
+        if redone:
+            # Next-after-current: insert at i, dropping later duplicates of the same ids.
+            rest = [c for c in queue[i:] if c not in redone]
+            queue = queue[:i] + list(redone) + rest
+            continue
+
+        cid = queue[i]
+        i += 1
         if state.result(cid):
-            continue                                  # resume: already done
-        case = by_id[cid]
+            continue
+        case = by_id.get(cid)
+        if case is None:
+            continue
         from .agents.llm import TRACE_CASE
-        from .data_prep import ensure_data, after_case, ensure_contact
         tok = TRACE_CASE.set(cid)
         try:
-            # Deps before discovery (do not spend a discovery pass on a blocked case).
             result = _deps_block(case, state)
             if result is None and not case.skip_reason:
-                # Discover first (read-only), then resolve CRM contact id, then mutating prep / case body.
+                missing = case_unresolved_tokens(case, state, pack_cfg)
+                if missing:
+                    result = CaseResult(
+                        case_id=case.id, verdict="BLOCKED", expected=case.expected,
+                        note=("prep-missing: placeholder(s) " + ", ".join(missing)
+                              + " have no resolved value for this run (find/create failed or was skipped); "
+                              "never search the page for the literal token"))
+            if result is None and not case.skip_reason:
                 ensure_case_discovery(plan, case, state, testers, memory, data_prep or [])
                 result = ensure_contact(plan, case, state, testers, data_prep or [])
             if result is None and not case.skip_reason:
                 result = ensure_data(plan, case, state, testers, data_prep or [])
             if result is None:
                 result = _run_case(plan, case, state, testers, judge, max_retries, manual_login,
-                                   manual_login_apps, memory=memory)
+                                   manual_login_apps, memory=memory, pack_cfg=pack_cfg)
                 after_case(case, state, data_prep or [])
         finally:
             TRACE_CASE.reset(tok)
         state.set_result(result)
         if on_case_done:
             on_case_done(result)
+
+    report_undelivered(state, plan)
     read_snapshot(plan, state, testers, "final")
     state.checkpoint("run finished", status="finished")
     return {cid: state.result(cid) for cid in execution_order(plan)}
@@ -483,10 +642,11 @@ def _deps_block(case, state) -> CaseResult | None:
 
 
 def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
-              manual_login_apps=None, memory=None) -> CaseResult:
+              manual_login_apps=None, memory=None, pack_cfg: dict | None = None) -> CaseResult:
     blocked = _deps_block(case, state)
     if blocked is not None:
         return blocked
+    from .placeholders import inject_placeholders
     results: list[StepResult] = []
     for app, steps in app_turns(case):
         if app in ("none", "redmine"):
@@ -494,9 +654,21 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
         tester = testers.get(app)
         if tester is None:
             return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected, note=f"no tester for app '{app}'")
-        disco = ensure_discovery(plan, case, app, state, testers, memory)
+        disco = ensure_discovery(plan, case, app, state, testers, memory,
+                                 data_prep=None)
         brief = inject_discovery(brief_for(plan, case, steps, state), disco)
         brief = inject_memory(brief, memory, state, app)
+        brief = inject_placeholders(brief, state, pack_cfg)
+        # Guidance attached for a redo of this case.
+        extra = (state.data.get("case_guidance") or {}).pop(case.id, None)
+        if extra:
+            brief["redo_guidance"] = list(extra)
+            brief["placeholder_note"] = (
+                (brief.get("placeholder_note") or "")
+                + "\nGUIDANCE FROM THE USER (redo of this case):\n"
+                + "\n".join(f"- {t}" for t in extra)
+            ).strip()
+            state.save()
         attempt = outages = 0
         while True:
             log_mark = len(state.data["action_log"])

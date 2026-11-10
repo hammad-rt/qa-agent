@@ -35,7 +35,7 @@ class AutoMode(unittest.TestCase):
     def test_plan_gate_and_env_need_no_input(self):
         with mock.patch.dict(os.environ, {"QA_INTERACTIVE": ""}), mock.patch("builtins.input", side_effect=AssertionError):
             plan = mock.Mock(preapprovable_actions=[])
-            self.assertEqual(gate.plan_gate(plan, out=lambda *a: None), (True, []))
+            self.assertEqual(gate.plan_gate(plan, out=lambda *a: None)[:2], (True, []))
             self.assertEqual(gate.choose_env(mock.Mock(apps={}), out=lambda *a: None), "staging")
 
     def test_ask_batch_honors_injected_input_fn_in_auto(self):

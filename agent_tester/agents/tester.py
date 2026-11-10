@@ -65,6 +65,7 @@ PASTE_JS = r"""async (page) => {
   return JSON.stringify({value: await el.inputValue(), how});
 }"""
 _SAVE = re.compile(r"\b(save|submit|update|apply|confirm)\b", re.I)
+_SUBMIT = re.compile(r"\b(save|submit|update|apply|confirm|continue|next|create|finish|send)\b", re.I)
 RELOAD_HINT = ("You already saved/searched here and the expected message did not appear. Do not save or search "
                "again. Check the real result: reload the page (browser_navigate to the same address, or reopen it by "
                "its route), read the stored value with browser_snapshot and record_value it, then mark_step. "
@@ -1105,6 +1106,37 @@ class TesterSession:
             clicky = name in ("browser_click", "browser_run_code_unsafe", "browser_evaluate")
             warn_at, stop_at = (2, 4) if clicky else (LOOP_WARN, LOOP_STOP)   # a page click that did nothing: rethink at once
             cycling = _is_cycle(self._recent)
+            # Continue/Submit with no page change: surface validation/required markers once before loop counting.
+            submit_label = str(args.get("element") or args.get("name") or "")
+            if (clicky and name == "browser_click" and _SUBMIT.search(submit_label)
+                    and n >= warn_at and not cycling):
+                fed = getattr(self, "_submit_validation_fed", None)
+                if fed is None:
+                    self._submit_validation_fed = set()
+                    fed = self._submit_validation_fed
+                key = intent or sig
+                if key not in fed:
+                    from ..page_state import form_validation_messages
+                    page = getattr(self, "_page_state", "") or (
+                        self.last_snapshot if isinstance(self.last_snapshot, str) else "")
+                    msgs = form_validation_messages(page or "")
+                    fed.add(key)
+                    # Do not treat this click as a loop yet — give the model the form errors first.
+                    self._sigs[sig] = max(0, self._sigs.get(sig, 1) - 1)
+                    if intent:
+                        self._sigs[intent] = max(0, self._sigs.get(intent, 1) - 1)
+                    if msgs:
+                        joined = "; ".join(msgs[:6])
+                        return {"error": (
+                            f"Your {submit_label!r} click left the page unchanged. Visible validation / "
+                            f"required-field messages: {joined}. Fix those fields (do not click {submit_label!r} "
+                            f"again until they are cleared), then continue."
+                        )}
+                    return {"error": (
+                        f"Your {submit_label!r} click left the page unchanged and no step progressed. "
+                        f"Take a fresh browser_snapshot and look for required-field markers, red text, or "
+                        f"alert/status messages near the form before clicking {submit_label!r} again."
+                    )}
             if (n >= stop_at or cycling) and not getattr(self, "_explored", False):
                 return self._start_exploring(name, "the same actions kept repeating" if cycling else
                                              f"{name} was repeated {n} times")
@@ -1200,6 +1232,8 @@ class TesterSession:
             self.state.save()
             return None
         from ..auto import ask_line
+        import uuid
+        ask_id = f"stuck-{self.case_id}-{uuid.uuid4().hex[:8]}"
         ans = ""
         try:
             # Best-effort timeout: alarm is Unix-only; without it, ask_line blocks until answer/EOF.
@@ -1215,7 +1249,9 @@ class TesterSession:
             except (ValueError, AttributeError, OSError):
                 old = None
             try:
-                ans = ask_line(f"\n{q}").strip()
+                # ask_line flushes buffered stdin and tags the prompt so a prior stuck-ask answer
+                # (e.g. CONTACT-*) cannot auto-answer PREP-*-create.
+                ans = ask_line(f"\n{q}", ask_id=ask_id).strip()
             finally:
                 try:
                     signal.alarm(0)
@@ -1228,10 +1264,10 @@ class TesterSession:
         from ..redact import scrub_user_answer
         safe_ans = scrub_user_answer(ans)[:500]
         self.state.log_action(case_id=self.case_id, app=self.app, tool="stuck_ask",
-                              args={"why": why, "question": q[:500], "answer": safe_ans},
+                              args={"why": why, "question": q[:500], "answer": safe_ans, "ask_id": ask_id},
                               plan_step=self.current_step, outcome="answered" if ans else "timeout")
         self.state.data.setdefault("notes", []).append(
-            f"Stuck ask on {self.case_id}: {why}; answer={safe_ans[:200] or '(none)'}")
+            f"Stuck ask on {self.case_id}: {why}; ask_id={ask_id}; answer={safe_ans[:200] or '(none)'}")
         self.state.save()
         if not ans:
             return None  # fall through to normal block

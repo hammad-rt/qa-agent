@@ -1,6 +1,9 @@
 """Planner + reviewer (LLM). Returns a validated TestPlan; the fixed checks run after."""
 from __future__ import annotations
 
+import asyncio
+import os
+
 from ..config import ROOT, Settings
 from ..models import TestPlan
 from ..redact import redact
@@ -27,19 +30,48 @@ def _static(s: str):
     return lambda _ctx: s
 
 
-PLAN_BATCH = int(__import__("os").environ.get("PLAN_BATCH", "5"))   # cases per planner answer for long lists
+# Legacy fixed count (overridden by token-budget sizing when PLAN_BATCH_TOKENS is set).
+PLAN_BATCH = int(os.environ.get("PLAN_BATCH", "8"))
+PLAN_BATCH_TOKENS = int(os.environ.get("PLAN_BATCH_TOKENS", "6000"))  # ~case texts packed per call
+PLAN_CONCURRENCY = int(os.environ.get("PLAN_CONCURRENCY", "3"))
 
 
-async def plan_in_batches(settings, pack, task_text: str, task_id: int, env: str, ids: list[str], repair: bool = True,
-                          **kw) -> TestPlan:
-    """A long case list (a cases file) is planned a few cases at a time, so one answer never has to hold them all;
-    ids and depends_on are kept as written, then the parts are joined in order and Quick Repair is added once."""
-    parts = []
-    for i in range(0, len(ids), PLAN_BATCH):
-        batch = ids[i:i + PLAN_BATCH]
-        print(f"Planning cases {', '.join(batch)} ({i + len(batch)}/{len(ids)})")
-        parts.append(await plan_task(settings, pack, task_text, task_id, env, only_case=",".join(batch),
-                                     repair=False, **kw))
+def _case_blocks(task_text: str, ids: list[str]) -> list[tuple[str, str]]:
+    """Best-effort extract per-case text blobs from the task markdown for sizing."""
+    import re
+    blocks = []
+    for cid in ids:
+        # Match headings / bold ids like **E1** or ### E1 or E1:
+        m = re.search(rf"(?is)(?:^|\n)[^\n]*\b{re.escape(cid)}\b[^\n]*\n(.*?)(?=\n[^\n]*\b(?:TC\d+|[A-Z]\d+(?:-\d+)?)\b|\Z)",
+                      task_text)
+        blob = m.group(0) if m else cid
+        blocks.append((cid, blob[:4000]))
+    return blocks
+
+
+def size_batches(task_text: str, ids: list[str], *, token_budget: int | None = None,
+                 max_count: int | None = None) -> list[list[str]]:
+    """Split case ids into batches sized by approximate token budget (not a fixed count)."""
+    budget = token_budget if token_budget is not None else PLAN_BATCH_TOKENS
+    cap = max_count if max_count is not None else max(PLAN_BATCH, 12)
+    blocks = dict(_case_blocks(task_text, ids))
+    batches: list[list[str]] = []
+    cur: list[str] = []
+    used = 0
+    for cid in ids:
+        # ~4 chars/token
+        cost = max(80, (len(blocks.get(cid, cid)) + 3) // 4)
+        if cur and (used + cost > budget or len(cur) >= cap):
+            batches.append(cur)
+            cur, used = [], 0
+        cur.append(cid)
+        used += cost
+    if cur:
+        batches.append(cur)
+    return batches or [ids]
+
+
+def _merge_plans(parts: list[TestPlan], task_id: int, env: str) -> TestPlan:
     cases, seen, reqs, rk = [], set(), [], set()
     conflicts, data, pre, base = [], [], [], []
     for p in parts:
@@ -55,8 +87,25 @@ async def plan_in_batches(settings, pack, task_text: str, task_id: int, env: str
         data += [x for x in p.data_to_create if x not in data]
         pre += [a for a in p.preapprovable_actions if a not in pre]
         base += [b for b in p.baseline_steps if b not in base]
-    plan = TestPlan(task_id=task_id, env=env, cases_source="task", cases=cases, requirements=reqs,
+    return TestPlan(task_id=task_id, env=env, cases_source="task", cases=cases, requirements=reqs,
                     global_conflicts=conflicts, data_to_create=data, preapprovable_actions=pre, baseline_steps=base)
+
+
+async def plan_in_batches(settings, pack, task_text: str, task_id: int, env: str, ids: list[str], repair: bool = True,
+                          **kw) -> TestPlan:
+    """Plan case batches sized by token budget; run independent batches concurrently (bounded)."""
+    batches = size_batches(task_text, ids)
+    sem = asyncio.Semaphore(max(1, PLAN_CONCURRENCY))
+    parts: list[TestPlan | None] = [None] * len(batches)
+
+    async def one(i: int, batch: list[str]):
+        async with sem:
+            print(f"Planning cases {', '.join(batch)} (batch {i + 1}/{len(batches)})")
+            parts[i] = await plan_task(settings, pack, task_text, task_id, env, only_case=",".join(batch),
+                                       repair=False, **kw)
+
+    await asyncio.gather(*(one(i, b) for i, b in enumerate(batches)))
+    plan = _merge_plans([p for p in parts if p is not None], task_id, env)
     if repair:
         from ..casegen import add_repair_case
         plan = add_repair_case(plan, pack)
@@ -66,11 +115,40 @@ async def plan_in_batches(settings, pack, task_text: str, task_id: int, env: str
 async def plan_task(settings: Settings, pack, task_text: str, task_id: int, env: str, only_case: str | None = None,
                     max_rounds: int = 3, lessons: str = "", trace_path=None, generate: bool = False,
                     answers: dict | None = None, preapprovable: list[str] | None = None,
-                    repair: bool = True, batch_ids: list[str] | None = None) -> TestPlan:
-    if batch_ids and len(batch_ids) > PLAN_BATCH:
-        return await plan_in_batches(settings, pack, task_text, task_id, env, batch_ids, max_rounds=max_rounds,
-                                     lessons=lessons, trace_path=trace_path, answers=answers,
-                                     preapprovable=preapprovable, repair=repair)
+                    repair: bool = True, batch_ids: list[str] | None = None,
+                    run_dir=None, reuse_plan: bool = True) -> TestPlan:
+    # Reuse an approved plan when ticket + cases + pack hash match.
+    if reuse_plan and batch_ids and run_dir is not None and not only_case and not generate:
+        from ..plan_cache import find_reusable_plan, plan_fingerprint, save_plan_cache
+        fp = plan_fingerprint(task_text, batch_ids, pack)
+        hit = find_reusable_plan(settings.runs_dir, fp, exclude=run_dir)
+        if hit is not None:
+            cached, src = hit
+            print(f"Reusing approved plan from {src.name} (unchanged ticket/cases/pack)")
+            if repair:
+                from ..casegen import add_repair_case
+                cached = add_repair_case(cached, pack)
+            try:
+                save_plan_cache(run_dir, fp, cached)
+            except OSError:
+                pass
+            return cached
+
+    if batch_ids and len(batch_ids) > 1 and not only_case:
+        # Token-budget batches whenever there is more than one case to plan.
+        batches = size_batches(task_text, batch_ids)
+        if len(batches) > 1 or (len(batch_ids) > PLAN_BATCH):
+            plan = await plan_in_batches(settings, pack, task_text, task_id, env, batch_ids, max_rounds=max_rounds,
+                                         lessons=lessons, trace_path=trace_path, answers=answers,
+                                         preapprovable=preapprovable, repair=repair)
+            if reuse_plan and run_dir is not None:
+                from ..plan_cache import plan_fingerprint, save_plan_cache
+                try:
+                    save_plan_cache(run_dir, plan_fingerprint(task_text, batch_ids, pack), plan)
+                except OSError:
+                    pass
+            return plan
+
     task_text = redact(task_text)
     planner = build_planner(settings, pack, env)
     reviewer = build_reviewer(settings, (f"(This plan covers ONLY cases {only_case}. Do not report the task's other "
@@ -103,6 +181,12 @@ async def plan_task(settings: Settings, pack, task_text: str, task_id: int, env:
         fixed_issues = [i for i in check_plan(plan) if not i.startswith("requirement ")]
         problems = ([] if review.get("ok") else list(review.get("problems", []))) + fixed_issues
         if not problems:
+            if reuse_plan and run_dir is not None and batch_ids:
+                from ..plan_cache import plan_fingerprint, save_plan_cache
+                try:
+                    save_plan_cache(run_dir, plan_fingerprint(task_text, batch_ids, pack), plan)
+                except OSError:
+                    pass
             return plan
         feedback = "\n\nProblems to fix (reviewer and plan checks):\n- " + "\n- ".join(problems)
     return plan

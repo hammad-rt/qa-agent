@@ -845,13 +845,26 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
             _learn_failure(case, app, state, log_mark, "blocked", sr.notes or "")
             return result
         for k, v in sr.values.items():
+            # Never promote placeholder/negative words into lasting run state.
+            from .tools.value_kind import is_negative_word, has_redaction_token
+            if is_negative_word(v) or has_redaction_token(v):
+                continue
             state.values.setdefault(k, {"value": v, "source": f"{case.id}/{app}"})
+        if getattr(sr, "not_found", False) and not (sr.stuck or sr.limit_hit):
+            note = f"tester on {app} found nothing usable: {sr.notes}".strip()
+            result = CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,
+                                values={k: v for r in results for k, v in r.values.items()
+                                        if not is_negative_word(v) and not has_redaction_token(v)},
+                                evidence=[s for r in results for s in r.screenshots], note=note)
+            _learn_failure(case, app, state, log_mark, "not_found", sr.notes or "")
+            return result
         if sr.stuck or sr.limit_hit:
             why = ("kept repeating the same action without progress" if getattr(sr, "loop", False)
                    else "hit the step/time limit" if sr.limit_hit else "got stuck")
             note = f"tester on {app} {why}: {sr.notes}".strip()
             result = CaseResult(case_id=case.id, verdict="AGENT INCOMPLETE", expected=case.expected,
-                                values={k: v for r in results for k, v in r.values.items()},
+                                values={k: v for r in results for k, v in r.values.items()
+                                        if not is_negative_word(v) and not has_redaction_token(v)},
                                 evidence=[s for r in results for s in r.screenshots], note=note)
             _learn_failure(case, app, state, log_mark, why, sr.notes or "")
             # A recipe/path that failed this run must not keep discovery skipped next time.

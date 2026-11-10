@@ -79,13 +79,18 @@ class RunState:
         self.checkpoint(f"rerunning {', '.join(case_ids)} in this run")
 
     def checkpoint(self, label: str, status: str | None = None) -> None:
+        from .redact import for_user
         if status:
             self.data["status"] = status
-        self.data["checkpoints"].append({"at": datetime.now().isoformat(timespec="seconds"), "label": label})
+        self.data["checkpoints"].append({
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "label": for_user(label),
+        })
         self.save()
 
     def save(self) -> None:
         tmp = self.path.with_suffix(".tmp")
         from .redact import scrub_secrets
+        # Persist scrubbed secrets as [ENV_NAME]; display paths use for_user() so people never see those tokens.
         tmp.write_text(scrub_secrets(json.dumps(self.data, indent=2, default=str)))
         tmp.replace(self.path)

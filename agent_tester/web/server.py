@@ -395,8 +395,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not d:
                     return self._send(404, {"error": "no such run"})
                 if parts[3] == "guide":            # a note for the agent while the run goes; read at its next model call
-                    from ..redact import redact, scrub_secrets
-                    text = scrub_secrets(redact(str(b.get("text", "")).strip()))[:2000]
+                    from ..redact import for_user
+                    text = for_user(str(b.get("text", "")).strip())[:2000]
                     if not text:
                         return self._send(400, {"error": "write something for the agent first"})
                     if not _live(d):

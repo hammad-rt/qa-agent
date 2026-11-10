@@ -489,13 +489,36 @@ class TesterSession:
         s = self
 
         def record_value(name: str, raw_text: str, source: str) -> dict:
-            """Record a value exactly as read on the page. raw_text is the text you saw, e.g. "$1,234.50"."""
+            """Record a value exactly as read on the page. raw_text is the text you saw, e.g. "$1,234.50".
+
+            Rejects placeholder words (none/null/not found), literal tokens (ORDER-MULTI), and redaction
+            markers. Re-asks once; never stores a bad value in state/memory/routes.
+            """
+            from ..tools.value_kind import kind_map_from_pack, placeholder_tokens, validate_value
+            pack_cfg = (s.state.data.get("pack_cfg") if s.state else None) or {}
+            kinds = kind_map_from_pack(pack_cfg)
+            tokens = placeholder_tokens(pack_cfg)
+            check = validate_value(name, raw_text, pack_kinds=kinds, tokens=tokens)
+            if not check["ok"]:
+                retried = getattr(s, "_value_retries", None)
+                if retried is None:
+                    s._value_retries = {}
+                    retried = s._value_retries
+                if check.get("not_found"):
+                    s.result.not_found = True
+                if not retried.get(name):
+                    retried[name] = True
+                    return {"error": check["reason"], "retry": True,
+                            "hint": (f"Read the real {check['kind']} from the page and call record_value again. "
+                                     f"Do not store none/null/not found/ORDER-* or [KEY] markers.")}
+                return {"error": check["reason"], "rejected": True, "not_found": bool(check.get("not_found"))}
+            text = str(check["value"])
             try:
                 # IDs like A1142 / INV-0042 stay text: only plain amounts become numbers
-                v = raw_text.strip() if re.search(r"[A-Za-z]\d|\d[A-Za-z]|^[A-Za-z]{1,3}-?\d+$", raw_text.strip()) \
-                    and not re.match(r"^[A-Z]{3}\s?[\d$]", raw_text.strip()) else V.parse_money(raw_text)
+                v = text if re.search(r"[A-Za-z]\d|\d[A-Za-z]|^[A-Za-z]{1,3}-?\d+$", text) \
+                    and not re.match(r"^[A-Z]{3}\s?[\d$]", text) else V.parse_money(text)
             except ValueError:
-                v = raw_text
+                v = text
             V.record(s.state.values, name, v, source=f"{s.case_id}/{s.app}: {source}")
             s.result.values[name] = v
             s.state.save()
@@ -609,8 +632,19 @@ class TesterSession:
             """Call when your steps are done, or when you are stuck and cannot continue.
             A final proof screenshot is taken automatically."""
             await s.auto_shot("final", tool_context)
-            s.result.notes, s.result.stuck, s.finished = redact(notes), stuck, True
-            return {"ok": True}
+            from ..redact import for_user
+            from ..finish_sanity import classify_finish
+            clean = for_user(notes or "")
+            kind = classify_finish(clean, stuck=stuck,
+                                   data_prep=bool(s.brief.get("data_prep")),
+                                   find_budget=bool(s.brief.get("find_budget")),
+                                   not_found_flag=bool(getattr(s.result, "not_found", False)))
+            s.result.notes = clean
+            s.result.stuck = kind["stuck"]
+            s.result.not_found = kind["not_found"]
+            s.result.limit_hit = s.result.limit_hit or kind.get("limit_hit", False)
+            s.finished = True
+            return {"ok": True, "outcome": kind["outcome"]}
 
         def ask_user(question: str, why: str = "") -> dict:
             """Ask the person running the test when you are genuinely unsure and the page cannot tell you
@@ -622,6 +656,7 @@ class TesterSession:
                 return {"error": "question limit reached for this case; decide from the page or finish(stuck=True)"}
             if re.search(r"password|passcode|otp|one.time|2fa|secret|token", question, re.I):
                 return {"error": "never ask for passwords or codes; use run_helper login_form or needs_manual_login"}
+            from ..redact import scrub_user_answer
             q = redact(question)
             if is_auto() and os.environ.get("QA_WEB") != "1" and not (sys.stdin and sys.stdin.isatty()):
                 ans = ""
@@ -631,7 +666,9 @@ class TesterSession:
                                    + "\n  Your answer (Enter = let it decide): ").strip()
                 except EOFError:
                     ans = ""
-            s.state.log_action(case_id=s.case_id, app=s.app, tool="ask_user", args={"question": q, "answer": ans},
+            safe_ans = scrub_user_answer(ans)
+            s.state.log_action(case_id=s.case_id, app=s.app, tool="ask_user",
+                               args={"question": q, "answer": safe_ans},
                                plan_step=getattr(s, "current_step", None), inferred=False, deviation=None)
             return {"answer": ans} if ans else {"answer": "", "note": "no answer; decide from the page and say so in notes"}
 
@@ -1188,16 +1225,17 @@ class TesterSession:
                     pass
         except (EOFError, TimeoutError):
             ans = ""
+        from ..redact import scrub_user_answer
+        safe_ans = scrub_user_answer(ans)[:500]
         self.state.log_action(case_id=self.case_id, app=self.app, tool="stuck_ask",
-                              args={"why": why, "question": q[:500], "answer": ans[:500]},
+                              args={"why": why, "question": q[:500], "answer": safe_ans},
                               plan_step=self.current_step, outcome="answered" if ans else "timeout")
         self.state.data.setdefault("notes", []).append(
-            f"Stuck ask on {self.case_id}: {why}; answer={ans[:200] or '(none)'}")
+            f"Stuck ask on {self.case_id}: {why}; answer={safe_ans[:200] or '(none)'}")
         self.state.save()
         if not ans:
             return None  # fall through to normal block
-        low = ans.lower()
-        # Parse 1:/2:/3: or bare keywords.
+        # Parse 1:/2:/3: or bare keywords off the raw answer (not the scrubbed display form).
         kind, rest = "guidance", ans
         m = re.match(r"^\s*([123])\s*[:.\-\s]\s*(.*)$", ans, re.S)
         if m:

@@ -1,10 +1,9 @@
-"""Long-term memory in SQLite. Rows are scoped `core` or `project:<slug>`.
+"""Long-term memory in SQLite.
 
-Three lasting kinds of knowledge (see docs):
-  - fact   — stable rules (project scope for app rules; date + source/decided_by)
-  - lesson / recipe — lessons from runs; lasting once confirmed (≥2 runs) or user-approved
-  - known_bug / open_bug_found — bugs
+Scopes: `core`, `domain:<name>`, `platform:<id>`, `project:<slug>`.
+Project always wins over platform/domain at retrieval; see memory/layers.py.
 
+Kinds: fact, lesson, recipe, known_bug, open_bug_found, resource.
 `resource` may only store secret_env *names*, never env values (URLs, logins, ids).
 Per-run logs and retrospectives live with the run, never as standing facts.
 
@@ -88,7 +87,12 @@ class MemoryStore:
             confirm_count: int = 0, env_at_confirm: str | None = None,
             skip_env_guard: bool = False) -> int:
         assert kind in KINDS and status in STATUSES, (kind, status)
-        assert scope == "core" or scope.startswith("project:"), scope
+        assert (
+            scope == "core"
+            or scope.startswith("project:")
+            or scope.startswith("domain:")
+            or scope.startswith("platform:")
+        ), scope
         text = _clean(text)
 
         # Resources must never hold env values (URLs, logins, record ids) as lasting memory.

@@ -43,9 +43,14 @@ def open_memory(settings: Settings, pack):
     n = mem.import_resources_json(ROOT / "memory" / "resources.json")
     if n:
         print(f"Moved {n} saved answer(s) from resources.json into memory.db (values dropped; secret_env kept).")
+    # Domain always; platforms seeded on demand when detection sets mem.set_platforms.
     seeded = ensure_seeds(store, pack.slug)
-    if seeded["core"] or seeded["project"]:
-        print(f"Seeded memory lessons: core+{seeded['core']}, project+{seeded['project']}.")
+    if any(seeded.get(k) for k in ("core", "domain", "project", "platform")):
+        print(
+            "Seeded memory lessons: "
+            f"core+{seeded['core']}, domain+{seeded['domain']}, "
+            f"platform+{seeded['platform']}, project+{seeded['project']}."
+        )
     return mem
 
 

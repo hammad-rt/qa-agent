@@ -60,15 +60,14 @@ def cache_key(area: str | None, app: str, query: str = "") -> str:
 
 def _score(row: dict, query: str, area: str | None, embedder=None, qvec=None) -> float:
     """Higher is better. Code-only: keyword overlap, kind, confirmations, freshness — no LLM."""
+    from .layers import layer_score_bonus, scope_layer
     text = row.get("text") or ""
     score = 0.0
     if area and row.get("area") == area:
         score += 2.0
     elif row.get("area") in (None, "", "general") and row.get("scope") == "core":
         score += 0.8
-    # Prefer project-scoped rows over core when both match (same area knowledge wins).
-    if row.get("scope") and str(row["scope"]).startswith("project:"):
-        score += 1.2
+    score += layer_score_bonus(row)
     if query:
         score += 3.0 * jaccard(query, text)
         q_words = {w for w in re.findall(r"[a-z0-9]+", query.lower()) if len(w) > 2}
@@ -88,16 +87,17 @@ def _score(row: dict, query: str, area: str | None, embedder=None, qvec=None) ->
         score *= 0.3
     if row.get("source") == "seed" and row.get("scope") == "core":
         score += 0.5
+    # Platform seeds are starting assumptions — never fully trusted.
+    if scope_layer(row.get("scope") or "") == "platform" or row.get("source") == "seed_platform":
+        score *= 0.55
+        row["trust"] = "hint"
     return score
 
 
 def _dedupe(rows: list[dict]) -> list[dict]:
-    out: list[dict] = []
-    for r in rows:
-        if any(jaccard(r.get("text") or "", o.get("text") or "") > 0.85 for o in out):
-            continue
-        out.append(r)
-    return out
+    from .layers import merge_layers
+    # Layer-aware merge (project wins; overrides suppress domain/platform).
+    return merge_layers(rows)
 
 
 def _pack_prompt(rows: list[dict], learned_hints: list[str], char_budget: int) -> tuple[str, list[dict], list[str]]:

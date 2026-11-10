@@ -1,0 +1,15 @@
+- text: "Legacy SuiteCRM uses index.php?module=…&action=… URLs; deep links may break after upgrades — prefer menu navigation."
+  area: crm
+  applies_when: navigation
+- text: "Basic list search often matches name fields only; use Advanced Search / filters for email and custom fields."
+  area: crm
+  applies_when: search
+- text: "Admin → Repair → Quick Repair and Rebuild refreshes vardefs and layouts after studio or extension changes."
+  area: crm
+  applies_when: admin
+- text: "Subpanels load related records under the detail view; open the parent record before searching child rows."
+  area: crm
+  applies_when: subpanels
+- text: "A greyed or missing Save control is not proof of a lock — try the edit action and read the response."
+  area: crm
+  applies_when: edit

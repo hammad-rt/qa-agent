@@ -234,6 +234,26 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory) -> dict
     recipes = list(dict.fromkeys(proposed + list(hints)))
     entry = {"source": "discovery", "recipes": recipes, "hints": list(hints),
              "notes": notes, "blocked": blocked, "env": fp}
+    # Platform / version live on the discovery fingerprint (env-bound), never as lasting facts.
+    try:
+        from .platform_detect import detect, fingerprint_patch
+        from .memory.seeds import ensure_seeds
+        app_url = ""
+        for r in getattr(plan, "requirements", None) or []:
+            key_r = getattr(r, "key", None) or (r.get("key") if isinstance(r, dict) else None)
+            val = getattr(r, "value", None) or (r.get("value") if isinstance(r, dict) else None)
+            if key_r and val and str(key_r).endswith(f".{app}") and str(val).startswith("http"):
+                app_url = str(val)
+                break
+        det = detect(url=app_url, html=notes or "", title="")
+        entry.update(fingerprint_patch(det))
+        if det.platform and memory is not None:
+            memory.set_platforms([det.platform])
+            ensure_seeds(memory.store, getattr(memory, "slug", None), platforms=[det.platform])
+            state.data["detected_platform"] = det.platform
+            state.data["detected_platform_version"] = det.platform_version
+    except Exception as e:  # noqa: BLE001
+        state.data.setdefault("notes", []).append(f"platform detect skipped: {type(e).__name__}")
     useful = bool(proposed) or bool(notes and not blocked and not notes.startswith("discovery failed")
                                     and not _NO_PROGRESS.search(notes))
     tries = state.data.setdefault("discovery_tries", {})
@@ -248,12 +268,17 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory) -> dict
     ddir = state.dir / "discovery"
     ddir.mkdir(parents=True, exist_ok=True)
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in (case.area or app))
+    plat_line = (
+        f"platform: {entry.get('platform')} ({entry.get('platform_confidence')}) "
+        f"version: {entry.get('platform_version')} ({entry.get('version_confidence')})\n"
+    )
     (ddir / f"{safe}.md").write_text(
-        f"# Discovery {key}\n\nsource: discovery\nenv: {fp}\n\n## Notes\n{notes}\n\n## Hints\n"
+        f"# Discovery {key}\n\nsource: discovery\nenv: {fp}\n{plat_line}\n## Notes\n{notes}\n\n## Hints\n"
         + "\n".join(f"- {r}" for r in hints) + "\n\n## Recipes\n"
         + "\n".join(f"- {r}" for r in proposed) + "\n")
     state.checkpoint(f"discovery done for {key}" + (" (blocked)" if blocked else "")
-                     + (f" ({len(hints)} hint(s))" if hints else ""))
+                     + (f" ({len(hints)} hint(s))" if hints else "")
+                     + (f" platform={entry.get('platform')}" if entry.get("platform") else ""))
     # Pause the run only when login/transport blocked discovery repeatedly — empty notes alone
     # must not stop the suite (case body / hints can still try).
     hard = blocked or notes.startswith("discovery failed")

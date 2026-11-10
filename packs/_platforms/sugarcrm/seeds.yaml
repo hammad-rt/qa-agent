@@ -1,0 +1,12 @@
+- text: "Sugar sidecar uses hash module routes like #Accounts; wait for the sidecar shell after login before clicking."
+  area: crm
+  applies_when: navigation
+- text: "List filters and search live in the list header; clear active filters before reporting a missing record."
+  area: crm
+  applies_when: filters
+- text: "Record views have a main panel plus subpanels for related modules; related data is rarely on the list view alone."
+  area: crm
+  applies_when: subpanels
+- text: "Inline edit and the full record edit drawer differ; fields absent inline may appear only in the drawer."
+  area: crm
+  applies_when: edit

@@ -1,0 +1,5 @@
+id: suitecrm7
+name: SuiteCRM 7
+docs:
+  - https://docs.suitecrm.com
+notes: Starting assumptions only — verify on the live UI; project overrides win.

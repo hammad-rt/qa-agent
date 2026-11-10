@@ -22,6 +22,8 @@
 
 Do not invent features ahead of HANDOVER §9. Secrets only via masked prompt → `.env`.
 
+**Knowledge layers + stuck ladder:** domain (`domain:crm`/`domain:erp`) → platform (`packs/_platforms/<id>`, only when detected) → project (always wins). Detection stores `platform` / `platform_version` on the discovery fingerprint, not as facts. When stuck, run memory → code → platform docs → web → explore → ask_user (`docs/stack/redmine-memory.md`). Core stays app-agnostic; no project names in core seeds.
+
 ## Learned User Preferences
 
 - Prefer a single start command that finishes the run; use `resume` only for intentional human gates (CAPTCHA, approvals), not for transient agent/LLM errors.

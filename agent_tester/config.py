@@ -1,14 +1,80 @@
 """Settings from .env and the environment. Secrets are read by name, never logged."""
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
+import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+_REAL_MEMORY_DB = (ROOT / "memory" / "memory.db").resolve()
+_REAL_PREFS = (ROOT / "memory" / "run-prefs.json").resolve()
+_TEST_ISOLATION_DIRS: list[str] = []
+
+
+def under_unit_tests() -> bool:
+    """True when the unit suite is running (``QA_TEST=1`` or ``python -m unittest ...``)."""
+    if os.environ.get("QA_TEST", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    # Catch discover before hermetic imports: `python -m unittest ...`
+    return any("unittest" in (a or "").lower() for a in sys.argv)
+
+
+def _points_at_repo_memory(path: str | None) -> bool:
+    if not path:
+        return True
+    try:
+        p = Path(path).expanduser().resolve()
+    except OSError:
+        return False
+    mem_root = (ROOT / "memory").resolve()
+    return p == _REAL_MEMORY_DB or p == _REAL_PREFS or mem_root in p.parents or p == mem_root
+
+
+def ensure_unit_test_isolation() -> None:
+    """Pin QA_TEST and redirect MEMORY_DB / prefs away from the repo's real memory files.
+
+    Safe to call repeatedly. Does **not** force QA_INTERACTIVE (test_auto_mode patches that).
+    """
+    os.environ["QA_TEST"] = "1"
+    if _points_at_repo_memory(os.environ.get("MEMORY_DB")):
+        d = tempfile.mkdtemp(prefix="qa-test-mem-")
+        _TEST_ISOLATION_DIRS.append(d)
+        os.environ["MEMORY_DB"] = str(Path(d) / "memory.db")
+    if _points_at_repo_memory(os.environ.get("MEMORY_PREFS_PATH")):
+        d = tempfile.mkdtemp(prefix="qa-test-prefs-")
+        _TEST_ISOLATION_DIRS.append(d)
+        os.environ["MEMORY_PREFS_PATH"] = str(Path(d) / "prefs.json")
+    # Drop pack secrets that a prior load_dotenv / shell export may have set.
+    for k in list(os.environ):
+        ku = k.upper()
+        if any(h in ku for h in ("PASSWORD", "TOKEN", "API_KEY", "SECRET")) and (
+            ku.startswith("SAVO") or ku.startswith("SAVOSTORE") or ku.startswith("DEMO_")
+        ):
+            os.environ.pop(k, None)
+
+
+def _cleanup_isolation_dirs() -> None:
+    for d in _TEST_ISOLATION_DIRS:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+atexit.register(_cleanup_isolation_dirs)
+
 
 def load_dotenv(path: Path | None = None) -> None:
+    """Load `.env` into os.environ (setdefault).
+
+    Never loads during the unit suite (``QA_TEST=1`` or ``python -m unittest``), so a laptop's
+    MEMORY_DB, REDMINE_*, passwords, etc. cannot leak into tests.
+    """
+    if under_unit_tests():
+        ensure_unit_test_isolation()
+        return
     path = path or ROOT / ".env"
     if not path.exists():
         return
@@ -50,6 +116,8 @@ class Settings:
     @classmethod
     def load(cls) -> "Settings":
         load_dotenv()
+        if under_unit_tests():
+            ensure_unit_test_isolation()
         e = os.environ.get
         return cls(
             llm_base_url=e("LLM_BASE_URL", "https://ai.rolustech.com/v1"),

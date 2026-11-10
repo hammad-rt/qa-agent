@@ -29,9 +29,16 @@ def show_plan(plan: TestPlan, issues: list[str], out=print) -> None:
 
 
 def ask_batch(reqs, ctx, input_fn=None, secret_fn=None, write_secret=None, out=print) -> None:
+    """Ask open requirements in one batch.
+
+    When the caller passes an explicit ``input_fn`` (tests, web adapters), that function is
+    always used — including for account questions. Real automatic runs leave ``input_fn`` as
+    None so account questions still go to a person via ``ask_line`` (stdin / web UI).
+    """
     from .config import write_env_secret
     from .auto import prompter, is_auto
     from .auto import secret_input, ask_line
+    injected = input_fn is not None
     input_fn = input_fn or prompter("")
     secret_fn = secret_fn or secret_input
     qs = G.open_questions(reqs)
@@ -44,8 +51,10 @@ def ask_batch(reqs, ctx, input_fn=None, secret_fn=None, write_secret=None, out=p
             out(f"  {n}. {r.question}")
             answers[r.key] = ""          # only the masked password is needed
             continue
-        # the test user is always asked, even in automatic mode
-        answers[r.key] = (ask_line if (r.kind == "account" and is_auto()) else input_fn)(f"  {n}. {r.question}\n     > ")
+        # Real auto runs: always ask a person for the test user (stdin/web). Injected
+        # input_fn (unit tests / adapters) must not be bypassed.
+        ask = ask_line if (r.kind == "account" and is_auto() and not injected) else input_fn
+        answers[r.key] = ask(f"  {n}. {r.question}\n     > ")
     G.apply_answers(reqs, answers, ctx, secret_prompt=secret_fn, write_secret=write_secret or write_env_secret)
 
 

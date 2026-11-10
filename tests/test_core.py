@@ -1,3 +1,4 @@
+from agent_tester import testing_hermetic as hermetic  # noqa: F401  — discover -s tests (no -t) does not load tests/__init__.py
 import os
 import tempfile
 import unittest
@@ -65,18 +66,20 @@ class PolicyTests(unittest.TestCase):
             p.check_url("https://app.savostore.com/")  # prod host not allowed on staging
 
     def test_preapproval_rules(self):
-        p = from_pack(self.pack, "staging")
+        # auto=False: these assertions cover the interactive pre-approve path (auto mode is test_auto_mode).
+        p = from_pack(self.pack, "staging", auto=False)
         p.preapprove(["pay_staging_test_card"])
         self.assertEqual(p.gate("pay", "TC3", action_type="pay_staging_test_card"), "pre_approved")
         p.preapprove(["change_settings"])
         self.assertEqual(p.gate("save settings", "TC9", action_type="change_settings"), "pre_approved")
-        prod = from_pack(self.pack, "prod")
+        prod = from_pack(self.pack, "prod", auto=False)
         with self.assertRaises(PolicyViolation):
             prod.preapprove(["change_settings"])
 
     def test_approver_and_denial(self):
         asked = []
-        p = from_pack(self.pack, "staging", approver=lambda a, r, d: asked.append(a) or a.startswith("ok"))
+        p = from_pack(self.pack, "staging", auto=False,
+                      approver=lambda a, r, d: asked.append(a) or a.startswith("ok"))
         self.assertEqual(p.gate("ok click Pay", "x", risky=True), "approved")
         with self.assertRaises(PolicyViolation):
             p.gate("no click Delete", "x", risky=True)
@@ -84,12 +87,12 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(p.gate("read page", "x"), "not_needed")
 
     def test_prod_never_preapproved(self):
-        p = from_pack(self.pack, "prod", approver=lambda *a: True)
+        p = from_pack(self.pack, "prod", auto=False, approver=lambda *a: True)
         p.preapproved.add("create_test_order")
         self.assertEqual(p.gate("create", "x", action_type="create_test_order"), "approved")
 
     def test_risky_labels(self):
-        p = from_pack(self.pack, "staging")
+        p = from_pack(self.pack, "staging", auto=False)
         self.assertTrue(p.is_risky("Pay now"))
         self.assertTrue(p.is_risky("button Place Order"))
         self.assertFalse(p.is_risky("View order"))
@@ -156,6 +159,8 @@ class GapTests(unittest.TestCase):
         self.pack = load_pack(PACK)
         self._old_prefs = os.environ.get("MEMORY_PREFS_PATH")
         os.environ["MEMORY_PREFS_PATH"] = str(Path(self.tmp.name) / "prefs.json")
+        # Suite-order leak guard: a prior Settings.load() / laptop .env must not satisfy passwords.
+        hermetic.clear_pack_secrets()
 
     def tearDown(self):
         if self._old_prefs is None:
@@ -196,7 +201,7 @@ class GapTests(unittest.TestCase):
         self.assertIsNotNone(r2.question)
 
     def test_account_secret_flow(self):
-        os.environ.pop("SAVOSTORE_CRM_PASSWORD", None)
+        hermetic.clear_pack_secrets()
         ctx = self.ctx()
         r = G.resolve([Requirement(key="account.crm.admin")], ctx)[0]
         self.assertEqual(r.status, "missing")
@@ -215,8 +220,7 @@ class GapTests(unittest.TestCase):
         prefs = Path(self.tmp.name) / "prefs.json"
         self.assertNotIn("s3cret", prefs.read_text() if prefs.exists() else "")
         self.assertIn("s3cret", stored.values())  # write_secret received it (as .env would)
-        os.environ.pop("SAVOSTORE_CRM_PASSWORD", None)
-        os.environ.pop("SAVOSTORE_CRM_PASSWORD__ADMIN", None)
+        hermetic.clear_pack_secrets()
 
     def test_data_requirement(self):
         ctx = self.ctx()
@@ -297,7 +301,8 @@ class TesterCallbacks(unittest.TestCase):
         self.state = RunState(d / "run")
         self.asked = []
         pack = load_pack(PACK)
-        self.policy = from_pack(pack, "staging", approver=lambda a, r, dd: self.asked.append(a) or False)
+        self.policy = from_pack(pack, "staging", auto=False,
+                                approver=lambda a, r, dd: self.asked.append(a) or False)
         brief = {"case_id": "TC3", "requirements": {"account.portal.customer": {"secret_env": "X_PW"}}}
         self.s = TesterSession("portal", brief, self.state, self.policy, Evidence(self.state.dir), max_calls=5, max_minutes=5)
         self.tools = {f.__name__: f for f in self.s.tools()}

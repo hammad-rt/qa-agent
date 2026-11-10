@@ -1,5 +1,6 @@
 """Accounts are asked every run (with the last user as the default), passwords are kept per user and
 environment, and the environment can be staging, pre-prod or production."""
+from agent_tester import testing_hermetic as hermetic  # noqa: F401
 import os
 import unittest
 from types import SimpleNamespace
@@ -49,16 +50,23 @@ class AccountsAskedEachRun(unittest.TestCase):
         import tempfile
         from pathlib import Path
         self.saved = dict(os.environ)
+        hermetic.clear_pack_secrets()
         for k in list(os.environ):
             if k.startswith(("SAVO", "SAVOSTORE")):
                 del os.environ[k]
         self._prefs_tmp = tempfile.TemporaryDirectory()
         os.environ["MEMORY_PREFS_PATH"] = str(Path(self._prefs_tmp.name) / "prefs.json")
+        # Keep suite hermetic even after clear/restore cycles in tearDown.
+        os.environ["QA_INTERACTIVE"] = "1"
+        os.environ["QA_TEST"] = "1"
 
     def tearDown(self):
         self._prefs_tmp.cleanup()
         os.environ.clear()
         os.environ.update(self.saved)
+        os.environ["QA_INTERACTIVE"] = "1"
+        os.environ["QA_TEST"] = "1"
+        hermetic.clear_pack_secrets()
 
     def test_asked_even_when_pack_has_user_and_password(self):
         os.environ["SAVOSTORE_CRM_PASSWORD"] = "x"

@@ -1,4 +1,5 @@
 """Phase 6: helper registry, MCP browser adapter, core helpers and pack helpers against a fake Playwright MCP."""
+from agent_tester import testing_hermetic as hermetic  # noqa: F401
 import asyncio
 import os
 import tempfile
@@ -150,7 +151,7 @@ class Safety(unittest.TestCase):
         info = load_helpers(pack)["portal_apply_rewards"]
         page = '- textbox "Rewards amount" [ref=e1]\n- button "Apply" [ref=e2]'
         fake = FakeMcp([page, "- text: You can use up to $25.00"])
-        policy = from_pack(pack, "staging", approver=approver)
+        policy = from_pack(pack, "staging", auto=False, approver=approver)
         policy.read_only = read_only
         with tempfile.TemporaryDirectory() as d:
             st = RunState(Path(d) / "r")

@@ -289,9 +289,11 @@ async def plan_task(settings: Settings, pack, task_text: str, task_id: int, env:
             data.setdefault("task_id", task_id)
             data["env"] = env
             plan = TestPlan.model_validate(data)
-            why = _empty_plan_reason(plan, want) if want else (None if plan.cases else "empty cases array")
-            if why:
-                raise ValueError(f"planner returned {why}")
+            # When planning a named batch (only_case), an empty/missing cases list is a failed attempt.
+            if want:
+                why = _empty_plan_reason(plan, want)
+                if why:
+                    raise ValueError(f"planner returned {why}")
             return plan
 
         raw_dir = trace_path.parent if trace_path else None

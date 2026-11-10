@@ -98,8 +98,8 @@ class Answers(unittest.TestCase):
 
         pack = load_pack(PACK)
         with mock.patch.object(planner, "run_json", fake_run_json), \
-             mock.patch.object(planner, "build_planner", lambda *a: None), \
-             mock.patch.object(planner, "build_reviewer", lambda *a: None):
+             mock.patch.object(planner, "build_planner", lambda *a, **k: None), \
+             mock.patch.object(planner, "build_reviewer", lambda *a, **k: None):
             asyncio.run(planner.plan_task(None, pack, "task", 180966, "staging",
                                           answers={"data.client_exempt": "make sidney@ exempt in the CRM client record"}))
         self.assertIn("User answers at the plan gate", asks[0])

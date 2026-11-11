@@ -37,23 +37,13 @@ async def _collect(stream, idle, deadline=None):
 
 class IdleNoCancelTest(unittest.TestCase):
     def test_slow_first_event_longer_than_slice_is_not_cancelled(self):
-        # slice = min(5, idle) = 0.05s; event arrives after 0.2s; idle budget is 1s.
+        # poll slice 0.05s; each event arrives after 0.2s; idle budget is 1s.
         stream = SlowStream(0.2, ["a", "b"])
-        with mock.patch.object(llm, "human_wait_active", return_value=False):
-            out = asyncio.run(self._run_small_slice(stream, idle=1.0))
+        with mock.patch.object(llm, "human_wait_active", return_value=False), \
+                mock.patch.object(llm, "_POLL_SLICE", 0.05):
+            out = asyncio.run(_collect(stream, idle=1.0))
         self.assertEqual(out, ["a", "b"])
         self.assertFalse(stream.cancelled)
-
-    async def _run_small_slice(self, stream, idle):
-        # Force a tiny poll slice by passing idle via a wrapper: slice = min(5, idle_sec),
-        # so emulate a 0.05s slice with a 1s idle budget by patching asyncio.wait's timeout.
-        real_wait = asyncio.wait
-
-        async def small_wait(fs, timeout=None, **kw):
-            return await real_wait(fs, timeout=min(timeout, 0.05) if timeout else timeout, **kw)
-
-        with mock.patch.object(llm.asyncio, "wait", small_wait):
-            return await _collect(stream, idle)
 
     def test_idle_exceeded_still_raises_and_cancels(self):
         stream = SlowStream(2.0, ["a"])

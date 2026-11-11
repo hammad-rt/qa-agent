@@ -65,6 +65,9 @@ def model(settings: Settings, json_mode: bool = False, max_tokens: int | None = 
     return LiteLlm(model=f"openai/{name}", api_base=base, api_key=effective_api_key(key), **extra)
 
 
+_POLL_SLICE = 5.0  # seconds between human-wait checks; never cancels the pending event
+
+
 async def _iter_events_with_idle(aiter, *, idle_sec: float, call_deadline: float | None = None):
     """Yield ADK events; fail when no event arrives within idle_sec, or past call_deadline.
 
@@ -79,7 +82,7 @@ async def _iter_events_with_idle(aiter, *, idle_sec: float, call_deadline: float
     try:
         while True:
             # Poll in short slices so a human-wait that starts mid-timeout is noticed.
-            slice_sec = min(5.0, idle_sec)
+            slice_sec = min(_POLL_SLICE, idle_sec)
             started = time.monotonic()
             nxt = asyncio.ensure_future(aiter.__anext__())
             while True:

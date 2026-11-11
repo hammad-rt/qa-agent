@@ -89,9 +89,12 @@ class Retention(unittest.TestCase):
 
 class Secrets(unittest.TestCase):
     def test_scrub(self):
-        env = {"SAVOSTORE_CRM_PASSWORD": "hunter22", "HOME": "/home/box", "GITHUB_TOKEN": "ghp_abcdef"}
-        t = scrub_secrets("pw hunter22 token ghp_abcdef home /home/box", env)
+        env = {"SAVOSTORE_CRM_PASSWORD": "hunter22x", "HOME": "/home/box", "GITHUB_TOKEN": "ghp_abcdef12"}
+        t = scrub_secrets("pw hunter22x token ghp_abcdef12 home /home/box", env)
         self.assertEqual(t, "pw [SAVOSTORE_CRM_PASSWORD] token [GITHUB_TOKEN] home /home/box")
+        # Placeholder API keys must not rewrite ordinary English.
+        t2 = scrub_secrets("found none", {"LLM_API_KEY": "none"})
+        self.assertEqual(t2, "found none")
 
     def test_state_file_scrubbed(self):
         os.environ["X_TEST_PASSWORD"] = "Zq9!longsecret"

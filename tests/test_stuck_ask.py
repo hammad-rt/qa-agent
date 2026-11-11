@@ -34,6 +34,7 @@ class StuckAsk(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_unattended_logs_question_and_blocks(self):
+        self.s._capture_stuck_ask_shot = lambda: None
         with mock.patch.object(self.s, "_can_stuck_ask", return_value=False):
             out = self.s._maybe_stuck_ask(why="looped on Save", name="browser_click", repeats=4)
         self.assertIsNone(out)  # fall through to normal block
@@ -42,6 +43,7 @@ class StuckAsk(unittest.TestCase):
 
     def test_guidance_resets_counters(self):
         # Conversational: chat turn then explicit go — only then continue with guidance.
+        self.s._capture_stuck_ask_shot = lambda: None
         with mock.patch.object(self.s, "_can_stuck_ask", return_value=True), \
              mock.patch.object(self.s, "_ask_stuck_line",
                                side_effect=["use the Payments subpanel", "go"]):
@@ -51,10 +53,12 @@ class StuckAsk(unittest.TestCase):
         self.assertFalse(self.s.result.limit_hit)
         self.assertEqual(self.s._sigs, {})
         self.assertFalse(self.s._explored)
+        self.assertTrue(self.s._forbidden_after_stuck)
         chat = (self.st.dir / "stuck_chat.json")
         self.assertTrue(chat.is_file())
 
     def test_skip_blocks_case(self):
+        self.s._capture_stuck_ask_shot = lambda: None
         with mock.patch.object(self.s, "_can_stuck_ask", return_value=True), \
              mock.patch.object(self.s, "_ask_stuck_line", return_value="2:no test data"):
             out = self.s._maybe_stuck_ask(why="looped", name="browser_click", repeats=4)
@@ -63,6 +67,7 @@ class StuckAsk(unittest.TestCase):
         self.assertIn("finish", out["error"].lower())
 
     def test_question_is_human_readable(self):
+        self.s._capture_stuck_ask_shot = lambda: None
         self.s.last_snapshot = (
             'Page URL: https://example.test/x\nPage Title: Checkout\n'
             '- heading "Billing Currency" [ref=e1]\n'
@@ -78,6 +83,7 @@ class StuckAsk(unittest.TestCase):
 
     def test_max_two_asks(self):
         self.s._stuck_asks = STUCK_ASK_MAX_PER_CASE
+        self.s._capture_stuck_ask_shot = lambda: None
         with mock.patch.object(self.s, "_can_stuck_ask", return_value=True):
             self.assertIsNone(self.s._maybe_stuck_ask(why="x", name="browser_click", repeats=4))
 

@@ -100,12 +100,34 @@ def is_admin_checklist_item(text: str | None) -> bool:
     return bool(text) and bool(ADMIN_CHECKLIST_HINT.search(text or ""))
 
 
+# Submit / create / pay / request — discovery may open forms but must not submit them.
+DISCOVERY_SUBMIT_CLICK = re.compile(
+    r"(?i)\b("
+    r"request(?:\s+a)?\s+purchase\s+quote|request\s+quote|"
+    r"save|submit|pay(?:\s+now)?|place\s+order|checkout|"
+    r"create(?:\s+(?:new\s+)?(?:order|shipment|quote|record|contact))?|"
+    r"confirm|send|finish|apply|update\s+record"
+    r")\b"
+)
+
+
+def is_discovery_submit_label(label: str | None) -> bool:
+    return bool(label) and bool(DISCOVERY_SUBMIT_CLICK.search(label or ""))
+
+
 def discovery_blocks_click(label: str | None, url: str | None = None) -> str | None:
     """If discovery must not click this control, return a short reason; else None.
 
     Mapping Admin / Repair menus is allowed. Clicking the action that *runs* repair /
     execute / cache clear / module loader / studio deploy / scheduler is denied.
+    Submit / create / request / pay clicks are also denied (open forms, then go back).
     """
+    if is_discovery_submit_label(label):
+        return (
+            f"discovery is read-only: do not click '{(label or '')[:80]}' "
+            f"(submit/create/request/pay). Open the form to map labels if needed, "
+            f"then go back — never submit."
+        )
     if is_admin_action_label(label):
         return (
             f"discovery is read-only: do not click '{(label or '')[:80]}' "

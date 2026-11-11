@@ -68,6 +68,7 @@ class DiscoveryStuckResume(unittest.TestCase):
         """_maybe_stuck_ask must open on discovery even when _explored is still False."""
         self.s._explored = False
         self.s._stuck_asks = 0
+        self.s._capture_stuck_ask_shot = lambda: None
         with mock.patch.object(self.s, "_can_stuck_ask", return_value=True), \
                 mock.patch.object(self.s, "_ask_stuck_line",
                                   side_effect=["try the Admin link under user menu", "go"]):

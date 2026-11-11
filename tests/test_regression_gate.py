@@ -94,6 +94,7 @@ class StuckAskContinueGate(unittest.TestCase):
             s._explored = True
             s._recent = ["click:Save", "click:Save"]
             s.last_snapshot = "Page URL: https://example.test/\nSave"
+            s._capture_stuck_ask_shot = lambda: None
             with mock.patch.object(s, "_can_stuck_ask", return_value=True), \
                  mock.patch.object(s, "_ask_stuck_line", side_effect=["try Payments", "go"]):
                 out = s._maybe_stuck_ask(why="looped", name="browser_click", repeats=4)

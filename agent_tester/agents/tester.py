@@ -946,6 +946,8 @@ class TesterSession:
     # ---- callbacks: the code side of every tool call --------------------------------
     def before_tool(self, tool, args, tool_context):
         name = tool.name
+        # Keep for stuck-ask evidence capture (sync path needs the live MCP context).
+        self._tool_context = tool_context
         # Unchanged snapshot short-circuit: do not count as a loop/idle-read step.
         if name == "browser_snapshot" and getattr(self, "_page_hash", None) and getattr(self, "_page_fresh", False):
             self.state.log_action(case_id=self.case_id, app=self.app, tool="browser_snapshot",
@@ -980,6 +982,11 @@ class TesterSession:
                 lab0 = _label_of(str(args.get("target") or args.get("ref") or "").removeprefix("ref=").strip(), snap0)
                 if lab0:
                     args["element"] = lab0
+            # After stuck-chat "go": never re-run the identical action that caused the ask.
+            # Call via the class so MagicMock test doubles do not invent a deny result.
+            forbidden = TesterSession._deny_forbidden_after_stuck(self, name, args)
+            if forbidden is not None:
+                return forbidden
             limit = self._budget_check(name, args)
             counted = True
             if limit:
@@ -1368,7 +1375,41 @@ class TesterSession:
             return bool(sys.stdin and sys.stdin.isatty())
         return bool(sys.stdin and sys.stdin.isatty())
 
-    def _stuck_summary(self, why: str, thread: list | None = None) -> dict:
+    def _capture_stuck_ask_shot(self) -> str | None:
+        """Fresh PNG under run shots/ at ask time (never reuse login helper shots)."""
+        tc = getattr(self, "_tool_context", None)
+        if self.toolset is None or tc is None:
+            return None
+        import asyncio
+        import concurrent.futures
+
+        async def _go():
+            # Refresh page text so title/path are current before the card renders.
+            try:
+                from ..helpers import adk_caller
+                call = adk_caller(self.toolset, tc)
+                snap = str(await call("browser_snapshot", {}) or "")
+                if snap:
+                    self._remember_page(snap)
+            except Exception:  # noqa: BLE001
+                pass
+            return await self.auto_shot("stuck-ask", tc)
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                return asyncio.run(_go())
+            except Exception:  # noqa: BLE001
+                return None
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, _go()).result(timeout=45)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _stuck_summary(self, why: str, thread: list | None = None,
+                       *, fresh_shot: str | None = None, ask_at: float | None = None) -> dict:
         from ..stuck_summary import build_stuck_summary
         brief = dict(self.brief or {})
         if getattr(self, "result", None) is not None:
@@ -1380,7 +1421,64 @@ class TesterSession:
             snapshot=self.last_snapshot, run_dir=self.state.dir,
             screenshots=list(getattr(self.result, "screenshots", None) or []),
             timeout_sec=STUCK_ASK_TIMEOUT_SEC, thread=thread or [],
+            fresh_shot=fresh_shot, ask_at=ask_at,
         )
+
+    def _action_match_keys(self, name: str, args: dict) -> set[str]:
+        """Canonical keys for an action so click:button X and click:X compare equal."""
+        keys: set[str] = set()
+        sig = _call_sig(name, args)
+        intent = _intent_sig(name, args, self.last_snapshot)
+        if sig:
+            keys.add(sig)
+        if intent:
+            keys.add(intent)
+        for k in list(keys):
+            if not isinstance(k, str) or not k.startswith("click:"):
+                continue
+            rest = k[6:].strip().lower()
+            keys.add(f"click:{rest}")
+            parts = rest.split(None, 1)
+            if parts and parts[0] in {
+                "button", "link", "checkbox", "radio", "tab", "switch", "textbox", "combobox", "option",
+            } and len(parts) > 1:
+                keys.add(f"click:{parts[1]}")
+                keys.add(f"click:{parts[0]} {parts[1]}")
+            elif rest:
+                keys.add(f"click:button {rest}")
+        return keys
+
+    def _deny_forbidden_after_stuck(self, name: str, args: dict) -> dict | None:
+        """After stuck-chat go: block the identical action that caused the ask; ladder at STUCK_MAX."""
+        forbidden = getattr(self, "_forbidden_after_stuck", None)
+        if not isinstance(forbidden, (set, frozenset)) or not forbidden:
+            return None
+        # Expand forbidden with normalized click variants captured at ask time.
+        expanded = set(forbidden)
+        for k in list(forbidden):
+            if isinstance(k, str) and k.startswith("click:"):
+                expanded |= self._action_match_keys("browser_click", {
+                    "element": k.split(":", 1)[-1],
+                })
+        hit = bool(self._action_match_keys(name, args) & expanded)
+        if not hit:
+            return None
+        n = int(getattr(self, "_forbidden_hits", 0)) + 1
+        self._forbidden_hits = n
+        self.state.log_action(case_id=self.case_id, app=self.app, tool=name, args=_safe_args(args),
+                              plan_step=self.current_step, outcome="forbidden_after_stuck")
+        guidance = "\n".join(getattr(self, "_guidance_notes", [])[-2:] or [])
+        if n >= LOOP_STOP:
+            # STUCK_MAX identical repeats after go → lookup ladder (not another silent click).
+            return self._start_exploring(
+                name,
+                "the same action that caused the stuck ask was repeated after user guidance; "
+                "lookup ladder next")
+        tip = guidance or "Follow the stuck-chat guidance and try a different control or route."
+        return {"error": (
+            f"Blocked: that exact {name} is the action that caused the stuck ask. Do not repeat it. "
+            f"{tip}\n(Forbidden repeat {n}/{LOOP_STOP}; at {LOOP_STOP} the lookup ladder runs.)"
+        )}
 
     def _stuck_question(self, why: str, thread: list | None = None) -> str:
         from ..stuck_summary import format_stuck_prompt
@@ -1451,8 +1549,14 @@ class TesterSession:
         if asks >= STUCK_ASK_MAX_PER_CASE:
             return None
         self._stuck_asks = asks + 1
+        # Remember the identical action(s) so "go" can forbid repeating them.
+        self._stuck_trigger_keys = {
+            k for k in list(getattr(self, "_recent", []) or [])[-4:] if k
+        }
         thread = load_thread(self.state.dir, self.case_id)
-        summary = self._stuck_summary(why, thread=thread)
+        ask_at = time.time()
+        fresh_shot = self._capture_stuck_ask_shot()
+        summary = self._stuck_summary(why, thread=thread, fresh_shot=fresh_shot, ask_at=ask_at)
         q = format_stuck_prompt(summary)
         if not self._can_stuck_ask():
             note = f"Stuck ask (unattended, no answerer): {q.strip()}"
@@ -1476,7 +1580,8 @@ class TesterSession:
         final_kind, final_rest = None, ""
         while time.time() < deadline:
             left = max(1, int(deadline - time.time()))
-            summary = self._stuck_summary(why, thread=thread)
+            # Reuse ask-time shot/page; do not fall back to stale login helper PNGs.
+            summary = self._stuck_summary(why, thread=thread, fresh_shot=fresh_shot, ask_at=ask_at)
             summary["timeout_sec"] = left
             q = format_stuck_prompt(summary)
             ask_id = f"stuck-{self.case_id}-{uuid.uuid4().hex[:8]}"
@@ -1555,7 +1660,13 @@ class TesterSession:
             from ..coordinator import RunPaused
             raise RunPaused(f"User stopped the run at {self.case_id}: {final_rest or why}")
 
-        # go / continue: reset counters and feed the full conversation as guidance.
+        # go / continue: reset counters, forbid the identical stuck action, inject guidance.
+        self._forbidden_after_stuck = set(getattr(self, "_stuck_trigger_keys", None) or [])
+        # Also pin the humanized click label from recent intents for intent-sig matches.
+        for k in list(self._forbidden_after_stuck):
+            if k.startswith("click:"):
+                self._forbidden_after_stuck.add(k)
+        self._forbidden_hits = 0
         self._sigs, self._recent, self.since_progress, self._reads = {}, [], 0, 0
         self._sig_page = {}
         self._explored = False
@@ -1564,15 +1675,21 @@ class TesterSession:
         guidance = (final_rest or "\n".join(guidance_bits) or why).strip()
         thread.append({"role": "user", "text": "go", "continue": True})
         persist_thread(self.state.dir, self.case_id, thread, summary)
-        self._guidance_notes = getattr(self, "_guidance_notes", []) + [
-            f"GUIDANCE FROM THE USER (stuck chat; continue):\n{guidance}"
-        ]
+        guide_block = (
+            f"GUIDANCE FROM THE USER (stuck chat; continue):\n{guidance}\n"
+            f"Do NOT repeat the identical action that caused this stuck ask "
+            f"({', '.join(sorted(self._forbidden_after_stuck)[:4]) or 'the repeated control'}). "
+            f"Take a different control or route. After {LOOP_STOP} repeats of that forbidden "
+            f"action the lookup ladder runs."
+        )
+        self._guidance_notes = getattr(self, "_guidance_notes", []) + [guide_block]
         self.state.data.setdefault("notes", []).append(
-            f"Stuck ask on {self.case_id}: continued with guidance ({len(guidance_bits)} turns)")
+            f"Stuck ask on {self.case_id}: continued with guidance ({len(guidance_bits)} turns); "
+            f"forbidden={sorted(self._forbidden_after_stuck)[:3]}")
         self.state.save()
         return {"error": (
-            f"GUIDANCE FROM THE USER (stuck chat; loop counters reset once):\n- {guidance}\n"
-            f"Your {name} call was NOT run. Follow the guidance, then continue. "
+            f"{guide_block}\n"
+            f"Your {name} call was NOT run. Follow the guidance on the next model turn. "
             f"Approvals and safety rules still apply."
         )}
 
@@ -1664,12 +1781,22 @@ class TesterSession:
     def _fix_screenshot_args(self, args: dict) -> None:
         """The model often calls browser_take_screenshot without a filename; Playwright MCP then returns the image
         inline only and nothing reaches shots/ or the report. Always give it an absolute path under shots/
-        (ADK passes this same dict to the tool, so the in-place change is what runs)."""
+        (ADK passes this same dict to the tool, so the in-place change is what runs). Relative names and
+        absolute paths outside the run shots/ dir are rewritten so PNGs never land in the repo root."""
         raw = (args.get("filename") or "").strip()
         p = Path(raw) if raw else None
-        if p is not None and p.is_absolute() and p.parent.resolve() == self.ev.shots.resolve():
-            return
-        what = p.stem if p is not None and p.stem else (self.brief.get("title") or "evidence")
+        shots = self.ev.shots.resolve()
+        if p is not None and p.is_absolute():
+            try:
+                if p.resolve().parent == shots:
+                    args["filename"] = str(p.resolve())
+                    return
+            except OSError:
+                pass
+            # Absolute but not under this run's shots/ → keep basename only under shots/.
+            what = p.stem or (self.brief.get("title") or "evidence")
+        else:
+            what = p.stem if p is not None and p.stem else (self.brief.get("title") or "evidence")
         png, txt = self.ev.paths(self.case_id, what)
         if self.last_snapshot:
             self.ev.save_snapshot(txt, self.last_snapshot, keep_emails=self.keep_emails)

@@ -154,7 +154,7 @@ class DiscoveryFirst(unittest.TestCase):
 
         entry = ensure_discovery(self.plan, self.case, "portal", self.state, {"portal": tester}, mem)
         self.assertEqual(entry["source"], "discovery")
-        self.assertEqual(seen, [f"DISCO-{self.case.area}"])
+        self.assertEqual(seen, [f"DISCO-{self.case.area}-portal"])
         self.assertTrue(any("Stuck" in h or "Route" in h or "Behaviour" in h for h in entry["hints"]))
 
     def test_runs_discovery_once_when_memory_empty(self):

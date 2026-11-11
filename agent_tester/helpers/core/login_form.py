@@ -185,7 +185,8 @@ async def _attempt(browser, ctx, account: str, path: str = ""):
     markers = acc.get("role_markers", [])
     still_on_form = bool(after.get("has_password"))
     role_ok = all(m.lower() in page.lower() for m in markers)
-    shot = await browser.screenshot(f"{ctx.shot_prefix}login-{ctx.app}-{account}.png")
+    # Basename only — McpBrowser rewrites under evidence_dir / run shots/ (never repo cwd).
+    shot = await browser.screenshot(f"login-{ctx.app}-{account}.png")
     used = f"{_fdesc(form['user'])} / {_fdesc(form['password'])} / submit {_fdesc(sub) if sub else 'Enter'}"
     if still_on_form:
         seen = (f"the page says: {after['error']}" if after.get("error")

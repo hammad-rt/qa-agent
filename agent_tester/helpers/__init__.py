@@ -164,11 +164,19 @@ class McpBrowser:
         return await self._do("browser_select_option", {"element": e.name, "target": e.ref, "values": [value]})
 
     async def screenshot(self, filename: str) -> str:
-        """Pass an absolute path to Playwright; return basename for report evidence lists."""
+        """Pass an absolute path under the run shots/ dir; return basename for evidence lists.
+
+        Playwright MCP resolves relative names against process cwd (often the repo root).
+        Always rewrite to evidence_dir when set so login/helper shots never land in the repo root.
+        """
         path = Path(filename)
-        if not path.is_absolute() and self.evidence_dir is not None:
+        if self.evidence_dir is not None:
             path = (Path(self.evidence_dir) / path.name).resolve()
-        elif path.is_absolute():
+        elif not path.is_absolute():
+            raise HelperError(
+                "screenshot requires evidence_dir (run shots/) or an absolute path under the run folder"
+            )
+        else:
             path = path.resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
         await self._do("browser_take_screenshot", {"filename": str(path), "scale": "css"})

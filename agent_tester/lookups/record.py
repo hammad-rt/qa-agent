@@ -6,12 +6,15 @@ Optional API path when the pack configures one (requests); browser path is defau
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlencode, urljoin
 
 from ..helpers.core.read_table import parse_tables
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -181,7 +184,7 @@ async def find_records(browser, *, base_url: str, module: str, filters: dict[str
         try:
             evidence.append(await browser.screenshot(screenshot_name))
         except Exception:  # noqa: BLE001
-            pass
+            log.warning("record lookup evidence screenshot failed", exc_info=True)
     if not rows:
         return LookupResult(ok=False, notes=f"no rows on {module} list", evidence=evidence)
     row = match_row(rows, match_field or next(iter(filters), ""),
@@ -251,7 +254,7 @@ async def read_detail_fields(browser, *, base_url: str, module: str, record_id: 
         try:
             evidence.append(await browser.screenshot(screenshot_name))
         except Exception:  # noqa: BLE001
-            pass
+            log.warning("record lookup evidence screenshot failed", exc_info=True)
     return LookupResult(ok=bool(values), record_id=record_id, values=values,
                         evidence=evidence, notes="ok" if values else "no labelled fields found")
 

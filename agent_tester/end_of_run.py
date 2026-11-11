@@ -1,11 +1,14 @@
 """End-of-run memory work: retrospective, open bugs, proposal approvals, promotion, prune, export."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from .memory import promotion, review
 from .memory.store import dump_json
 from .config import ROOT
+
+log = logging.getLogger(__name__)
 
 
 def finish_memory(memory, pack, state, input_fn=None, out=print) -> dict:
@@ -25,7 +28,7 @@ def finish_memory(memory, pack, state, input_fn=None, out=print) -> dict:
         from .coordinator import env_fingerprint
         env_fp = env_fingerprint(plan)
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("end-of-run env fingerprint failed", exc_info=True)
 
     # Approve agent proposals from the run first (before review adds more candidates).
     pend = memory.pending()

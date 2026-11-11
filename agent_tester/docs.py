@@ -7,11 +7,14 @@ pack.yaml lists each app's stack, e.g.
 Nothing is fetched until a tester asks; useful excerpts are kept so the next run reads them offline."""
 from __future__ import annotations
 
+import logging
 import html as _html
 import re
 from datetime import date
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
+
+log = logging.getLogger(__name__)
 
 TIMEOUT = 15
 
@@ -102,6 +105,7 @@ def lookup(pack, app: str, question: str, get=None) -> dict:
         try:
             ex = _best_paragraphs(_text(get(url).text), question)
         except Exception:  # noqa: BLE001
+            log.debug("docs fetch/parse for a URL failed", exc_info=True)
             continue
         if ex:
             results.append({"source": url, "excerpt": ex})

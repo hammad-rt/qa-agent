@@ -1,6 +1,7 @@
 """Per-chunk usefulness scores in SQLite (keyed by chunk id/hash — never env identity)."""
 from __future__ import annotations
 
+import logging
 import json
 import os
 import sqlite3
@@ -8,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .chunks import ContextChunk
+
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS context_scores (
@@ -175,7 +178,7 @@ def record_injection(state, selection, *, case_id: str = "", step_type: str = "g
     try:
         state.save()
     except Exception:  # noqa: BLE001
-        pass
+        log.warning("failed to save run state after context injection record", exc_info=True)
 
 
 def record_usage_signals(state, *, case_id: str, used_chunk_ids: list[str] | None = None,
@@ -191,7 +194,7 @@ def record_usage_signals(state, *, case_id: str, used_chunk_ids: list[str] | Non
     try:
         state.save()
     except Exception:  # noqa: BLE001
-        pass
+        log.warning("failed to save run state after context usage signals", exc_info=True)
 
 
 def update_scores_from_run(store: ContextScores, state, exempt_ids: set[str] | None = None) -> dict:
@@ -240,5 +243,5 @@ def update_scores_from_run(store: ContextScores, state, exempt_ids: set[str] | N
     try:
         state.save()
     except Exception:  # noqa: BLE001
-        pass
+        log.warning("failed to save run state after context score update", exc_info=True)
     return summary

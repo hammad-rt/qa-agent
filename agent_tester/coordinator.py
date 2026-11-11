@@ -6,6 +6,7 @@ Testers and the judge are injected callables so this file has no LLM dependency:
 """
 from __future__ import annotations
 
+import logging
 from .reliability import is_retryable, wait_for_model
 
 import re
@@ -16,6 +17,8 @@ from typing import Callable
 from .models import CaseResult, PlannedCase, StepResult, TestPlan
 from .plan_checks import execution_order
 from .run_state import RunState
+
+log = logging.getLogger(__name__)
 
 Tester = Callable[[str, dict, RunState], StepResult]
 Judge = Callable[[dict, list, list, RunState], CaseResult]
@@ -168,7 +171,7 @@ def mark_discovery_stale(state, area: str | None, app: str, why: str = "",
                     if row:
                         ms.mark_stale(row["id"], why or "route failed in case")
         except Exception:  # noqa: BLE001
-            pass
+            log.warning("failed to mark discovery route stale", exc_info=True)
         # Drop only this item from the in-run cache notes/recipes so incremental runs.
         entry = (state.data.get("discovery") or {}).get(key)
         if isinstance(entry, dict):
@@ -375,6 +378,7 @@ def _persist_discovered_routes(plan, case, app, state, memory, fp, checklist, no
         except EnvDetailError:
             continue
         except Exception:  # noqa: BLE001
+            log.warning("failed to upsert discovered route", exc_info=True)
             continue
     if covered and len(covered) < len(checklist):
         # Partial map: next run reuses covered, discovers the rest.
@@ -384,7 +388,7 @@ def _persist_discovered_routes(plan, case, app, state, memory, fp, checklist, no
             entry["map_status"] = "partial"
             entry["covered_items"] = list(covered)
         except Exception:  # noqa: BLE001
-            pass
+            log.warning("failed to mark partial discovery coverage", exc_info=True)
     elif covered:
         entry["map_status"] = "complete"
         entry["covered_items"] = list(covered)
@@ -449,7 +453,7 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory,
                     f"discovery_map: marked {n_bad} stuck/garbage route(s) stale")
             state.data["_discovery_bad_staled"] = True
         except Exception:  # noqa: BLE001
-            pass
+            log.warning("failed to mark stuck/garbage discovery rows stale", exc_info=True)
     # Once per run: import pack ## Routes as verified (source=pack); skip env-bound lines.
     if map_store is not None and not state.data.get("_learned_routes_backfilled"):
         warnings: list[str] = []
@@ -462,14 +466,14 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory,
                 warn=warnings.append,
             )
         except Exception:  # noqa: BLE001
-            pass
+            log.warning("failed to backfill discovery routes from learned file", exc_info=True)
         for w in warnings:
             state.data.setdefault("notes", []).append(w)
         state.data["_learned_routes_backfilled"] = True
         try:
             state.save()
         except Exception:  # noqa: BLE001
-            pass
+            log.warning("failed to save run state after learned-route backfill", exc_info=True)
     # Pack routes land under area=general; also list area-specific rows for this case.
     known_rows = []
     synonym_groups = load_route_synonym_groups(
@@ -670,7 +674,7 @@ def _run_discovery(plan, case, app, state, testers, memory, fp, key, store, *,
             from .discovery_map import flush_pending
             flush_pending(state, memory)
         except Exception:  # noqa: BLE001
-            pass
+            log.warning("failed to flush pending discovery routes after discovery turn", exc_info=True)
         state.data.pop("_active_discovery", None)
     proposed = []
     if memory is not None:
@@ -680,7 +684,7 @@ def _run_discovery(plan, case, app, state, testers, memory, fp, key, store, *,
                 if r.get("text"):
                     proposed.append(r["text"])
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("failed to query proposed discovery recipes from memory", exc_info=True)
     prior_notes = (prior or {}).get("notes") or ""
     prior_recipes = list((prior or {}).get("recipes") or [])
     prior_checklist = list((prior or {}).get("checklist") or [])
@@ -714,7 +718,7 @@ def _run_discovery(plan, case, app, state, testers, memory, fp, key, store, *,
         _persist_discovered_routes(plan, case, app, state, memory, fp, goal_lines,
                                    notes, proposed + list(hints), entry)
     except Exception:  # noqa: BLE001
-        pass
+        log.warning("failed to persist discovered routes", exc_info=True)
     from .memory.pollution import is_infra_error_text
     # Never persist infrastructure failures (timeouts, cancellations, MCP errors)
     # as learned hints, even if other proposed recipes already exist for the area.
@@ -981,7 +985,7 @@ def _run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge
         )
         markers_for_plan(plan, state, fetch=do_fetch)
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("deploy marker collection failed", exc_info=True)
     read_snapshot(plan, state, testers, "baseline")
     by_id = {c.id: c for c in plan.cases}
     pack_cfg = pack_cfg or state.data.get("pack_cfg") or {}
@@ -1036,7 +1040,7 @@ def _run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge
             update_scores_from_run(scores, state)
             scores.close()
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("end-of-run context score update failed", exc_info=True)
         return {cid: state.result(cid) for cid in execution_order(plan)}
     finally:
         # Persist any verified/proposed discovery routes even on stop / crash / Ctrl-C.
@@ -1044,7 +1048,7 @@ def _run_plan(plan: TestPlan, state: RunState, testers: dict[str, Tester], judge
             from .discovery_map import flush_pending
             flush_pending(state, memory)
         except Exception:  # noqa: BLE001
-            pass
+            log.warning("failed to flush pending discovery routes at end of plan", exc_info=True)
         state.data.pop("_memory_ref", None)
 
 
@@ -1318,7 +1322,7 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
                     if not (sr.stuck or sr.limit_hit or sr.needs_login):
                         continue
                 except Exception:  # noqa: BLE001
-                    pass
+                    log.warning("discovery safety-net retry tester failed", exc_info=True)
                 why = ("kept repeating the same action without progress" if getattr(sr, "loop", False)
                        else "hit the step/time limit" if sr.limit_hit else "got stuck")
             note = f"tester on {app} {why}: {sr.notes}".strip()
@@ -1370,7 +1374,7 @@ def _learn_route(case, app, state, log_mark) -> None:
             state.save()
         verify_discovery_maps_after_case(case, app, state, acts)
     except Exception:  # noqa: BLE001  learning must never fail a case
-        pass
+        log.warning("failed to record learned route after a successful case", exc_info=True)
 
 
 def verify_discovery_maps_after_case(case, app, state, acts: list[dict] | None = None) -> int:
@@ -1422,6 +1426,7 @@ def verify_discovery_maps_after_case(case, app, state, acts: list[dict] | None =
             ms.mark_verified(row["id"], deploy_marker=marker or None)
             n += 1
         except Exception:  # noqa: BLE001
+            log.warning("failed to mark discovery route verified", exc_info=True)
             continue
     return n
 
@@ -1433,6 +1438,7 @@ def rediscover_failed_item(plan, case, app, state, testers, memory, item: str, w
     try:
         return ensure_discovery(plan, case, app, state, testers, memory, checklist=[item])
     except Exception:  # noqa: BLE001 — never block the case on rediscovery failure
+        log.warning("incremental rediscovery after reused-route failure failed", exc_info=True)
         state.data.setdefault("notes", []).append(
             f"incremental rediscovery for {item!r} failed after reused route error ({why})")
         return None
@@ -1484,7 +1490,7 @@ def _learn_failure(case, app, state, log_mark, why: str, notes: str) -> None:
             state.checkpoint(f"{case.id}: saved where it got stuck to the pack")
             state.save()
     except Exception:  # noqa: BLE001  learning must never fail a case
-        pass
+        log.warning("failed to record learned stuck note after a case", exc_info=True)
 
 
 def _learn_outcome(case, result, state) -> None:
@@ -1501,7 +1507,7 @@ def _learn_outcome(case, result, state) -> None:
             state.data.setdefault("notes", []).append(f"saved behaviour for {case.area or apps[-1]} from {case.id}")
             state.save()
     except Exception:  # noqa: BLE001  learning must never fail a case
-        pass
+        log.warning("failed to record learned behaviour after a case", exc_info=True)
 
 
 def _propose_success_recipe(memory, case, state) -> None:
@@ -1522,4 +1528,4 @@ def _propose_success_recipe(memory, case, state) -> None:
             state.data.setdefault("notes", []).append(f"proposed recipe from discovery for {case.area or app}")
             state.save()
         except Exception:  # noqa: BLE001
-            pass
+            log.warning("failed to propose success recipe to memory", exc_info=True)

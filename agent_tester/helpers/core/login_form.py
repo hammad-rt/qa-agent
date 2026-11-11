@@ -1,5 +1,6 @@
 """Log in through a username/password form. The password is read from the env var named in pack.yaml and
 typed by code; it never goes back to the model, the action log or the report."""
+import logging
 import asyncio
 import getpass
 import sys
@@ -9,6 +10,8 @@ import re
 from pathlib import Path
 
 from agent_tester.helpers import HelperError, parse_snapshot
+
+log = logging.getLogger(__name__)
 
 TEXT_ROLES = ("textbox", "searchbox")
 
@@ -76,6 +79,7 @@ async def solve_checkbox(browser) -> dict:
     try:
         return parse_result(await browser._do("browser_run_code_unsafe", {"code": CAPTCHA_JS}))
     except Exception:  # noqa: BLE001  (tool missing / page changed: treat as "could not tick")
+        log.warning("login captcha checkbox solve failed", exc_info=True)
         return {"present": True, "passed": False, "challenge": False}
 
 
@@ -187,6 +191,7 @@ async def _session_already_valid(browser, ctx, account: str, acc: dict) -> dict 
     try:
         form = await analyze(browser)
     except Exception:  # noqa: BLE001
+        log.warning("login form analyze failed while checking existing session", exc_info=True)
         return None
     if form.get("has_password"):
         return None  # signed out / on a login form
@@ -194,6 +199,7 @@ async def _session_already_valid(browser, ctx, account: str, acc: dict) -> dict 
     try:
         page = await browser.snapshot() or ""
     except Exception:  # noqa: BLE001
+        log.warning("login session snapshot failed", exc_info=True)
         page = ""
     markers = [m for m in (acc.get("role_markers") or []) if str(m).strip()]
     how = _signed_in_evidence(page, markers)
@@ -228,6 +234,7 @@ async def _attempt(browser, ctx, account: str, path: str = ""):
         try:
             page = await browser.snapshot() or ""
         except Exception:  # noqa: BLE001
+            log.warning("login page snapshot failed after navigate", exc_info=True)
             page = ""
         how = _signed_in_evidence(page, acc.get("role_markers") or [])
         if how:
@@ -299,6 +306,7 @@ def _account_role_key(ctx, account: str) -> str:
         try:
             accounts = pack.accounts(app) or {}
         except Exception:  # noqa: BLE001
+            log.debug("pack accounts lookup failed while resolving role key", exc_info=True)
             accounts = {}
     if raw in accounts:
         return raw
@@ -348,4 +356,4 @@ def _save_learned(ctx, fields: dict) -> None:
         try:
             p.write_text(json.dumps(data, indent=2))
         except OSError:
-            pass
+            log.warning("failed to write learned login fields", exc_info=True)

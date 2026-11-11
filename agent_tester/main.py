@@ -23,6 +23,8 @@ from pathlib import Path
 
 from .config import ROOT, Settings
 
+log = logging.getLogger(__name__)
+
 
 def open_memory(settings: Settings, pack):
     from .memory.embed import Embedder
@@ -510,7 +512,7 @@ def _execute(settings, pack, plan, state, policy, memory) -> int:
                 state.data.setdefault("notes", []).append(f"discovery map flushed on {reason}")
                 state.save()
         except Exception:  # noqa: BLE001
-            pass
+            log.warning("failed to flush discovery map on shutdown or signal", exc_info=True)
 
     def _on_signal(signum, frame):  # noqa: ARG001
         _flush_maps(f"signal {signum}")

@@ -1,6 +1,7 @@
 """Settings from .env and the environment. Secrets are read by name, never logged."""
 from __future__ import annotations
 
+import logging
 import atexit
 import os
 import shutil
@@ -8,6 +9,8 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -124,7 +127,7 @@ class Settings:
                 from .redact import warn_skipped_secrets
                 warn_skipped_secrets()
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("secret-placeholder startup check failed", exc_info=True)
         e = os.environ.get
         return cls(
             llm_base_url=e("LLM_BASE_URL", "https://ai.rolustech.com/v1"),

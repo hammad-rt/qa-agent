@@ -6,12 +6,15 @@ are never copied: accounts get a username from the user and a password env var n
 is asked through the masked prompt at the first plan gate."""
 from __future__ import annotations
 
+import logging
 import re
 from collections import Counter
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 from ..redact import redact
+
+log = logging.getLogger(__name__)
 
 _URL = re.compile(r"https?://[^\s\"'<>()\[\]|]+")
 _STAGING = re.compile(r"(?i)(staging|stage|stg|dev|test|qa|uat|sandbox|demo)")
@@ -69,6 +72,7 @@ def resolve_project(rm, ref: str) -> int | str:
         try:
             return rm.issue(int(ref))["project"]["id"]           # an issue id
         except Exception:  # noqa: BLE001 - fall back to a numeric project id
+            log.debug("Redmine issue lookup failed; treating ref as a project id", exc_info=True)
             return int(ref)
     return ref                                                 # a project identifier
 

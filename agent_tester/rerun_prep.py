@@ -7,10 +7,13 @@ depend on a recreated token are added to the reopen queue.
 """
 from __future__ import annotations
 
+import logging
 from typing import Callable
 
 from . import placeholders as ph
 from .guidance_redo import dependents
+
+log = logging.getLogger(__name__)
 
 
 LookupFn = Callable[[dict, dict], dict | None]
@@ -114,6 +117,7 @@ def sync_lookup_from_pack(pack_cfg: dict | None, browser, *, base_url: str,
             res = asyncio.run(lookup_from_pack(
                 browser, pack_cfg or {}, kind, base_url=base_url, platform=platform, **params))
         except Exception:  # noqa: BLE001
+            log.warning("rerun-prep pack lookup failed", exc_info=True)
             return {}
         if not res or not res.ok:
             return {}

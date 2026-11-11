@@ -5,6 +5,7 @@ and deduped against the store in code.
 """
 from __future__ import annotations
 
+import logging
 import json
 import re
 from datetime import date, datetime, timezone
@@ -12,6 +13,8 @@ from pathlib import Path
 
 from .env_guard import scrub_env_details
 from .service import jaccard
+
+log = logging.getLogger(__name__)
 
 # Hard cap if an optional LLM polish is used.
 REVIEW_MAX_TOKENS = 400
@@ -156,6 +159,7 @@ def propose_from_review(memory, review: dict, *, env_fp: str | None = None) -> l
         try:
             ids.append(memory.propose("lesson", text, area=None, evidence=review.get("run"), env_fp=env_fp))
         except Exception:  # noqa: BLE001  env guard or validation — skip that candidate
+            log.warning("failed to propose a lesson from the run retrospective", exc_info=True)
             continue
     return ids
 
@@ -224,6 +228,7 @@ async def optional_llm_polish(settings, review: dict) -> str | None:
         text = await run_agent(agent, prompt, settings, retry=True)
         return scrub_env_details(str(text or ""))[:800] or None
     except Exception:  # noqa: BLE001
+        log.debug("optional retrospective LLM polish failed", exc_info=True)
         return None
 
 

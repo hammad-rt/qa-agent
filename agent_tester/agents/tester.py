@@ -1480,6 +1480,7 @@ class TesterSession:
         event loop or Playwright profile (that fights the running browser).
         """
         fresh = getattr(self, "_fresh_stuck_shot", None)
+        self._fresh_stuck_shot = None  # one prefetch per ask; never reuse a stale card shot
         if fresh:
             name = Path(str(fresh)).name
             if (self.ev.shots / name).is_file():

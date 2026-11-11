@@ -135,18 +135,54 @@ async def run(browser, ctx, account: str, path: str = ""):
 
 
 _LOGOUT_CTRL = re.compile(r"(?i)\b(log\s*out|sign\s*out|signout)\b")
+# Interactive a11y roles that can be a signed-in-only control (user menu, logout, role link).
+_SIGNED_IN_ROLES = (
+    "button", "link", "menuitem", "menuitemradio", "menuitemcheckbox",
+    "tab", "option", "switch",
+)
+
+
+def _control_name_matches(name: str, marker: str) -> bool:
+    """Exact or word-boundary match on a control's accessible name (not free text)."""
+    n, m = (name or "").strip(), (marker or "").strip()
+    if not n or not m:
+        return False
+    if n.casefold() == m.casefold():
+        return True
+    return bool(re.search(rf"(?i)\b{re.escape(m)}\b", n))
+
+
+def _snapshot_controls(page: str):
+    return [e for e in parse_snapshot(page or "") if e.role in _SIGNED_IN_ROLES]
+
+
+def _markers_on_controls(page: str, markers: list) -> bool:
+    markers = [str(m).strip() for m in (markers or []) if str(m).strip()]
+    if not markers:
+        return False
+    controls = _snapshot_controls(page)
+    return all(any(_control_name_matches(e.name, m) for e in controls) for m in markers)
+
+
+def _signed_in_evidence(page: str, markers: list) -> str | None:
+    """Why the accessibility tree shows a signed-in session, or None if unsure."""
+    controls = _snapshot_controls(page)
+    if any(_LOGOUT_CTRL.search(e.name or "") for e in controls):
+        return "logout control"
+    if _markers_on_controls(page, markers):
+        return "role markers"
+    return None
 
 
 async def _session_already_valid(browser, ctx, account: str, acc: dict) -> dict | None:
     """Skip login only with positive evidence of a signed-in session.
 
     A public / signed-out home often has no password field — that alone is not enough.
-    Evidence (any one):
-    - pack ``role_markers`` all appear on the page, or
-    - this run already logged in on this app (``login_form.logged_in``) and there is still
-      no password field, or
-    - a logout / sign-out control is visible.
-    With no markers and no evidence, return None so ``_attempt`` navigates to the login path.
+    A prior ``login_form.logged_in`` flag alone is also not enough if the page shows a
+    login form or no signed-in control. Evidence is a signed-in-only control in the
+    accessibility tree: a logout / sign-out control, or every pack ``role_markers``
+    name as an exact / word-boundary control (not free-text substring). When unsure,
+    return None so ``_attempt`` navigates to the login path.
     """
     try:
         form = await analyze(browser)
@@ -160,20 +196,14 @@ async def _session_already_valid(browser, ctx, account: str, acc: dict) -> dict 
     except Exception:  # noqa: BLE001
         page = ""
     markers = [m for m in (acc.get("role_markers") or []) if str(m).strip()]
-    markers_match = bool(markers) and all(str(m).lower() in page.lower() for m in markers)
-    vals = getattr(getattr(ctx, "state", None), "values", None) or {}
-    prev = vals.get("login_form.logged_in") or {}
-    prev_ok = (isinstance(prev, dict) and prev.get("value") == "yes"
-               and str(prev.get("source", "")).endswith(f"/{ctx.app}"))
-    has_logout = bool(page) and bool(_LOGOUT_CTRL.search(page))
-    if markers_match or (prev_ok and not form.get("has_password")) or has_logout:
-        how = ("role markers" if markers_match else
-               "prior login this run" if prev_ok else "logout control")
-        return {"values": {"logged_in": "yes",
-                           "role_ok": "yes" if markers_match else f"skipped ({how})"},
-                "screenshots": [],
-                "notes": f"Already logged in on {ctx.app}; skipped login_form ({how})"}
-    return None
+    how = _signed_in_evidence(page, markers)
+    if not how:
+        return None
+    markers_ok = _markers_on_controls(page, markers)
+    return {"values": {"logged_in": "yes",
+                       "role_ok": "yes" if markers_ok else f"skipped ({how})"},
+            "screenshots": [],
+            "notes": f"Already logged in on {ctx.app}; skipped login_form ({how})"}
 
 
 async def _attempt(browser, ctx, account: str, path: str = ""):
@@ -193,12 +223,19 @@ async def _attempt(browser, ctx, account: str, path: str = ""):
         await browser.navigate(ctx.url(path or cfg.get("path", "")))
         form = await analyze(browser)
     if not form.get("has_password"):
-        vals = getattr(getattr(ctx, "state", None), "values", None) or {}
-        prev = vals.get("login_form.logged_in") or {}
-        if isinstance(prev, dict) and prev.get("value") == "yes" and str(prev.get("source", "")).endswith(f"/{ctx.app}"):
-            # an earlier case already logged in on this app; the browser session is shared, so this is not an error
-            return {"values": {"logged_in": "yes"}, "screenshots": [],
-                    "notes": f"Already logged in on {ctx.app} (shared session); no login needed"}
+        # After navigating to the login path, skip only if a signed-in control is now visible.
+        page = ""
+        try:
+            page = await browser.snapshot() or ""
+        except Exception:  # noqa: BLE001
+            page = ""
+        how = _signed_in_evidence(page, acc.get("role_markers") or [])
+        if how:
+            markers_ok = _markers_on_controls(page, acc.get("role_markers") or [])
+            return {"values": {"logged_in": "yes",
+                               "role_ok": "yes" if markers_ok else f"skipped ({how})"},
+                    "screenshots": [],
+                    "notes": f"Already logged in on {ctx.app} (shared session); no login needed ({how})"}
         raise HelperError("no login form on this page (no visible password field); if you are already logged in, "
                           "skip the login step")
     if not form.get("user"):
@@ -233,9 +270,9 @@ async def _attempt(browser, ctx, account: str, path: str = ""):
     page = await browser.snapshot()
     markers = acc.get("role_markers", [])
     still_on_form = bool(after.get("has_password"))
-    role_ok = all(m.lower() in page.lower() for m in markers)
+    role_ok = (not markers) or _markers_on_controls(page, markers)
     # Basename only — McpBrowser rewrites under evidence_dir / run shots/ (never repo cwd).
-    shot = await browser.screenshot(f"login-{ctx.app}-{account}.png")
+    shot = await browser.screenshot(f"login-{ctx.app}-{_account_role_key(ctx, account)}.png")
     used = f"{_fdesc(form['user'])} / {_fdesc(form['password'])} / submit {_fdesc(sub) if sub else 'Enter'}"
     if still_on_form:
         seen = (f"the page says: {after['error']}" if after.get("error")
@@ -247,6 +284,39 @@ async def _attempt(browser, ctx, account: str, path: str = ""):
     return {"values": {"logged_in": "yes",
                        "role_ok": "yes" if role_ok else f"no (missing {', '.join(markers)})"},
             "screenshots": [shot], "notes": f"Logged in as {account} using {used}"}
+
+
+_SAFE_ROLE_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,40}$")
+
+
+def _account_role_key(ctx, account: str) -> str:
+    """Pack account role/key (admin, customer). Never an email or other identity."""
+    raw = (account or "").strip()
+    accounts = {}
+    pack = getattr(ctx, "pack", None)
+    app = getattr(ctx, "app", "") or ""
+    if pack is not None and hasattr(pack, "accounts"):
+        try:
+            accounts = pack.accounts(app) or {}
+        except Exception:  # noqa: BLE001
+            accounts = {}
+    if raw in accounts:
+        return raw
+    for key in accounts:
+        if str(key).lower() == raw.lower():
+            return str(key)
+    want = raw.lower()
+    for key, a in accounts.items():
+        if str((a or {}).get("username") or "").lower() == want:
+            return str(key)
+    plan = (getattr(getattr(ctx, "state", None), "data", None) or {}).get("plan") or {}
+    for r in plan.get("requirements") or []:
+        k = str(r.get("key") or "")
+        if k.startswith(f"account.{app}.") and str(r.get("value") or "").lower() == want:
+            return k.split(".", 2)[2]
+    if raw and _SAFE_ROLE_KEY.fullmatch(raw) and "@" not in raw:
+        return raw
+    return "account"
 
 
 def _fdesc(f: dict | None) -> str:

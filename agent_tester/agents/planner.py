@@ -40,10 +40,36 @@ PLAN_BATCH_TOKENS = int(os.environ.get("PLAN_BATCH_TOKENS", "6000"))  # ~case te
 PLAN_CONCURRENCY = int(os.environ.get("PLAN_CONCURRENCY", "1"))
 # Empty/{} planner replies: retry (with split) this many times per leaf batch, then give up.
 PLAN_EMPTY_RETRIES = int(os.environ.get("PLAN_EMPTY_RETRIES", "2"))
-# Hard cap across all batch attempts (wall clock) and total split attempts.
+# No-progress cap across batch attempts (idle time, not total wall clock) and total split attempts.
+# Disabled for cases-file / already-drafted plans (time_cap=False).
 PLAN_MAX_SECONDS = int(os.environ.get("PLAN_MAX_SECONDS", "600"))
 PLAN_MAX_ATTEMPTS = int(os.environ.get("PLAN_MAX_ATTEMPTS", "12"))
 PLAN_RETRY_TEMPERATURE = float(os.environ.get("PLAN_RETRY_TEMPERATURE", "0.4"))
+
+
+class _IdleClock:
+    """Expires when no batch has completed for ``max_idle`` seconds.
+
+    When ``enabled`` is False (cases-file / already-drafted plans), remaining() is
+    None and the cap is not applied.
+    """
+
+    def __init__(self, max_idle: int, enabled: bool = True):
+        self.max_idle = max(1, int(max_idle))
+        self.enabled = bool(enabled)
+        self.last = time.monotonic()
+
+    def bump(self) -> None:
+        self.last = time.monotonic()
+
+    def remaining(self) -> float | None:
+        if not self.enabled:
+            return None
+        return self.max_idle - (time.monotonic() - self.last)
+
+    def expired(self) -> bool:
+        r = self.remaining()
+        return r is not None and r <= 0
 
 
 def _case_blocks(task_text: str, ids: list[str]) -> list[tuple[str, str]]:
@@ -128,17 +154,26 @@ def _empty_plan_reason(plan: TestPlan | None, want: list[str]) -> str | None:
     return None
 
 
+def _partial_or_cap(parts: list[TestPlan], task_id: int, env: str, batch_label: str, run_dir) -> TestPlan:
+    """Keep cases already planned in this batch; raise only when none completed."""
+    if parts:
+        n = sum(len(p.cases or []) for p in parts)
+        _plan_progress(run_dir, f"{batch_label}: time cap — keeping {n} case(s) already planned")
+        return _merge_plans(parts, task_id, env)
+    raise LLMOutputError(
+        f"Planning hit the {PLAN_MAX_SECONDS}s time cap while working on {batch_label}. "
+        f"Resume with: python -m agent_tester test {task_id} --env {env}")
+
+
 async def _plan_batch_resilient(settings, pack, task_text: str, task_id: int, env: str, batch: list[str],
-                                *, batch_label: str, deadline: float, attempt_budget: list[int],
+                                *, batch_label: str, clock: _IdleClock, attempt_budget: list[int],
                                 budget_lock: asyncio.Lock, repair: bool = False, run_dir=None, **kw) -> TestPlan:
     """Plan one batch; on empty/{} / missing cases, retry up to PLAN_EMPTY_RETRIES and split in half."""
     queue: list[tuple[list[str], int]] = [(list(batch), 0)]  # (ids, empty_retry_n)
     parts: list[TestPlan] = []
     while queue:
-        if time.monotonic() > deadline:
-            raise LLMOutputError(
-                f"Planning hit the {PLAN_MAX_SECONDS}s time cap while working on {batch_label}. "
-                f"Resume with: python -m agent_tester test {task_id} --env {env}")
+        if clock.expired():
+            return _partial_or_cap(parts, task_id, env, batch_label, run_dir)
         async with budget_lock:
             if attempt_budget[0] >= PLAN_MAX_ATTEMPTS:
                 raise LLMOutputError(
@@ -158,31 +193,42 @@ async def _plan_batch_resilient(settings, pack, task_text: str, task_id: int, en
                      "Do not return {} or an empty cases list.")
             temp = PLAN_RETRY_TEMPERATURE
         try:
-            remaining = max(1.0, deadline - time.monotonic())
-            plan = await asyncio.wait_for(
-                plan_task(settings, pack, task_text + nudge, task_id, env,
-                          only_case=",".join(cur), repair=False, temperature=temp,
-                          run_dir=run_dir, **kw),
-                timeout=remaining)
+            remaining = clock.remaining()
+            coro = plan_task(settings, pack, task_text + nudge, task_id, env,
+                             only_case=",".join(cur), repair=False, temperature=temp,
+                             run_dir=run_dir, **kw)
+            if remaining is None:
+                plan = await coro
+            elif remaining <= 0:
+                return _partial_or_cap(parts, task_id, env, batch_label, run_dir)
+            else:
+                plan = await asyncio.wait_for(coro, timeout=max(1.0, remaining))
             why = _empty_plan_reason(plan, cur)
             if why:
                 raise LLMOutputError(f"planner returned {why}")
             parts.append(plan)
+            clock.bump()
             _plan_progress(run_dir, f"{batch_label}: finished {len(cur)} case(s)")
             continue
         except asyncio.TimeoutError as e:
-            _plan_progress(run_dir, f"{batch_label}: cancelled — plan deadline ({PLAN_MAX_SECONDS}s)")
+            _plan_progress(run_dir, f"{batch_label}: cancelled — no-progress cap ({PLAN_MAX_SECONDS}s)")
+            if parts:
+                return _partial_or_cap(parts, task_id, env, batch_label, run_dir)
             raise LLMOutputError(
                 f"Planning hit the {PLAN_MAX_SECONDS}s time cap while working on {batch_label} "
                 f"({ids_txt}). Resume with: python -m agent_tester test {task_id} --env {env}") from e
         except asyncio.CancelledError as e:
-            # Outer plan deadline cancels in-flight wait_fors; treat near-deadline cancel as the time cap.
-            if time.monotonic() >= deadline - 1.0:
-                _plan_progress(run_dir, f"{batch_label}: cancelled — plan deadline ({PLAN_MAX_SECONDS}s)")
+            # Outer no-progress cap cancels in-flight wait_fors; keep any cases already planned.
+            if clock.enabled and (clock.expired() or (clock.remaining() is not None and clock.remaining() <= 1.0)):
+                _plan_progress(run_dir, f"{batch_label}: cancelled — no-progress cap ({PLAN_MAX_SECONDS}s)")
+                if parts:
+                    return _partial_or_cap(parts, task_id, env, batch_label, run_dir)
                 raise LLMOutputError(
                     f"Planning hit the {PLAN_MAX_SECONDS}s time cap while working on {batch_label} "
                     f"({ids_txt}). Resume with: python -m agent_tester test {task_id} --env {env}") from e
             _plan_progress(run_dir, f"{batch_label}: cancelled ({ids_txt})")
+            if parts:
+                return _merge_plans(parts, task_id, env)
             raise LLMOutputError(
                 f"{batch_label}: planning cancelled for {ids_txt}. "
                 f"Resume with: python -m agent_tester test {task_id} --env {env}") from e
@@ -204,69 +250,7 @@ async def _plan_batch_resilient(settings, pack, task_text: str, task_id: int, en
     return _merge_plans(parts, task_id, env)
 
 
-async def plan_in_batches(settings, pack, task_text: str, task_id: int, env: str, ids: list[str], repair: bool = True,
-                          run_dir=None, **kw) -> TestPlan:
-    """Plan case batches sized by token budget; run independent batches concurrently (bounded).
-
-    Empty/`{}`/no-text planner output is a failed attempt: retry (with a nudge + slightly higher
-    temperature) and split the batch in half down to 1 case. A wall-clock and attempt cap stop
-    silent multi-minute loops. Per-batch status lines go to the console and progress.log."""
-    batches = size_batches(task_text, ids)
-    sem = asyncio.Semaphore(max(1, PLAN_CONCURRENCY))
-    parts: list[TestPlan | None] = [None] * len(batches)
-    status = ["pending"] * len(batches)
-    deadline = time.monotonic() + max(1, PLAN_MAX_SECONDS)
-    attempt_budget = [0]
-    lock = asyncio.Lock()
-
-    def _status_line() -> str:
-        bits = []
-        for i, st in enumerate(status):
-            bits.append(f"{i + 1}/{len(batches)}={st}")
-        return "Planning status: " + ", ".join(bits)
-
-    async def one(i: int, batch: list[str]):
-        label = f"Batch {i + 1}/{len(batches)}"
-        # Take the batch semaphore only for work that can finish or be cancelled promptly;
-        # hung LLM calls must release via asyncio cancellation (see run_agent / wait_for).
-        async with sem:
-            async with lock:
-                status[i] = "running"
-                _plan_progress(run_dir, f"{label} starting ({len(batch)} cases). {_status_line()}")
-            try:
-                parts[i] = await _plan_batch_resilient(
-                    settings, pack, task_text, task_id, env, batch,
-                    batch_label=label, deadline=deadline, attempt_budget=attempt_budget,
-                    budget_lock=lock, repair=False, run_dir=run_dir, **kw)
-                async with lock:
-                    status[i] = "done"
-                    _plan_progress(run_dir, f"{label} done. {_status_line()}")
-            except Exception:
-                async with lock:
-                    status[i] = "failed"
-                    _plan_progress(run_dir, f"{label} failed. {_status_line()}")
-                raise
-
-    tasks = [asyncio.create_task(one(i, b), name=f"plan-batch-{i + 1}") for i, b in enumerate(batches)]
-    try:
-        remaining = max(1.0, deadline - time.monotonic())
-        await asyncio.wait_for(asyncio.gather(*tasks), timeout=remaining)
-    except asyncio.TimeoutError as e:
-        for t in tasks:
-            if not t.done():
-                t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        _plan_progress(run_dir, f"Planning cancelled after {PLAN_MAX_SECONDS}s hard deadline")
-        raise LLMOutputError(
-            f"Planning hit the {PLAN_MAX_SECONDS}s time cap (cancelled in-flight LLM calls). "
-            f"Resume with: python -m agent_tester test {task_id} --env {env}") from e
-    except asyncio.CancelledError:
-        for t in tasks:
-            if not t.done():
-                t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        raise
-    plan = _merge_plans([p for p in parts if p is not None], task_id, env)
+def _finish_plan(plan: TestPlan, pack, task_text: str, repair: bool) -> TestPlan:
     if repair:
         from ..casegen import add_repair_case
         plan = add_repair_case(plan, pack)
@@ -274,11 +258,147 @@ async def plan_in_batches(settings, pack, task_text: str, task_id: int, env: str
     return apply_source_case_markers(plan, task_text)
 
 
+async def plan_in_batches(settings, pack, task_text: str, task_id: int, env: str, ids: list[str], repair: bool = True,
+                          run_dir=None, time_cap: bool = True, **kw) -> TestPlan:
+    """Plan case batches sized by token budget; run independent batches concurrently (bounded).
+
+    Empty/`{}`/no-text planner output is a failed attempt: retry (with a nudge + slightly higher
+    temperature) and split the batch in half down to 1 case. A no-progress cap (not total wall
+    clock) cancels hung in-flight batches, keeps cases already planned, and retries only the
+    missing ones. The cap is not applied when time_cap is False (cases-file / drafted plans).
+    A truly hung planner with no completed cases still raises LLMOutputError so the slot is
+    released. Per-batch status lines go to the console and progress.log."""
+    clock = _IdleClock(PLAN_MAX_SECONDS, enabled=time_cap)
+    remaining_ids = list(ids)
+    collected: list[TestPlan] = []
+    last_cap: BaseException | None = None
+    wave_n = 0
+
+    while remaining_ids:
+        wave_n += 1
+        batches = size_batches(task_text, remaining_ids)
+        sem = asyncio.Semaphore(max(1, PLAN_CONCURRENCY))
+        parts: list[TestPlan | None] = [None] * len(batches)
+        status = ["pending"] * len(batches)
+        attempt_budget = [0]
+        lock = asyncio.Lock()
+        fatal: list[BaseException] = []
+
+        def _status_line() -> str:
+            bits = []
+            for i, st in enumerate(status):
+                bits.append(f"{i + 1}/{len(batches)}={st}")
+            return "Planning status: " + ", ".join(bits)
+
+        async def one(i: int, batch: list[str]):
+            label = f"Batch {i + 1}/{len(batches)}"
+            # Take the batch semaphore only for work that can finish or be cancelled promptly;
+            # hung LLM calls must release via asyncio cancellation (see run_agent / wait_for).
+            async with sem:
+                async with lock:
+                    status[i] = "running"
+                    _plan_progress(run_dir, f"{label} starting ({len(batch)} cases). {_status_line()}")
+                try:
+                    parts[i] = await _plan_batch_resilient(
+                        settings, pack, task_text, task_id, env, batch,
+                        batch_label=label, clock=clock, attempt_budget=attempt_budget,
+                        budget_lock=lock, repair=False, run_dir=run_dir, **kw)
+                    async with lock:
+                        status[i] = "done"
+                        _plan_progress(run_dir, f"{label} done. {_status_line()}")
+                except Exception:
+                    async with lock:
+                        status[i] = "failed"
+                        _plan_progress(run_dir, f"{label} failed. {_status_line()}")
+                    raise
+
+        tasks = [asyncio.create_task(one(i, b), name=f"plan-batch-{wave_n}-{i + 1}")
+                 for i, b in enumerate(batches)]
+        pending: set[asyncio.Task] = set(tasks)
+        hit_cap = False
+        try:
+            while pending:
+                timeout = clock.remaining()
+                if clock.enabled and (timeout is None or timeout <= 0):
+                    hit_cap = True
+                    break
+                wait_to = None if timeout is None else max(0.05, timeout)
+                done, pending = await asyncio.wait(
+                    pending, timeout=wait_to, return_when=asyncio.FIRST_COMPLETED)
+                if not done:
+                    hit_cap = True
+                    break
+                for t in done:
+                    if t.cancelled():
+                        continue
+                    exc = t.exception()
+                    if exc is None:
+                        continue
+                    if isinstance(exc, LLMOutputError) and "time cap" in str(exc).lower():
+                        last_cap = exc
+                        continue
+                    fatal.append(exc)
+                    hit_cap = False
+                    pending = pending  # keep so we cancel below
+                    break
+                if fatal:
+                    break
+        except asyncio.CancelledError:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        if pending:
+            for t in pending:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        if fatal:
+            raise fatal[0]
+
+        got: list[TestPlan] = [p for p in parts if p is not None and (p.cases or [])]
+        planned = {c.id for p in got for c in (p.cases or [])}
+        leftover = [i for i in remaining_ids if i not in planned]
+        collected.extend(got)
+        if not leftover:
+            remaining_ids = []
+            break
+        if not got:
+            if hit_cap or last_cap is not None:
+                last_cap = last_cap or LLMOutputError(
+                    f"Planning hit the {PLAN_MAX_SECONDS}s time cap (cancelled in-flight LLM calls). "
+                    f"Resume with: python -m agent_tester test {task_id} --env {env}")
+                _plan_progress(run_dir, f"Planning cancelled after {PLAN_MAX_SECONDS}s with no new cases")
+            remaining_ids = leftover
+            break
+        # Progress this wave: retry only the missing cases with a fresh idle window.
+        _plan_progress(
+            run_dir,
+            f"Planning kept {len(planned)} case(s); retrying {len(leftover)} missing: "
+            + ", ".join(leftover[:12]) + ("…" if len(leftover) > 12 else ""))
+        clock.bump()
+        remaining_ids = leftover
+
+    if not collected:
+        raise last_cap or LLMOutputError(
+            f"Planning hit the {PLAN_MAX_SECONDS}s time cap (cancelled in-flight LLM calls). "
+            f"Resume with: python -m agent_tester test {task_id} --env {env}")
+    if remaining_ids:
+        _plan_progress(
+            run_dir,
+            f"Planning returning a partial plan ({sum(len(p.cases or []) for p in collected)} case(s); "
+            f"missing {', '.join(remaining_ids[:12])}{'…' if len(remaining_ids) > 12 else ''})")
+    plan = _merge_plans(collected, task_id, env)
+    return _finish_plan(plan, pack, task_text, repair)
+
+
 async def plan_task(settings: Settings, pack, task_text: str, task_id: int, env: str, only_case: str | None = None,
                     max_rounds: int = 3, lessons: str = "", trace_path=None, generate: bool = False,
                     answers: dict | None = None, preapprovable: list[str] | None = None,
                     repair: bool = True, batch_ids: list[str] | None = None,
-                    run_dir=None, reuse_plan: bool = True, temperature: float | None = None) -> TestPlan:
+                    run_dir=None, reuse_plan: bool = True, temperature: float | None = None,
+                    time_cap: bool = True) -> TestPlan:
     # Reuse an approved plan when ticket + cases + pack hash match.
     if reuse_plan and batch_ids and run_dir is not None and not only_case and not generate:
         from ..plan_cache import find_reusable_plan, plan_fingerprint, save_plan_cache
@@ -304,7 +424,8 @@ async def plan_task(settings: Settings, pack, task_text: str, task_id: int, env:
         if len(batches) > 1 or (len(batch_ids) > PLAN_BATCH):
             plan = await plan_in_batches(settings, pack, task_text, task_id, env, batch_ids, max_rounds=max_rounds,
                                          lessons=lessons, trace_path=trace_path, answers=answers,
-                                         preapprovable=preapprovable, repair=repair, run_dir=run_dir)
+                                         preapprovable=preapprovable, repair=repair, run_dir=run_dir,
+                                         time_cap=time_cap)
             # plan_in_batches already applies source markers
             if reuse_plan and run_dir is not None:
                 from ..plan_cache import plan_fingerprint, save_plan_cache

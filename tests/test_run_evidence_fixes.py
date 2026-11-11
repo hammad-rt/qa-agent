@@ -507,6 +507,145 @@ class LoginOnlyWhenSignedOut(unittest.TestCase):
         self.assertEqual(out["values"]["logged_in"], "yes")
         self.assertIn("skipped", out["notes"].lower())
 
+    def test_admin_free_text_does_not_skip_login(self):
+        """'Admin' as a page-text substring (e.g. Administrator) is not signed-in evidence."""
+        from agent_tester.helpers.core import login_form as LF
+        import asyncio
+
+        class FakeBrowser:
+            async def snapshot(self):
+                return ('Page Title: Login\n- heading "Administrator" [ref=e1]\n'
+                        '- text: Admin login panel')
+
+        class Ctx:
+            app = "crm"
+            state = SimpleNamespace(values={})
+            def account(self, _a):
+                return {"username": "u", "password_env": "PW", "role_markers": ["Admin"]}
+
+        ctx = Ctx()
+        with mock.patch.object(LF, "analyze", return_value={"has_password": False}):
+            already = asyncio.run(LF._session_already_valid(
+                FakeBrowser(), ctx, "admin", ctx.account("admin")))
+        self.assertIsNone(already)
+
+    def test_admin_marker_does_not_match_administrator_control(self):
+        from agent_tester.helpers.core import login_form as LF
+        import asyncio
+
+        class FakeBrowser:
+            async def snapshot(self):
+                return '- link "Administrator" [ref=e1]\n- link "About" [ref=e2]'
+
+        class Ctx:
+            app = "crm"
+            state = SimpleNamespace(values={})
+            def account(self, _a):
+                return {"username": "u", "password_env": "PW", "role_markers": ["Admin"]}
+
+        ctx = Ctx()
+        with mock.patch.object(LF, "analyze", return_value={"has_password": False}):
+            already = asyncio.run(LF._session_already_valid(
+                FakeBrowser(), ctx, "admin", ctx.account("admin")))
+        self.assertIsNone(already)
+
+    def test_admin_control_skips_login(self):
+        from agent_tester.helpers.core import login_form as LF
+        import asyncio
+
+        class FakeBrowser:
+            def __init__(self):
+                self.navigated = []
+            async def navigate(self, url):
+                self.navigated.append(url)
+            async def snapshot(self):
+                return '- link "Admin" [ref=e1]\n- button "Log out" [ref=e2]'
+
+        class Ctx:
+            app = "crm"
+            state = SimpleNamespace(values={})
+            config = {}
+            def account(self, _a):
+                return {"username": "u", "password_env": "PW", "role_markers": ["Admin"]}
+            def url(self, p=""):
+                return f"https://crm.example/{p}"
+
+        browser = FakeBrowser()
+        with mock.patch.dict("os.environ", {"PW": "longsecret1"}):
+            with mock.patch.object(LF, "analyze", return_value={"has_password": False}):
+                out = asyncio.run(LF.run(browser, Ctx(), "admin"))
+        self.assertEqual(browser.navigated, [])
+        self.assertEqual(out["values"]["logged_in"], "yes")
+        self.assertIn("skipped", out["notes"].lower())
+
+    def test_prior_flag_without_signed_in_control_must_navigate(self):
+        """A prior logged_in flag on a public page with no signed-in control is not enough."""
+        from agent_tester.helpers.core import login_form as LF
+        import asyncio
+
+        class FakeBrowser:
+            def __init__(self):
+                self.navigated = []
+            async def navigate(self, url):
+                self.navigated.append(url)
+            async def snapshot(self):
+                return 'Page Title: Welcome\n- link "About" [ref=e1]\n- text: Public home'
+
+        class Ctx:
+            app = "crm"
+            state = SimpleNamespace(values={
+                "login_form.logged_in": {"value": "yes", "source": "x/crm"}})
+            def account(self, _a):
+                return {"username": "u", "password_env": "P", "role_markers": ["Admin"]}
+            config = {"path": "index.php?module=Users&action=Login"}
+            def url(self, p=""):
+                return f"https://crm.example/{p or ''}"
+
+        browser = FakeBrowser()
+        ctx = Ctx()
+        with mock.patch.object(LF, "analyze", return_value={"has_password": False}):
+            already = asyncio.run(LF._session_already_valid(
+                browser, ctx, "admin", ctx.account("a")))
+        self.assertIsNone(already)
+
+        async def fake_analyze(_b):
+            if browser.navigated:
+                return {"has_password": True,
+                        "user": {"idx": 0, "name": "user", "label": "Username"},
+                        "password": {"idx": 1, "name": "pass", "label": "Password"},
+                        "submit": {"id": "go", "label": "Log In"}, "error": ""}
+            return {"has_password": False}
+
+        with mock.patch.dict("os.environ", {"P": "longsecret1", "LOGIN_WAIT": "0"}):
+            with mock.patch.object(LF, "analyze", side_effect=fake_analyze):
+                with mock.patch.object(LF, "parse_snapshot", return_value=[]):
+                    try:
+                        asyncio.run(LF._attempt(browser, ctx, "admin", path="login"))
+                    except Exception:
+                        pass
+        self.assertTrue(browser.navigated, "prior flag alone must still navigate to login")
+        self.assertTrue(any("login" in u for u in browser.navigated))
+
+    def test_login_shot_uses_role_key_not_email(self):
+        from types import SimpleNamespace
+        from agent_tester.helpers.core import login_form as LF
+
+        class Pack:
+            def accounts(self, app):
+                return {"customer": {"username": "user@example.com"},
+                        "admin": {"username": "admin"}}
+
+        ctx = SimpleNamespace(app="portal", pack=Pack(), state=SimpleNamespace(data={}))
+        self.assertEqual(LF._account_role_key(ctx, "customer"), "customer")
+        self.assertEqual(LF._account_role_key(ctx, "user@example.com"), "customer")
+        self.assertEqual(LF._account_role_key(ctx, "admin"), "admin")
+        self.assertNotIn("@", LF._account_role_key(ctx, "user@example.com"))
+        # Unmapped identity still must not appear in a shot name.
+        self.assertEqual(LF._account_role_key(ctx, "other@example.com"), "account")
+        self.assertEqual(
+            f"login-{ctx.app}-{LF._account_role_key(ctx, 'user@example.com')}.png",
+            "login-portal-customer.png")
+
 
 class IdlePausesForHuman(unittest.TestCase):
     """Item 8: human wait pauses LLM idle clock."""

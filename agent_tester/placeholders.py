@@ -9,7 +9,10 @@ import re
 from typing import Any
 
 
-DEFAULT_TOKEN_PATTERN = r"(?i)\bORDER-[A-Z][A-Z0-9_-]*\b"
+DEFAULT_TOKEN_PATTERN = r"\bORDER-[A-Z][A-Z0-9_-]*\b"
+# Explicit tokens only: already-uppercase in the source, or a braced {TOKEN}.
+_BRACED_TOKEN = re.compile(r"\{([A-Za-z][A-Za-z0-9_-]*)\}")
+_UPPER_TOKEN = re.compile(r"\b([A-Z][A-Z0-9_-]*)\b")
 
 
 def token_pattern(pack_cfg: dict | None) -> re.Pattern:
@@ -35,12 +38,62 @@ def item_by_token(pack_cfg: dict | None, token: str) -> dict | None:
     return None
 
 
-def scan_tokens(text: str, pattern: re.Pattern | None = None) -> list[str]:
-    """Distinct placeholder tokens found in text, preserving first-seen order."""
-    pat = pattern or re.compile(DEFAULT_TOKEN_PATTERN)
+def _defined_tokens(pack_cfg: dict | None) -> set[str] | None:
+    """Uppercase names from pack.placeholders.items, or None when the pack lists no items.
+
+    None means "filter by pattern only" (no item list). An explicit empty items list
+    means no tokens are defined, so common words and unknown ORDER-* names do not count.
+    """
+    if pack_cfg is None:
+        return None
+    block = pack_cfg.get("placeholders")
+    if not isinstance(block, dict) or "items" not in block:
+        return None
+    return {item_token(it).upper() for it in (block.get("items") or []) if item_token(it)}
+
+
+def _accept_token(tok: str, pack_cfg: dict | None, pattern: re.Pattern | None = None) -> bool:
+    tok = (tok or "").upper()
+    if not tok:
+        return False
+    known = _defined_tokens(pack_cfg)
+    if known is not None:
+        return tok in known
+    # No item list: keep uppercase-exact / braced names that match the token pattern.
+    pat = pattern or (token_pattern(pack_cfg) if pack_cfg is not None else re.compile(DEFAULT_TOKEN_PATTERN))
+    return pat.search(tok) is not None or pat.search("{" + tok + "}") is not None
+
+
+def scan_tokens(text: str, pattern: re.Pattern | None = None, pack_cfg: dict | None = None) -> list[str]:
+    """Distinct explicit placeholder tokens found in text, preserving first-seen order.
+
+    A match counts only when it is uppercase-exact in the source (CUSTOMER, ORDER-MULTI)
+    or a braced form ({CUSTOMER}). When the pack lists placeholder items, ORDER-* and
+    bare names count only if they are defined there — common words never trigger prep.
+    """
+    text = text or ""
+    pat = pattern or (token_pattern(pack_cfg) if pack_cfg is not None else re.compile(DEFAULT_TOKEN_PATTERN))
+    hits: list[tuple[int, str]] = []
+
+    def take(pos: int, raw: str) -> None:
+        tok = (raw or "").upper()
+        if tok and _accept_token(tok, pack_cfg, pat):
+            hits.append((pos, tok))
+
+    for m in _BRACED_TOKEN.finditer(text):
+        take(m.start(), m.group(1))
+    for m in _UPPER_TOKEN.finditer(text):
+        take(m.start(), m.group(1))
+    for m in pat.finditer(text):
+        raw = m.group(0)
+        if raw.startswith("{") and raw.endswith("}") and len(raw) > 2:
+            take(m.start(), raw[1:-1])
+        elif raw == raw.upper():
+            take(m.start(), raw)
+
+    hits.sort(key=lambda h: h[0])
     out, seen = [], set()
-    for m in pat.finditer(text or ""):
-        tok = m.group(0).upper()
+    for _, tok in hits:
         if tok not in seen:
             seen.add(tok)
             out.append(tok)
@@ -62,8 +115,8 @@ def _case_blob(case) -> str:
     return " ".join(p for p in parts if p)
 
 
-def tokens_in_case(case, pattern: re.Pattern | None = None) -> list[str]:
-    return scan_tokens(_case_blob(case), pattern)
+def tokens_in_case(case, pattern: re.Pattern | None = None, pack_cfg: dict | None = None) -> list[str]:
+    return scan_tokens(_case_blob(case), pattern, pack_cfg=pack_cfg)
 
 
 def tokens_in_plan(plan, pack_cfg: dict | None = None) -> list[str]:
@@ -71,7 +124,7 @@ def tokens_in_plan(plan, pack_cfg: dict | None = None) -> list[str]:
     pat = token_pattern(pack_cfg)
     out, seen = [], set()
     for c in getattr(plan, "cases", None) or []:
-        for t in tokens_in_case(c, pat):
+        for t in tokens_in_case(c, pat, pack_cfg=pack_cfg):
             if t not in seen:
                 seen.add(t)
                 out.append(t)
@@ -159,7 +212,7 @@ def build_data_plan(plan, pack_cfg: dict | None, *, corrections: dict | None = N
         if corr.get("find_app"):
             rule["find_app"] = corr["find_app"]
         parts = create_parts(rule)
-        cases = [c.id for c in plan.cases if tok in {t.upper() for t in tokens_in_case(c, pat)}]
+        cases = [c.id for c in plan.cases if tok in {t.upper() for t in tokens_in_case(c, pat, pack_cfg=pack_cfg)}]
         rows.append({
             "token": item_token(item).upper() or tok,
             "status": "pending",
@@ -235,7 +288,7 @@ def case_unresolved_tokens(case, state, pack_cfg: dict | None) -> list[str]:
     """Tokens named in the case that have no resolved value yet (and are listed in the pack)."""
     got = resolved_map(state)
     out = []
-    for tok in tokens_in_case(case, token_pattern(pack_cfg)):
+    for tok in tokens_in_case(case, token_pattern(pack_cfg), pack_cfg=pack_cfg):
         item = item_by_token(pack_cfg, tok)
         if item is None:
             continue  # unknown token: don't block here (prompt/BLOCKED handles)

@@ -72,7 +72,7 @@ def mutating_tokens_for_cases(plan, case_ids: list[str], pack_cfg: dict | None) 
         c = by_id.get(cid)
         if not c:
             continue
-        for tok in tokens_in_case(c, pat):
+        for tok in tokens_in_case(c, pat, pack_cfg=pack_cfg):
             item = item_by_token(pack_cfg, tok)
             if item is None:
                 continue

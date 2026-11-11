@@ -63,19 +63,9 @@ def case_is_parallel_safe(case, pack_cfg: dict | None = None) -> bool:
 
 
 def shared_placeholders(case, pack_cfg: dict | None = None) -> set[str]:
-    """Order/session placeholder tokens this case touches (ORDER-*, CUSTOMER, Wallet, …)."""
-    from .field_text import field_text
-    pat = ((pack_cfg or {}).get("placeholders") or {}).get("token_pattern")
-    rx = re.compile(pat) if pat else re.compile(
-        r"(?i)\b(?:ORDER-[A-Z][A-Z0-9_-]*|CUSTOMER|Wallet|test_order|order_\w+)\b")
-    blob = " ".join(p for p in [
-        field_text(getattr(case, "title", None), sep=" "),
-        field_text(getattr(case, "preconditions", None), sep=" "),
-        field_text(getattr(case, "expected", None), sep=" "),
-        *(field_text(s, sep=" ") for s in (getattr(case, "steps", None) or [])),
-    ] if p)
-    return {m.group(0).upper() if m.group(0).upper().startswith("ORDER") else m.group(0)
-            for m in rx.finditer(blob)}
+    """Order/session placeholder tokens this case touches (ORDER-*, CUSTOMER, WALLET, …)."""
+    from .placeholders import token_pattern, tokens_in_case
+    return set(tokens_in_case(case, token_pattern(pack_cfg), pack_cfg=pack_cfg))
 
 
 def partition_parallel_batches(cases: list, pack_cfg: dict | None = None) -> list[list]:

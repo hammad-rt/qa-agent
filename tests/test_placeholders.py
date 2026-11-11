@@ -19,13 +19,24 @@ class TokenScan(unittest.TestCase):
         self.assertEqual(P.scan_tokens("Open ORDER-MULTI then ORDER-EARN and ORDER-MULTI again"),
                          ["ORDER-MULTI", "ORDER-EARN"])
 
-    def test_pack_pattern_includes_wallet(self):
+    def test_prose_does_not_count_as_token(self):
         cfg = yaml.safe_load(open("packs/savostore/pack.yaml"))
-        toks = P.tokens_in_case(
-            PlannedCase(id="B9", title="x", steps=[Step(text="Use ORDER-MULTI and Wallet", app="portal")]),
-            P.token_pattern(cfg))
-        self.assertIn("ORDER-MULTI", toks)
-        self.assertTrue(any(t.upper() == "WALLET" for t in toks))
+        pat = P.token_pattern(cfg)
+        case = PlannedCase(
+            id="B9", title="Customer can view wallet balance",
+            steps=[Step(text="Log in as the customer and open the wallet page", app="portal")])
+        self.assertEqual(P.tokens_in_case(case, pat, pack_cfg=cfg), [])
+        rows = P.build_data_plan(TestPlan(task_id=1, cases=[case]), cfg)
+        self.assertEqual(rows, [])
+
+    def test_explicit_caps_and_braced_still_resolve(self):
+        cfg = yaml.safe_load(open("packs/savostore/pack.yaml"))
+        pat = P.token_pattern(cfg)
+        case = PlannedCase(
+            id="B9", title="x",
+            steps=[Step(text="Use ORDER-MULTI and CUSTOMER and {WALLET}", app="portal")])
+        self.assertEqual(P.tokens_in_case(case, pat, pack_cfg=cfg),
+                         ["ORDER-MULTI", "CUSTOMER", "WALLET"])
 
 
 class DataPlan(unittest.TestCase):
@@ -45,12 +56,13 @@ class DataPlan(unittest.TestCase):
         self.assertEqual([p["app"] for p in earn["create"]], ["portal", "crm"])
         self.assertIn("portal", P.format_data_plan(rows).lower())
 
-    def test_unknown_token_marked_missing(self):
+    def test_unknown_token_not_planned(self):
+        """ORDER-* only counts when it is a defined pack item; unknown names do not prep or block."""
         cfg = {"placeholders": {"items": []}}
         plan = TestPlan(task_id=1, cases=[
             PlannedCase(id="T", title="x", steps=[Step(text="ORDER-ZZZ", app="portal")])])
-        rows = P.build_data_plan(plan, cfg)
-        self.assertTrue(rows[0]["missing"])
+        self.assertEqual(P.build_data_plan(plan, cfg), [])
+        self.assertEqual(P.scan_tokens("ORDER-ZZZ", pack_cfg=cfg), [])
 
 
 class ResolveInject(unittest.TestCase):

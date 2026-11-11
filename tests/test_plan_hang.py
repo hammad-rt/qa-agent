@@ -22,6 +22,15 @@ class FakeEv:
         return self._final
 
 
+def _plan_for(tid, env, only_case):
+    ids = [x.strip() for x in (only_case or "").split(",") if x.strip()]
+    return TestPlan.model_validate({
+        "task_id": tid, "env": env,
+        "cases": [{"id": i, "title": "x", "type": "ui", "expected": "ok",
+                   "steps": [{"text": "look"}]} for i in ids],
+    })
+
+
 class PlanHangCancel(unittest.TestCase):
     def tearDown(self):
         L._sem = None
@@ -89,6 +98,70 @@ class PlanHangCancel(unittest.TestCase):
         self.assertIn("Resume with:", str(cm.exception))
         self.assertLess(elapsed, 4.0)
         self.assertTrue(started)
+
+    def test_idle_cap_keeps_completed_batches(self):
+        """A later hung batch must not discard cases already planned."""
+
+        async def one_then_hang(settings, pack, text, tid, env, only_case=None, repair=True, **kw):
+            if str(only_case or "").strip() == "A1":
+                return _plan_for(tid, env, only_case)
+            await asyncio.Event().wait()
+
+        text = "### A1\nbody\n### A2\nbody\n"
+        with mock.patch.object(P, "plan_task", one_then_hang), \
+                mock.patch.object(P, "PLAN_BATCH", 1), \
+                mock.patch.object(P, "PLAN_BATCH_TOKENS", 10_000), \
+                mock.patch.object(P, "PLAN_CONCURRENCY", 1), \
+                mock.patch.object(P, "PLAN_MAX_SECONDS", 1), \
+                mock.patch.object(P, "PLAN_EMPTY_RETRIES", 0), \
+                mock.patch.object(P, "PLAN_MAX_ATTEMPTS", 4):
+            t0 = time.monotonic()
+            plan = asyncio.run(P.plan_in_batches(
+                None, None, text, 7, "staging", ["A1", "A2"], repair=False))
+            elapsed = time.monotonic() - t0
+        self.assertEqual([c.id for c in plan.cases], ["A1"])
+        self.assertLess(elapsed, 5.0)
+
+    def test_time_cap_not_applied_when_disabled(self):
+        """Cases-file / drafted plans (time_cap=False) are not cancelled by PLAN_MAX_SECONDS."""
+
+        async def slow(settings, pack, text, tid, env, only_case=None, repair=True, **kw):
+            await asyncio.sleep(0.25)
+            return _plan_for(tid, env, only_case)
+
+        text = "### A1\nbody\n### A2\nbody\n"
+        with mock.patch.object(P, "plan_task", slow), \
+                mock.patch.object(P, "PLAN_BATCH", 1), \
+                mock.patch.object(P, "PLAN_BATCH_TOKENS", 10_000), \
+                mock.patch.object(P, "PLAN_CONCURRENCY", 1), \
+                mock.patch.object(P, "PLAN_MAX_SECONDS", 0.15), \
+                mock.patch.object(P, "PLAN_EMPTY_RETRIES", 0), \
+                mock.patch.object(P, "PLAN_MAX_ATTEMPTS", 4):
+            plan = asyncio.run(P.plan_in_batches(
+                None, None, text, 7, "staging", ["A1", "A2"], repair=False, time_cap=False))
+        self.assertEqual([c.id for c in plan.cases], ["A1", "A2"])
+
+    def test_idle_cap_is_no_progress_not_wall_clock(self):
+        """Batches that keep completing may outlast PLAN_MAX_SECONDS in total wall clock."""
+
+        async def slow(settings, pack, text, tid, env, only_case=None, repair=True, **kw):
+            await asyncio.sleep(0.25)
+            return _plan_for(tid, env, only_case)
+
+        text = "### A1\nbody\n### A2\nbody\n"
+        with mock.patch.object(P, "plan_task", slow), \
+                mock.patch.object(P, "PLAN_BATCH", 1), \
+                mock.patch.object(P, "PLAN_BATCH_TOKENS", 10_000), \
+                mock.patch.object(P, "PLAN_CONCURRENCY", 1), \
+                mock.patch.object(P, "PLAN_MAX_SECONDS", 0.4), \
+                mock.patch.object(P, "PLAN_EMPTY_RETRIES", 0), \
+                mock.patch.object(P, "PLAN_MAX_ATTEMPTS", 4):
+            t0 = time.monotonic()
+            plan = asyncio.run(P.plan_in_batches(
+                None, None, text, 7, "staging", ["A1", "A2"], repair=False))
+            elapsed = time.monotonic() - t0
+        self.assertEqual([c.id for c in plan.cases], ["A1", "A2"])
+        self.assertGreaterEqual(elapsed, 0.4)
 
     def test_size_batches_caps_near_six(self):
         ids = [f"C{i}" for i in range(1, 20)]

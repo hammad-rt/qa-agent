@@ -8,6 +8,8 @@ import os
 import re
 import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from ..config import Settings, job_model
 
@@ -19,6 +21,24 @@ LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", os.environ.get("LLM_CALL_TIMEO
 LLM_STREAM_TIMEOUT = float(os.environ.get("LLM_STREAM_TIMEOUT", "60"))
 # No usable text from ADK events for this long → fail the attempt (empty keepalive events don't count).
 LLM_IDLE_TIMEOUT = float(os.environ.get("LLM_IDLE_TIMEOUT", "90"))
+
+# When the tester is blocked on a person (stuck ask / ask_user / approval), pause the idle clock
+# so a long human answer does not fail the LLM turn with "no text for 90s".
+_human_wait: ContextVar[bool] = ContextVar("llm_human_wait", default=False)
+
+
+@contextmanager
+def pause_idle_for_human():
+    """Context manager: wrap stuck-ask / ask_user waits so LLM idle timeout does not fire."""
+    token = _human_wait.set(True)
+    try:
+        yield
+    finally:
+        _human_wait.reset(token)
+
+
+def human_wait_active() -> bool:
+    return bool(_human_wait.get())
 
 
 class LLMOutputError(RuntimeError):
@@ -46,21 +66,39 @@ def model(settings: Settings, json_mode: bool = False, max_tokens: int | None = 
 
 
 async def _iter_events_with_idle(aiter, *, idle_sec: float, call_deadline: float | None = None):
-    """Yield ADK events; fail when no event arrives within idle_sec, or past call_deadline."""
+    """Yield ADK events; fail when no event arrives within idle_sec, or past call_deadline.
+
+    While ``pause_idle_for_human()`` is active (stuck ask / ask_user), keep waiting without
+    counting that time as LLM idle.
+    """
     while True:
-        left = idle_sec
-        if call_deadline is not None:
-            left = min(left, max(0.05, call_deadline - time.monotonic()))
-        try:
-            ev = await asyncio.wait_for(aiter.__anext__(), timeout=left)
-        except StopAsyncIteration:
-            return
-        except asyncio.TimeoutError as e:
-            if call_deadline is not None and time.monotonic() >= call_deadline:
-                raise LLMOutputError(
-                    f"LLM call hit the {LLM_TIMEOUT:.0f}s per-call timeout") from e
-            raise LLMOutputError(
-                f"no text for {LLM_IDLE_TIMEOUT:.0f}s (stream idle / empty ADK events)") from e
+        # Poll in short slices so a human-wait that starts mid-timeout is noticed.
+        slice_sec = min(5.0, idle_sec)
+        waited = 0.0
+        ev = None
+        while True:
+            if human_wait_active():
+                waited = 0.0
+                slice_sec = min(5.0, idle_sec)
+            left = slice_sec
+            if call_deadline is not None and not human_wait_active():
+                left = min(left, max(0.05, call_deadline - time.monotonic()))
+            try:
+                ev = await asyncio.wait_for(aiter.__anext__(), timeout=left)
+                break
+            except StopAsyncIteration:
+                return
+            except asyncio.TimeoutError as e:
+                if human_wait_active():
+                    continue
+                waited += left
+                if call_deadline is not None and time.monotonic() >= call_deadline:
+                    raise LLMOutputError(
+                        f"LLM call hit the {LLM_TIMEOUT:.0f}s per-call timeout") from e
+                if waited >= idle_sec:
+                    raise LLMOutputError(
+                        f"no text for {LLM_IDLE_TIMEOUT:.0f}s (stream idle / empty ADK events)") from e
+                continue
         yield ev
 
 
@@ -110,10 +148,13 @@ async def run_agent(agent, prompt: str, settings: Settings, state: dict | None =
                 last_text_at = time.monotonic()
                 if ev.is_final_response():
                     turn_final = text
-            elif time.monotonic() - last_text_at >= idle:
+            elif (not human_wait_active()) and time.monotonic() - last_text_at >= idle:
                 # Empty keepalive ADK events must not reset the idle clock forever.
+                # Human waits (stuck ask) pause this clock via pause_idle_for_human().
                 raise LLMOutputError(
                     f"no text for {LLM_IDLE_TIMEOUT:.0f}s (empty ADK events)")
+            elif human_wait_active():
+                last_text_at = time.monotonic()
         if not saw_text and not (turn_final or "").strip():
             # Completed with only empty keepalive-style events.
             raise LLMOutputError("no text for the whole LLM call (empty ADK events)")

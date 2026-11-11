@@ -115,6 +115,8 @@ class ConfirmedRoutesSection(unittest.TestCase):
                 self.assertEqual(row["status"], "verified")
                 self.assertEqual(row["source"], "pack")
                 self.assertEqual(row["env_fingerprint"], "preprod")
+                self.assertTrue(row.get("last_success_at"),
+                                "pack import must stamp last_success_at for the 14-day reuse window")
             login = store.get("project:demo", "general", "crm", "login", "preprod")
             self.assertIsNotNone(login)
             self.assertIn("Login", login["route_text"])

@@ -102,7 +102,18 @@ STUCK_MAX_ATTEMPTS = max(1, int(os.environ.get("STUCK_MAX_ATTEMPTS", "3")))
 LOOP_WARN = max(1, STUCK_MAX_ATTEMPTS - 1)   # e.g. 2 when max is 3
 LOOP_STOP = STUCK_MAX_ATTEMPTS               # e.g. 3: ladder, not a longer silent retry
 IDLE_READS = 8                       # page reads in a row with nothing done in between: stalled, not working
+NAV_THRASH_MAX = 3                   # consecutive navigates with no intervening snapshot/click → stall
 EXPLORE_ACTIONS = 15                 # extra actions for one exploration of a screen when a step is stuck
+NO_CHANGE_CLICK_MSG = (
+    "the last click did not change the page; read the page: it may have opened a modal, a menu, "
+    "a new tab, or need scrolling. Call browser_snapshot (and browser_tabs if a new tab may have "
+    "opened), then act on what you see — do not click the same control again blindly."
+)
+FIND_MISS_READ_MSG = (
+    "browser_find found nothing. Do not navigate away yet. Take a browser_snapshot, search the "
+    "field under its labels, panels and tabs, then try the lookup ladder (filters, advanced search, "
+    "related subpanels). Only navigate after you have read the page."
+)
 STUCK_ASK_TIMEOUT_SEC = int(os.environ.get("STUCK_ASK_TIMEOUT_SEC", "600"))
 STUCK_ASK_MAX_PER_CASE = 2           # code-built stuck asks; do not count toward ask_user's 3/case
 EXPLORE_TEXT = (
@@ -518,12 +529,15 @@ class TesterSession:
 
             Rejects placeholder words (none/null/not found), literal tokens (ORDER-MULTI), and redaction
             markers. Re-asks once; never stores a bad value in state/memory/routes.
+            Record ids stay strings forever (never float-coerced). URL-sourced ids must parse ``record=``.
             """
-            from ..tools.value_kind import kind_map_from_pack, placeholder_tokens, validate_value
+            from ..tools.value_kind import infer_kind, kind_map_from_pack, placeholder_tokens, validate_value
             pack_cfg = (s.state.data.get("pack_cfg") if s.state else None) or {}
             kinds = kind_map_from_pack(pack_cfg)
             tokens = placeholder_tokens(pack_cfg)
-            check = validate_value(name, raw_text, pack_kinds=kinds, tokens=tokens)
+            plat = (s.state.data.get("detected_platform") if s.state else None) or ""
+            check = validate_value(name, raw_text, pack_kinds=kinds, tokens=tokens,
+                                   platform=plat, source=source)
             if not check["ok"]:
                 retried = getattr(s, "_value_retries", None)
                 if retried is None:
@@ -535,15 +549,20 @@ class TesterSession:
                     retried[name] = True
                     return {"error": check["reason"], "retry": True,
                             "hint": (f"Read the real {check['kind']} from the page and call record_value again. "
-                                     f"Do not store none/null/not found/ORDER-* or [KEY] markers.")}
+                                     f"Do not store none/null/not found/ORDER-* or [KEY]/[phone] markers.")}
                 return {"error": check["reason"], "rejected": True, "not_found": bool(check.get("not_found"))}
             text = str(check["value"])
-            try:
-                # IDs like A1142 / INV-0042 stay text: only plain amounts become numbers
-                v = text if re.search(r"[A-Za-z]\d|\d[A-Za-z]|^[A-Za-z]{1,3}-?\d+$", text) \
-                    and not re.match(r"^[A-Z]{3}\s?[\d$]", text) else V.parse_money(text)
-            except ValueError:
+            kind = check.get("kind") or infer_kind(name, kinds.get(name))
+            # Record / order / email / status ids stay text — never float (6707… → 6.7e13).
+            if kind in ("record_id", "order_number", "email", "status", "yes_no", "free_text"):
                 v = text
+            else:
+                try:
+                    # IDs like A1142 / INV-0042 stay text: only plain amounts become numbers
+                    v = text if re.search(r"[A-Za-z]\d|\d[A-Za-z]|^[A-Za-z]{1,3}-?\d+$", text) \
+                        and not re.match(r"^[A-Z]{3}\s?[\d$]", text) else V.parse_money(text)
+                except ValueError:
+                    v = text
             V.record(s.state.values, name, v, source=f"{s.case_id}/{s.app}: {source}")
             s.result.values[name] = v
             s.state.save()
@@ -719,13 +738,15 @@ class TesterSession:
             if re.search(r"password|passcode|otp|one.time|2fa|secret|token", question, re.I):
                 return {"error": "never ask for passwords or codes; use run_helper login_form or needs_manual_login"}
             from ..redact import scrub_user_answer
+            from .llm import pause_idle_for_human
             q = redact(question)
             if is_auto() and os.environ.get("QA_WEB") != "1" and not (sys.stdin and sys.stdin.isatty()):
                 ans = ""
             else:
                 try:
-                    ans = ask_line(f"\n[{s.case_id}] The tester asks: {q}" + (f"\n  (why: {redact(why)})" if why else "")
-                                   + "\n  Your answer (Enter = let it decide): ").strip()
+                    with pause_idle_for_human():
+                        ans = ask_line(f"\n[{s.case_id}] The tester asks: {q}" + (f"\n  (why: {redact(why)})" if why else "")
+                                       + "\n  Your answer (Enter = let it decide): ").strip()
                 except EOFError:
                     ans = ""
             safe_ans = scrub_user_answer(ans)
@@ -946,6 +967,8 @@ class TesterSession:
     # ---- callbacks: the code side of every tool call --------------------------------
     def before_tool(self, tool, args, tool_context):
         name = tool.name
+        # Keep for stuck-ask evidence capture (sync path needs the live MCP context).
+        self._tool_context = tool_context
         # Unchanged snapshot short-circuit: do not count as a loop/idle-read step.
         if name == "browser_snapshot" and getattr(self, "_page_hash", None) and getattr(self, "_page_fresh", False):
             self.state.log_action(case_id=self.case_id, app=self.app, tool="browser_snapshot",
@@ -980,6 +1003,11 @@ class TesterSession:
                 lab0 = _label_of(str(args.get("target") or args.get("ref") or "").removeprefix("ref=").strip(), snap0)
                 if lab0:
                     args["element"] = lab0
+            # After stuck-chat "go": never re-run the identical action that caused the ask.
+            # Call via the class so MagicMock test doubles do not invent a deny result.
+            forbidden = TesterSession._deny_forbidden_after_stuck(self, name, args)
+            if forbidden is not None:
+                return forbidden
             limit = self._budget_check(name, args)
             counted = True
             if limit:
@@ -988,6 +1016,16 @@ class TesterSession:
             # After a prior click/fill that changed the page, refuse the next action until a fresh snapshot.
             # Use `is True` so MagicMock attributes in unit tests do not look truthy by accident.
             if getattr(self, "_need_fresh_snap", False) is True and name != "browser_navigate":
+                pending = getattr(self, "_no_change_click", None)
+                if (name == "browser_click" and isinstance(pending, dict)
+                        and str(args.get("element") or "").strip().lower()
+                        == str(pending.get("element") or "").strip().lower()
+                        and str(args.get("target") or args.get("ref") or "").removeprefix("ref=").strip()
+                        == str(pending.get("target") or "").removeprefix("ref=").strip()):
+                    self.state.log_action(case_id=self.case_id, app=self.app, tool=name,
+                                          args=_safe_args(args, tool=name), plan_step=self.current_step,
+                                          outcome="no_change_click_repeat")
+                    return {"error": NO_CHANGE_CLICK_MSG}
                 self.state.log_action(case_id=self.case_id, app=self.app, tool=name, args=_safe_args(args),
                                       plan_step=self.current_step, outcome="need_fresh_snap")
                 return {"error": "The page changed after your last click/fill. Take a fresh browser_snapshot "
@@ -1051,6 +1089,65 @@ class TesterSession:
             if self.misses == 3:
                 self.misses = 0
                 return {"error": RELOAD_HINT}
+        # After a find miss: refuse navigate until a snapshot (or other read) happens.
+        if name == "browser_navigate" and getattr(self, "_find_miss_need_read", False) is True:
+            self.state.log_action(case_id=self.case_id, app=self.app, tool=name, args=_safe_args(args, tool=name),
+                                  plan_step=self.current_step, outcome="find_miss_need_read")
+            return {"error": FIND_MISS_READ_MSG}
+        # Navigate thrash (item 10/14): same URL or A↔B cycle with no intervening read/click.
+        # Distinct one-way navigates still use the normal action budget (test_limit).
+        if name == "browser_navigate":
+            self._nav_without_read = int(getattr(self, "_nav_without_read", 0) or 0) + 1
+            url_key = _url_nav_key(str(args.get("url") or "")) or str(args.get("url") or "")
+            recent_urls = (getattr(self, "_nav_recent_urls", None) or []) + [url_key]
+            self._nav_recent_urls = recent_urls[-12:]
+            tail = self._nav_recent_urls[-NAV_THRASH_MAX:]
+            same_url = len(tail) >= NAV_THRASH_MAX and len(set(tail)) == 1
+            cycling = _is_cycle([f"nav:{u}" for u in self._nav_recent_urls])
+            # Once already told to stop, fall through to _budget_check so ignored loops hard-stop.
+            if (same_url or cycling) and not self.result.limit_hit:
+                why_nav = ("navigated in a loop between the same pages without reading"
+                           if cycling else
+                           f"navigated to the same URL {NAV_THRASH_MAX} times without reading the page")
+                if getattr(self, "_explored", False):
+                    asked = self._maybe_stuck_ask(why=why_nav, name=name,
+                                                  repeats=max(NAV_THRASH_MAX, self._nav_without_read))
+                    if asked is not None:
+                        return asked
+                    self.result.limit_hit = True
+                    self.result.loop = True
+                    self.state.log_action(case_id=self.case_id, app=self.app, tool="loop_detected",
+                                          args={"call": name, "repeats": self._nav_without_read},
+                                          plan_step=self.current_step, outcome="stop")
+                    return {"error": "You keep navigating without reading the page. Stop now: call "
+                                     "finish(notes, stuck=True) saying which step you reached."}
+                asked = self._maybe_stuck_ask(why=why_nav, name=name,
+                                              repeats=max(NAV_THRASH_MAX, self._nav_without_read))
+                if asked is not None:
+                    return asked
+                return self._start_exploring(
+                    name, "navigate thrash: same URL or list↔detail loop with no snapshot/click between")
+        elif name in ("browser_snapshot", "browser_take_screenshot", "browser_click",
+                      "browser_type", "browser_fill_form", "browser_select_option", "record_value"):
+            self._nav_without_read = 0
+            self._nav_recent_urls = []
+            if name in ("browser_snapshot", "browser_take_screenshot"):
+                self._find_miss_need_read = False
+        # Second identical click after a no-change click → refuse with modal/tab guidance.
+        if name == "browser_click":
+            pending = getattr(self, "_no_change_click", None)
+            if isinstance(pending, dict):
+                same = (
+                    str(args.get("element") or "").strip().lower()
+                    == str(pending.get("element") or "").strip().lower()
+                    and str(args.get("target") or args.get("ref") or "").removeprefix("ref=").strip()
+                    == str(pending.get("target") or "").removeprefix("ref=").strip()
+                )
+                if same and getattr(self, "_need_fresh_snap", False) is True:
+                    self.state.log_action(case_id=self.case_id, app=self.app, tool=name,
+                                          args=_safe_args(args, tool=name), plan_step=self.current_step,
+                                          outcome="no_change_click_repeat")
+                    return {"error": NO_CHANGE_CLICK_MSG}
         if name == "record_value" and not (last_act and last_act > last_snap):
             self.since_progress, self._sigs = 0, {}          # a value read back is progress too
         if name == "mark_step" and args.get("n") not in self.result.steps_done:
@@ -1114,7 +1211,9 @@ class TesterSession:
                             f"step needs test data that is missing, finish with notes 'BLOCKED: <what is missing>'."))
                     if self.brief.get("discovery"):
                         from ..discovery_guard import discovery_blocks_click
-                        why = discovery_blocks_click(None, url)
+                        pack_cfg = (getattr(self.pack, "config", None) if getattr(self, "pack", None) else None) \
+                            or ((self.state.data or {}).get("pack_cfg") if self.state else None) or {}
+                        why = discovery_blocks_click(None, url, pack_cfg=pack_cfg)
                         if why:
                             return self._deny(name, args, why)
                     self.policy.check_url(url)
@@ -1123,7 +1222,9 @@ class TesterSession:
                 # Discovery: never click admin/system action buttons (QRR, Execute, cache clear, …).
                 if self.brief.get("discovery") and name == "browser_click":
                     from ..discovery_guard import discovery_blocks_click
-                    why = discovery_blocks_click(label)
+                    pack_cfg = (getattr(self.pack, "config", None) if getattr(self, "pack", None) else None) \
+                        or ((self.state.data or {}).get("pack_cfg") if self.state else None) or {}
+                    why = discovery_blocks_click(label, pack_cfg=pack_cfg)
                     if why:
                         return self._deny(name, args, why)
                 # Case: admin action clicks only when a step asks; refused on preprod/prod unless allowlisted.
@@ -1368,7 +1469,41 @@ class TesterSession:
             return bool(sys.stdin and sys.stdin.isatty())
         return bool(sys.stdin and sys.stdin.isatty())
 
-    def _stuck_summary(self, why: str, thread: list | None = None) -> dict:
+    def _capture_stuck_ask_shot(self) -> str | None:
+        """Fresh PNG under run shots/ at ask time (never reuse login helper shots)."""
+        tc = getattr(self, "_tool_context", None)
+        if self.toolset is None or tc is None:
+            return None
+        import asyncio
+        import concurrent.futures
+
+        async def _go():
+            # Refresh page text so title/path are current before the card renders.
+            try:
+                from ..helpers import adk_caller
+                call = adk_caller(self.toolset, tc)
+                snap = str(await call("browser_snapshot", {}) or "")
+                if snap:
+                    self._remember_page(snap)
+            except Exception:  # noqa: BLE001
+                pass
+            return await self.auto_shot("stuck-ask", tc)
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                return asyncio.run(_go())
+            except Exception:  # noqa: BLE001
+                return None
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, _go()).result(timeout=45)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _stuck_summary(self, why: str, thread: list | None = None,
+                       *, fresh_shot: str | None = None, ask_at: float | None = None) -> dict:
         from ..stuck_summary import build_stuck_summary
         brief = dict(self.brief or {})
         if getattr(self, "result", None) is not None:
@@ -1380,7 +1515,64 @@ class TesterSession:
             snapshot=self.last_snapshot, run_dir=self.state.dir,
             screenshots=list(getattr(self.result, "screenshots", None) or []),
             timeout_sec=STUCK_ASK_TIMEOUT_SEC, thread=thread or [],
+            fresh_shot=fresh_shot, ask_at=ask_at,
         )
+
+    def _action_match_keys(self, name: str, args: dict) -> set[str]:
+        """Canonical keys for an action so click:button X and click:X compare equal."""
+        keys: set[str] = set()
+        sig = _call_sig(name, args)
+        intent = _intent_sig(name, args, self.last_snapshot)
+        if sig:
+            keys.add(sig)
+        if intent:
+            keys.add(intent)
+        for k in list(keys):
+            if not isinstance(k, str) or not k.startswith("click:"):
+                continue
+            rest = k[6:].strip().lower()
+            keys.add(f"click:{rest}")
+            parts = rest.split(None, 1)
+            if parts and parts[0] in {
+                "button", "link", "checkbox", "radio", "tab", "switch", "textbox", "combobox", "option",
+            } and len(parts) > 1:
+                keys.add(f"click:{parts[1]}")
+                keys.add(f"click:{parts[0]} {parts[1]}")
+            elif rest:
+                keys.add(f"click:button {rest}")
+        return keys
+
+    def _deny_forbidden_after_stuck(self, name: str, args: dict) -> dict | None:
+        """After stuck-chat go: block the identical action that caused the ask; ladder at STUCK_MAX."""
+        forbidden = getattr(self, "_forbidden_after_stuck", None)
+        if not isinstance(forbidden, (set, frozenset)) or not forbidden:
+            return None
+        # Expand forbidden with normalized click variants captured at ask time.
+        expanded = set(forbidden)
+        for k in list(forbidden):
+            if isinstance(k, str) and k.startswith("click:"):
+                expanded |= self._action_match_keys("browser_click", {
+                    "element": k.split(":", 1)[-1],
+                })
+        hit = bool(self._action_match_keys(name, args) & expanded)
+        if not hit:
+            return None
+        n = int(getattr(self, "_forbidden_hits", 0)) + 1
+        self._forbidden_hits = n
+        self.state.log_action(case_id=self.case_id, app=self.app, tool=name, args=_safe_args(args),
+                              plan_step=self.current_step, outcome="forbidden_after_stuck")
+        guidance = "\n".join(getattr(self, "_guidance_notes", [])[-2:] or [])
+        if n >= LOOP_STOP:
+            # STUCK_MAX identical repeats after go → lookup ladder (not another silent click).
+            return self._start_exploring(
+                name,
+                "the same action that caused the stuck ask was repeated after user guidance; "
+                "lookup ladder next")
+        tip = guidance or "Follow the stuck-chat guidance and try a different control or route."
+        return {"error": (
+            f"Blocked: that exact {name} is the action that caused the stuck ask. Do not repeat it. "
+            f"{tip}\n(Forbidden repeat {n}/{LOOP_STOP}; at {LOOP_STOP} the lookup ladder runs.)"
+        )}
 
     def _stuck_question(self, why: str, thread: list | None = None) -> str:
         from ..stuck_summary import format_stuck_prompt
@@ -1389,6 +1581,7 @@ class TesterSession:
     def _ask_stuck_line(self, prompt: str, ask_id: str, *, summary: dict | None = None) -> str:
         """One interactive stuck prompt (web ASK carries structured summary for the UI)."""
         from ..auto import ask_line, web_mode
+        from .llm import pause_idle_for_human
         import signal
         ans = ""
 
@@ -1402,26 +1595,27 @@ class TesterSession:
         except (ValueError, AttributeError, OSError):
             old = None
         try:
-            if web_mode() and summary is not None:
-                # Enrich the ASK marker so the web UI can render chat + screenshot + suggestions.
-                payload = {"prompt": prompt.strip(), "secret": False, "ask_id": ask_id,
-                           "kind": "stuck_chat", "stuck": summary}
-                sys.stdout.write("\x1eASK " + json.dumps(payload) + "\n")
-                sys.stdout.flush()
-                # Read the matching answer the same way ask_line does (without re-emitting ASK).
-                from ..auto import flush_stdin, _parse_answer_line
-                flush_stdin()
-                while True:
-                    line = sys.stdin.readline()
-                    if not line:
-                        raise EOFError("no answer (the web UI closed the run)")
-                    text, got_id = _parse_answer_line(line)
-                    if got_id and got_id != ask_id:
-                        continue
-                    ans = text
-                    break
-            else:
-                ans = ask_line(f"\n{prompt}", ask_id=ask_id)
+            with pause_idle_for_human():
+                if web_mode() and summary is not None:
+                    # Enrich the ASK marker so the web UI can render chat + screenshot + suggestions.
+                    payload = {"prompt": prompt.strip(), "secret": False, "ask_id": ask_id,
+                               "kind": "stuck_chat", "stuck": summary}
+                    sys.stdout.write("\x1eASK " + json.dumps(payload) + "\n")
+                    sys.stdout.flush()
+                    # Read the matching answer the same way ask_line does (without re-emitting ASK).
+                    from ..auto import flush_stdin, _parse_answer_line
+                    flush_stdin()
+                    while True:
+                        line = sys.stdin.readline()
+                        if not line:
+                            raise EOFError("no answer (the web UI closed the run)")
+                        text, got_id = _parse_answer_line(line)
+                        if got_id and got_id != ask_id:
+                            continue
+                        ans = text
+                        break
+                else:
+                    ans = ask_line(f"\n{prompt}", ask_id=ask_id)
         finally:
             try:
                 signal.alarm(0)
@@ -1451,8 +1645,14 @@ class TesterSession:
         if asks >= STUCK_ASK_MAX_PER_CASE:
             return None
         self._stuck_asks = asks + 1
+        # Remember the identical action(s) so "go" can forbid repeating them.
+        self._stuck_trigger_keys = {
+            k for k in list(getattr(self, "_recent", []) or [])[-4:] if k
+        }
         thread = load_thread(self.state.dir, self.case_id)
-        summary = self._stuck_summary(why, thread=thread)
+        ask_at = time.time()
+        fresh_shot = self._capture_stuck_ask_shot()
+        summary = self._stuck_summary(why, thread=thread, fresh_shot=fresh_shot, ask_at=ask_at)
         q = format_stuck_prompt(summary)
         if not self._can_stuck_ask():
             note = f"Stuck ask (unattended, no answerer): {q.strip()}"
@@ -1476,7 +1676,8 @@ class TesterSession:
         final_kind, final_rest = None, ""
         while time.time() < deadline:
             left = max(1, int(deadline - time.time()))
-            summary = self._stuck_summary(why, thread=thread)
+            # Reuse ask-time shot/page; do not fall back to stale login helper PNGs.
+            summary = self._stuck_summary(why, thread=thread, fresh_shot=fresh_shot, ask_at=ask_at)
             summary["timeout_sec"] = left
             q = format_stuck_prompt(summary)
             ask_id = f"stuck-{self.case_id}-{uuid.uuid4().hex[:8]}"
@@ -1555,7 +1756,13 @@ class TesterSession:
             from ..coordinator import RunPaused
             raise RunPaused(f"User stopped the run at {self.case_id}: {final_rest or why}")
 
-        # go / continue: reset counters and feed the full conversation as guidance.
+        # go / continue: reset counters, forbid the identical stuck action, inject guidance.
+        self._forbidden_after_stuck = set(getattr(self, "_stuck_trigger_keys", None) or [])
+        # Also pin the humanized click label from recent intents for intent-sig matches.
+        for k in list(self._forbidden_after_stuck):
+            if k.startswith("click:"):
+                self._forbidden_after_stuck.add(k)
+        self._forbidden_hits = 0
         self._sigs, self._recent, self.since_progress, self._reads = {}, [], 0, 0
         self._sig_page = {}
         self._explored = False
@@ -1564,15 +1771,21 @@ class TesterSession:
         guidance = (final_rest or "\n".join(guidance_bits) or why).strip()
         thread.append({"role": "user", "text": "go", "continue": True})
         persist_thread(self.state.dir, self.case_id, thread, summary)
-        self._guidance_notes = getattr(self, "_guidance_notes", []) + [
-            f"GUIDANCE FROM THE USER (stuck chat; continue):\n{guidance}"
-        ]
+        guide_block = (
+            f"GUIDANCE FROM THE USER (stuck chat; continue):\n{guidance}\n"
+            f"Do NOT repeat the identical action that caused this stuck ask "
+            f"({', '.join(sorted(self._forbidden_after_stuck)[:4]) or 'the repeated control'}). "
+            f"Take a different control or route. After {LOOP_STOP} repeats of that forbidden "
+            f"action the lookup ladder runs."
+        )
+        self._guidance_notes = getattr(self, "_guidance_notes", []) + [guide_block]
         self.state.data.setdefault("notes", []).append(
-            f"Stuck ask on {self.case_id}: continued with guidance ({len(guidance_bits)} turns)")
+            f"Stuck ask on {self.case_id}: continued with guidance ({len(guidance_bits)} turns); "
+            f"forbidden={sorted(self._forbidden_after_stuck)[:3]}")
         self.state.save()
         return {"error": (
-            f"GUIDANCE FROM THE USER (stuck chat; loop counters reset once):\n- {guidance}\n"
-            f"Your {name} call was NOT run. Follow the guidance, then continue. "
+            f"{guide_block}\n"
+            f"Your {name} call was NOT run. Follow the guidance on the next model turn. "
             f"Approvals and safety rules still apply."
         )}
 
@@ -1585,6 +1798,8 @@ class TesterSession:
         self._explored = True
         tried = [t for t in dict.fromkeys(getattr(self, "_recent", [])) if t][-8:]
         self._sigs, self._recent, self.since_progress = {}, [], 0
+        self._nav_without_read = 0
+        self._nav_recent_urls = []
         ladder_note = ""
         try:
             from ..stuck_lookup import build_query, run_ladder
@@ -1664,12 +1879,22 @@ class TesterSession:
     def _fix_screenshot_args(self, args: dict) -> None:
         """The model often calls browser_take_screenshot without a filename; Playwright MCP then returns the image
         inline only and nothing reaches shots/ or the report. Always give it an absolute path under shots/
-        (ADK passes this same dict to the tool, so the in-place change is what runs)."""
+        (ADK passes this same dict to the tool, so the in-place change is what runs). Relative names and
+        absolute paths outside the run shots/ dir are rewritten so PNGs never land in the repo root."""
         raw = (args.get("filename") or "").strip()
         p = Path(raw) if raw else None
-        if p is not None and p.is_absolute() and p.parent.resolve() == self.ev.shots.resolve():
-            return
-        what = p.stem if p is not None and p.stem else (self.brief.get("title") or "evidence")
+        shots = self.ev.shots.resolve()
+        if p is not None and p.is_absolute():
+            try:
+                if p.resolve().parent == shots:
+                    args["filename"] = str(p.resolve())
+                    return
+            except OSError:
+                pass
+            # Absolute but not under this run's shots/ → keep basename only under shots/.
+            what = p.stem or (self.brief.get("title") or "evidence")
+        else:
+            what = p.stem if p is not None and p.stem else (self.brief.get("title") or "evidence")
         png, txt = self.ev.paths(self.case_id, what)
         if self.last_snapshot:
             self.ev.save_snapshot(txt, self.last_snapshot, keep_emails=self.keep_emails)
@@ -1747,6 +1972,26 @@ class TesterSession:
             self._tool_t0 = None
         if tool.name == "browser_snapshot":
             self._remember_page(_text_of(tool_response))
+            self._find_miss_need_read = False
+            self._nav_without_read = 0
+            self._no_change_click = None
+        if tool.name == "browser_find":
+            # Miss → next step must read the page (not thrash navigate).
+            text_find = _text_of(tool_response).lower()
+            missed = (
+                "not found" in text_find or "no match" in text_find or "0 result" in text_find
+                or "could not find" in text_find or "didn't find" in text_find
+                or "did not find" in text_find or '"count": 0' in text_find
+                or re.search(r"\b0\s+elements?\b", text_find)
+            )
+            # Empty / tiny result also counts as a miss when the query was for a label.
+            if not missed and len(text_find.strip()) < 40 and "ref=" not in text_find:
+                missed = True
+            if missed:
+                self._find_miss_need_read = True
+            else:
+                self._find_miss_need_read = False
+                self._nav_without_read = 0
         if tool.name == "browser_take_screenshot":
             raw = args.get("filename") or ""
             png = Path(raw) if Path(raw).is_absolute() else self.ev.shots / Path(raw).name
@@ -1812,8 +2057,19 @@ class TesterSession:
                 if tool.name in ("browser_click", "browser_type", "browser_fill_form",
                                  "browser_select_option", "browser_press_key"):
                     # Wizard / SPA step changes: next action must use refs from a fresh snapshot.
-                    if before_h and after_h and before_h != after_h:
+                    changed = bool(before_h and after_h and before_h != after_h)
+                    if changed:
                         self._need_fresh_snap = True
+                        self._no_change_click = None
+                        self._nav_without_read = 0
+                    elif tool.name == "browser_click" and before_h and after_h and before_h == after_h:
+                        # Same URL/heading/hash after click → read before re-clicking (modal/tab/scroll).
+                        self._need_fresh_snap = True
+                        self._no_change_click = {
+                            "element": str(args.get("element") or ""),
+                            "target": str(args.get("target") or args.get("ref") or "")
+                                .removeprefix("ref=").strip(),
+                        }
                     elif not had_page and not captured:
                         self._need_fresh_snap = True
             elif tool.name == "browser_snapshot":
@@ -2124,7 +2380,8 @@ def still_on_login(page: str, start: str) -> bool:
 def _persist_discovery_recipe(sess: "TesterSession", text: str, area: str | None) -> None:
     """Atomic write of a scrubbed discovery route as soon as propose_memory confirms it (survives mid-stop)."""
     from ..discovery_map import (
-        DiscoveryMapStore, buffer_pending, labels_from_route, match_item_to_rows, scope_for, _safe_route,
+        DiscoveryMapStore, buffer_pending, labels_from_route, match_item_to_rows, route_is_savable,
+        scope_for, _safe_route,
     )
     from ..memory.env_guard import EnvDetailError
     active = (sess.state.data or {}).get("_active_discovery") or {}
@@ -2133,6 +2390,8 @@ def _persist_discovery_recipe(sess: "TesterSession", text: str, area: str | None
     try:
         route = _safe_route(text[:400])
     except EnvDetailError:
+        return
+    if not route_is_savable(route, labels_from_route(route)):
         return
     checklist = list(active.get("checklist") or [])
     # Prefer the checklist item whose words appear in the recipe.
@@ -2172,11 +2431,16 @@ def _persist_discovery_recipe(sess: "TesterSession", text: str, area: str | None
         return
 
 
-def _safe_args(args: dict) -> dict:
-    """Action-log args: context-mask password/secret fields and secret-env values, then redact patterns."""
+def _safe_args(args: dict, *, tool: str = "") -> dict:
+    """Action-log args: context-mask password/secret fields and secret-env values, then redact patterns.
+
+    Never phone-mask ``record_value`` raw_text / recorded ids, or ``record=`` URL query values.
+    """
     from ..redact import mask_tool_args
     out = mask_tool_args(args)
-    return json.loads(redact(json.dumps(out, default=str)))
+    # record_value: keep ids intact (phones in URLs already protected by redact's record= hold).
+    skip_phone = tool == "record_value" or "record=" in json.dumps(out, default=str).lower()
+    return json.loads(redact(json.dumps(out, default=str), mask_phones=not skip_phone))
 
 
 def _text_of(resp) -> str:

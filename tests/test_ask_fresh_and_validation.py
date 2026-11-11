@@ -95,6 +95,7 @@ class AskFresh(unittest.TestCase):
             return next(answers)
 
         fake_ask.ids = []
+        s._capture_stuck_ask_shot = lambda: None
         with mock.patch.object(s, "_can_stuck_ask", return_value=True), \
              mock.patch.object(s, "_ask_stuck_line", side_effect=fake_ask):
             s.case_id = "CONTACT-E0"

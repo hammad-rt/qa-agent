@@ -3,3 +3,6 @@ name: SugarCRM
 docs:
   - https://support.sugarcrm.com
 notes: Starting assumptions only — sidecar UI; verify live.
+# Record ids in detail URLs: ?record=<uuid>
+id_format: uuid
+id_param: record

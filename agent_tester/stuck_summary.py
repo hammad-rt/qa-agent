@@ -245,16 +245,31 @@ def visible_controls(snapshot: str | dict | None, *, limit: int = 10) -> dict:
     }
 
 
+_JUNK_VALIDATION = re.compile(
+    r"(?i)^(content|error|invalid|required|validation|null|undefined|none|field)?$"
+)
+
+
+def _useful_validation(msgs: list[str] | None) -> list[str]:
+    out = []
+    for m in msgs or []:
+        t = _clean(str(m), 120)
+        if t and not _JUNK_VALIDATION.match(t) and len(t) > 3:
+            out.append(t)
+    return out
+
+
 def guess_and_suggestions(why: str, loc: dict, seeing: dict, tried: list[str]) -> tuple[str, list[str]]:
-    """Best-guess diagnosis + 1–3 short suggested replies (app-agnostic)."""
+    """Best-guess diagnosis + 0–3 real suggested replies. Never ``Fix: content`` junk."""
     suggestions: list[str] = []
     guess = _clean(why, 200) or "The agent is not making progress on this step."
+    useful_validation = _useful_validation(seeing.get("validation"))
     disabled_submits = [
         c for c in seeing.get("disabled") or []
         if re.search(r"(?i)\b(continue|next|submit|save|finish|create)\b", c.get("label") or "")
     ]
-    if disabled_submits and (seeing.get("required") or seeing.get("validation")):
-        need = seeing.get("validation") or [c["label"] for c in (seeing.get("required") or [])[:3]]
+    if disabled_submits and (seeing.get("required") or useful_validation):
+        need = useful_validation or [c["label"] for c in (seeing.get("required") or [])[:3]]
         guess = (
             f'A "{disabled_submits[0]["label"]}" control is disabled — a required choice on this step '
             f'is probably still empty ({"; ".join(_clean(x, 60) for x in need[:3])}).'
@@ -272,44 +287,71 @@ def guess_and_suggestions(why: str, loc: dict, seeing: dict, tried: list[str]) -
         )
         if loc.get("wizard_heading"):
             suggestions.append(f'Choose an option under "{loc["wizard_heading"]}", then continue')
-        suggestions.append("Take a fresh snapshot and fill the required choice on this step")
-    elif seeing.get("validation"):
-        guess = "The form shows validation messages; fix those fields before continuing."
-        suggestions.append(f'Fix: {seeing["validation"][0]}')
+    elif useful_validation:
+        guess = f'The form shows: {useful_validation[0]}'
+        if re.search(r"(?i)\b(select|choose|pick|enter|fill)\b", useful_validation[0]):
+            suggestions.append(useful_validation[0])
+        # Do not invent "Fix: <junk field name>"
     elif tried and any("times" in t for t in tried):
         guess = "The same control was used repeatedly without the page moving forward."
         suggestions.append("Try a different control or route to the same goal")
         if loc.get("wizard_heading"):
             suggestions.append(f'Look for another field on "{loc["wizard_heading"]}"')
-    if not suggestions:
-        suggestions = [
-            "Re-read the page and use a control that was not tried yet",
-            "Skip this case if the screen cannot do this step",
-        ]
-    # Dedupe / cap
+    # Dedupe / cap; drop junk
     out, seen = [], set()
     for s in suggestions:
+        s = _clean(s, 120)
+        if not s or _JUNK_VALIDATION.match(s) or re.match(r"(?i)^fix:\s*\w{1,20}$", s):
+            continue
         k = s.lower()
         if k not in seen:
             seen.add(k)
-            out.append(s[:120])
+            out.append(s)
         if len(out) >= 3:
             break
     return guess, out
 
 
-def latest_shot(run_dir: Path | None, screenshots: list[str] | None = None) -> str | None:
-    """Basename of the newest png under shots/, or the last entry in screenshots."""
+def latest_shot(run_dir: Path | None, screenshots: list[str] | None = None,
+                *, fresh_only: str | None = None, min_mtime: float | None = None,
+                app: str = "") -> str | None:
+    """Basename of a usable png under shots/.
+
+    When ``fresh_only`` is set, only that basename is accepted (ask-time capture).
+    Otherwise prefer recent case shots; never return a login helper shot for another
+    app when ``min_mtime`` says the ask is newer than that file.
+    """
+    if fresh_only:
+        name = Path(str(fresh_only)).name
+        if run_dir and (Path(run_dir) / "shots" / name).is_file():
+            return name
+        return name if screenshots and name in {Path(str(x)).name for x in screenshots} else None
     if screenshots:
         for name in reversed(list(screenshots)):
-            if str(name).lower().endswith(".png"):
-                return Path(str(name)).name
+            bn = Path(str(name)).name
+            if not bn.lower().endswith(".png"):
+                continue
+            # Skip login helper shots when asking about a different app.
+            if app and re.match(rf"(?i)login-(?!{re.escape(app)}-)", bn):
+                continue
+            if min_mtime is not None and run_dir:
+                p = Path(run_dir) / "shots" / bn
+                try:
+                    if p.is_file() and p.stat().st_mtime + 0.01 < min_mtime:
+                        continue
+                except OSError:
+                    pass
+            return bn
     if not run_dir:
         return None
     shots = run_dir / "shots"
     if not shots.is_dir():
         return None
     pngs = sorted(shots.glob("*.png"), key=lambda p: p.stat().st_mtime)
+    if min_mtime is not None:
+        pngs = [p for p in pngs if p.stat().st_mtime + 0.01 >= min_mtime]
+    if app:
+        pngs = [p for p in pngs if not re.match(rf"(?i)login-(?!{re.escape(app)}-)", p.name)]
     return pngs[-1].name if pngs else None
 
 
@@ -326,6 +368,8 @@ def build_stuck_summary(
     screenshots: list[str] | None = None,
     timeout_sec: int | None = None,
     thread: list[dict] | None = None,
+    fresh_shot: str | None = None,
+    ask_at: float | None = None,
 ) -> dict:
     """Structured stuck ask for CLI text + web UI cards."""
     step = resolve_step(brief, current_step, case_id=case_id)
@@ -333,13 +377,16 @@ def build_stuck_summary(
     tried = humanize_tried(list(recent or []))
     seeing = visible_controls(snapshot)
     guess, suggestions = guess_and_suggestions(why, loc, seeing, tried)
-    shot = latest_shot(run_dir, screenshots)
+    shot = latest_shot(
+        run_dir, screenshots, fresh_only=fresh_shot, min_mtime=ask_at, app=app or "",
+    )
     timeout_sec = int(timeout_sec if timeout_sec is not None else os.environ.get("STUCK_ASK_TIMEOUT_SEC", "600"))
     seeing_lines = []
     for c in (seeing.get("controls") or [])[:8]:
         st = f" ({', '.join(c['state'])})" if c.get("state") else ""
         seeing_lines.append(f'{c["role"]} "{c["label"]}"{st}')
-    for msg in seeing.get("validation") or []:
+    useful_val = _useful_validation(seeing.get("validation"))
+    for msg in useful_val:
         seeing_lines.append(f"validation: {msg}")
     summary = {
         "kind": "stuck_chat",
@@ -357,7 +404,7 @@ def build_stuck_summary(
         "tried": tried,
         "seeing": seeing_lines,
         "controls": seeing.get("controls") or [],
-        "validation": seeing.get("validation") or [],
+        "validation": useful_val,
         "guess": guess,
         "suggestions": suggestions,
         "screenshot": shot,
@@ -445,26 +492,46 @@ def is_continue(text: str) -> bool:
         r"^(?:go|continue)\b", t) is not None
 
 
+def _thread_path(run_dir: Path, case_id: str = "") -> Path:
+    """Per-case stuck chat file so CRM/portal discovery never share a thread."""
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", (case_id or "case").strip()) or "case"
+    return Path(run_dir) / f"stuck_chat_{safe}.json"
+
+
 def persist_thread(run_dir: Path, case_id: str, thread: list[dict], summary: dict | None = None) -> None:
-    """Write stuck_chat.json so resume keeps the conversation."""
+    """Write stuck chat for this case_id only (never overwrite another case's thread)."""
     if not run_dir:
         return
-    path = Path(run_dir) / "stuck_chat.json"
+    path = _thread_path(run_dir, case_id)
     data = {"case_id": case_id, "thread": thread, "summary": summary or {}}
     try:
         path.write_text(json.dumps(data, indent=2) + "\n")
+        # Keep legacy stuck_chat.json as a pointer to the active case for the UI.
+        (Path(run_dir) / "stuck_chat.json").write_text(json.dumps(data, indent=2) + "\n")
     except OSError:
         pass
 
 
 def load_thread(run_dir: Path, case_id: str = "") -> list[dict]:
-    path = Path(run_dir) / "stuck_chat.json"
+    """Load this case's stuck thread only — never another case's conversation."""
+    if not run_dir:
+        return []
+    path = _thread_path(run_dir, case_id) if case_id else Path(run_dir) / "stuck_chat.json"
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
-        return []
+        # Fall back to legacy single file only when it matches this case_id.
+        if case_id:
+            try:
+                data = json.loads((Path(run_dir) / "stuck_chat.json").read_text())
+            except (OSError, ValueError):
+                return []
+            if data.get("case_id") and data.get("case_id") != case_id:
+                return []
+        else:
+            return []
     if case_id and data.get("case_id") and data.get("case_id") != case_id:
-        return list(data.get("thread") or [])  # still return; resume may switch cases
+        return []
     return list(data.get("thread") or [])
 
 

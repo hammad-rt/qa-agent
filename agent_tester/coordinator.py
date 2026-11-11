@@ -261,6 +261,16 @@ def _discovery_change_text(plan, case, state) -> str:
     return ticket_case_blob(plan, case) + ("\n" + extra if extra else "")
 
 
+def _screen_label(text: str, limit: int = 40) -> str:
+    """Short screen name for reuse logs — never truncated PREP create instructions."""
+    t = re.sub(r"\s+", " ", (text or "").strip())
+    if re.match(r"(?i)^(WALLET|ORDER|CUSTOMER|PREP)\b.*\bcreate:", t) or len(t) > 80:
+        # Prefer the leading screen-ish phrase before create/instruction prose.
+        m = re.match(r"^([^:]{3,40})", t)
+        t = (m.group(1) if m else t[:40]).strip(" -")
+    return (t or "?")[:limit]
+
+
 def _log_discovery_reuse(state, key: str, reused: list[dict], live: list[str],
                          spot_checked: int = 0, calls_saved: int = 0) -> None:
     """One progress.log line per area:app describing reuse vs live discovery.
@@ -271,27 +281,47 @@ def _log_discovery_reuse(state, key: str, reused: list[dict], live: list[str],
     from datetime import datetime
     from .discovery_map import age_days, estimate_calls_saved
     bits = []
-    if reused:
+    # Dedupe reused rows by checklist_item / item_key; skip PREP instruction blobs.
+    seen_keys: set[str] = set()
+    unique_reused: list[dict] = []
+    for r in reused or []:
+        label = (r.get("checklist_item") or "")
+        if re.search(r"(?i)\bcreate:\s*", label) and len(label) > 60:
+            continue
+        ik = r.get("item_key") or label.lower()
+        if ik in seen_keys:
+            continue
+        seen_keys.add(ik)
+        unique_reused.append(r)
+    if unique_reused:
         ages = []
-        for r in reused:
+        for r in unique_reused:
             age = age_days(r.get("last_success_at") or r.get("verified_at") or r.get("updated_at"))
-            label = (r.get("checklist_item") or "?")[:40]
+            label = _screen_label(r.get("checklist_item") or "?")
             ages.append(f"{label} ({age:.0f}d)" if age is not None else label)
         bits.append("reused from memory: " + ", ".join(ages))
     if spot_checked:
         bits.append(f"deploy changed, spot-checked {spot_checked} route(s)")
     if live:
-        bits.append("discovered live: " + ", ".join(x[:40] for x in live))
+        bits.append("discovered live: " + ", ".join(_screen_label(x) for x in live))
     if not bits:
         bits.append("no checklist items")
-    saved = calls_saved or estimate_calls_saved(len(reused))
+    # Honest savings: unique reused screens only. Never claim the full solo-reuse
+    # estimate (~60) when live discovery is still running for other items.
+    n_saved = len(unique_reused)
+    if not n_saved:
+        saved = 0
+    elif not live:
+        saved = int(calls_saved or estimate_calls_saved(n_saved))
+    else:
+        saved = min(estimate_calls_saved(n_saved) // 2, 8 * n_saved, 24)
     line = f"discovery {key}: " + "; ".join(bits) + f"; ~{saved} tool calls saved"
     state.data.setdefault("notes", []).append(line)
     stats = state.data.setdefault("discovery_reuse_stats", {
         "areas": 0, "reused": 0, "live": 0, "spot_checked": 0, "calls_saved": 0,
     })
     stats["areas"] = int(stats.get("areas") or 0) + 1
-    stats["reused"] = int(stats.get("reused") or 0) + len(reused)
+    stats["reused"] = int(stats.get("reused") or 0) + len(unique_reused)
     stats["live"] = int(stats.get("live") or 0) + len(live)
     stats["spot_checked"] = int(stats.get("spot_checked") or 0) + int(spot_checked or 0)
     stats["calls_saved"] = int(stats.get("calls_saved") or 0) + int(saved or 0)
@@ -409,13 +439,24 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory,
     need_live: list[str] = []
     spot_n = 0
     map_store = DiscoveryMapStore.from_memory(memory) if memory is not None else None
+    sc = scope_for(memory) if memory is not None else "project"
+    # Drop stuck/garbage rows so they never get reused (and never block lazy skip).
+    if map_store is not None and not state.data.get("_discovery_bad_staled"):
+        try:
+            n_bad = map_store.mark_bad_rows_stale(sc, fp)
+            if n_bad:
+                state.data.setdefault("notes", []).append(
+                    f"discovery_map: marked {n_bad} stuck/garbage route(s) stale")
+            state.data["_discovery_bad_staled"] = True
+        except Exception:  # noqa: BLE001
+            pass
     # Once per run: import pack ## Routes as verified (source=pack); skip env-bound lines.
     if map_store is not None and not state.data.get("_learned_routes_backfilled"):
         warnings: list[str] = []
         try:
             backfill_from_learned(
                 state.data.get("pack_root"), map_store,
-                scope=scope_for(memory), env_fingerprint=fp,
+                scope=sc, env_fingerprint=fp,
                 platform=state.data.get("detected_platform"),
                 platform_version=plat_ver,
                 warn=warnings.append,
@@ -436,7 +477,6 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory,
         platform_id=state.data.get("detected_platform") if state else None,
     )
     if map_store is not None:
-        sc = scope_for(memory)
         known_rows = map_store.list_for(sc, case.area, app, fp)
         for r in map_store.list_for(sc, "general", app, fp):
             if r not in known_rows and not any(
@@ -566,7 +606,10 @@ def _run_discovery(plan, case, app, state, testers, memory, fp, key, store, *,
     from .models import Step
     goal_lines = list(want) if want else [case.title or case.id]
     goal = "; ".join(goal_lines[:10])
-    disco_case_id = f"DISCO-{case.area or app}" + ("-inc" if incremental else "")
+    # Per-app case id so CRM and portal discovery never share stuck chat / title.
+    area_bit = re.sub(r"[^a-z0-9]+", "-", (case.area or app or "ui").lower()).strip("-") or "ui"
+    app_bit = re.sub(r"[^a-z0-9]+", "-", (app or "app").lower()).strip("-") or "app"
+    disco_case_id = f"DISCO-{area_bit}-{app_bit}" + ("-inc" if incremental else "")
     hint_note = ""
     if hints:
         hint_note = (
@@ -583,8 +626,10 @@ def _run_discovery(plan, case, app, state, testers, memory, fp, key, store, *,
               "Note menu labels, search/filter paths and URLs (ID only). Do not change data, settings, or pay."
               + detail_note + hint_note),
         app=app)]
-    pseudo = PlannedCase(id=disco_case_id, title=f"discover UI for {case.area or app}",
-                         area=case.area, steps=steps, type=case.type)
+    pseudo = PlannedCase(
+        id=disco_case_id,
+        title=f"discover UI for {case.area or app} on {app}",
+        area=case.area, steps=steps, type=case.type)
     brief = brief_for(plan, pseudo, [0], state)
     brief["discovery"] = True
     brief["read_only"] = True

@@ -218,8 +218,9 @@ def form_validation_messages(snapshot: str, *, limit: int = 8) -> list[str]:
         key = hit.lower()
         if key in seen:
             continue
-        # Skip chrome / generic role-only labels.
-        if key in {"alert", "error", "warning", "status", "required", "invalid"}:
+        # Skip chrome / generic role-only labels and bare field names with no message.
+        if key in {"alert", "error", "warning", "status", "required", "invalid",
+                   "content", "field", "null", "undefined", "none", "validation"}:
             continue
         seen.add(key)
         out.append(hit)

@@ -134,6 +134,48 @@ async def run(browser, ctx, account: str, path: str = ""):
         return res
 
 
+_LOGOUT_CTRL = re.compile(r"(?i)\b(log\s*out|sign\s*out|signout)\b")
+
+
+async def _session_already_valid(browser, ctx, account: str, acc: dict) -> dict | None:
+    """Skip login only with positive evidence of a signed-in session.
+
+    A public / signed-out home often has no password field — that alone is not enough.
+    Evidence (any one):
+    - pack ``role_markers`` all appear on the page, or
+    - this run already logged in on this app (``login_form.logged_in``) and there is still
+      no password field, or
+    - a logout / sign-out control is visible.
+    With no markers and no evidence, return None so ``_attempt`` navigates to the login path.
+    """
+    try:
+        form = await analyze(browser)
+    except Exception:  # noqa: BLE001
+        return None
+    if form.get("has_password"):
+        return None  # signed out / on a login form
+    page = ""
+    try:
+        page = await browser.snapshot() or ""
+    except Exception:  # noqa: BLE001
+        page = ""
+    markers = [m for m in (acc.get("role_markers") or []) if str(m).strip()]
+    markers_match = bool(markers) and all(str(m).lower() in page.lower() for m in markers)
+    vals = getattr(getattr(ctx, "state", None), "values", None) or {}
+    prev = vals.get("login_form.logged_in") or {}
+    prev_ok = (isinstance(prev, dict) and prev.get("value") == "yes"
+               and str(prev.get("source", "")).endswith(f"/{ctx.app}"))
+    has_logout = bool(page) and bool(_LOGOUT_CTRL.search(page))
+    if markers_match or (prev_ok and not form.get("has_password")) or has_logout:
+        how = ("role markers" if markers_match else
+               "prior login this run" if prev_ok else "logout control")
+        return {"values": {"logged_in": "yes",
+                           "role_ok": "yes" if markers_match else f"skipped ({how})"},
+                "screenshots": [],
+                "notes": f"Already logged in on {ctx.app}; skipped login_form ({how})"}
+    return None
+
+
 async def _attempt(browser, ctx, account: str, path: str = ""):
     acc = ctx.account(account)
     env_name = acc.get("password_env")
@@ -141,8 +183,15 @@ async def _attempt(browser, ctx, account: str, path: str = ""):
     if not password:
         raise HelperError(f"password not set: add {env_name} through the masked prompt")
     cfg = ctx.config or {}
-    await browser.navigate(ctx.url(path or cfg.get("path", "")))
+    # Check the current session first — do not navigate to /login when already signed in.
+    already = await _session_already_valid(browser, ctx, account, acc)
+    if already is not None:
+        return already
+    # If we are already on a login form, fill it in place (no extra navigate).
     form = await analyze(browser)
+    if not form.get("has_password"):
+        await browser.navigate(ctx.url(path or cfg.get("path", "")))
+        form = await analyze(browser)
     if not form.get("has_password"):
         vals = getattr(getattr(ctx, "state", None), "values", None) or {}
         prev = vals.get("login_form.logged_in") or {}
@@ -185,7 +234,8 @@ async def _attempt(browser, ctx, account: str, path: str = ""):
     markers = acc.get("role_markers", [])
     still_on_form = bool(after.get("has_password"))
     role_ok = all(m.lower() in page.lower() for m in markers)
-    shot = await browser.screenshot(f"{ctx.shot_prefix}login-{ctx.app}-{account}.png")
+    # Basename only — McpBrowser rewrites under evidence_dir / run shots/ (never repo cwd).
+    shot = await browser.screenshot(f"login-{ctx.app}-{account}.png")
     used = f"{_fdesc(form['user'])} / {_fdesc(form['password'])} / submit {_fdesc(sub) if sub else 'Enter'}"
     if still_on_form:
         seen = (f"the page says: {after['error']}" if after.get("error")

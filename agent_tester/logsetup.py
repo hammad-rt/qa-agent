@@ -76,6 +76,26 @@ def setup(debug: bool | None = None) -> Path | None:
     return path
 
 
+class _OtelDetachFilter(logging.Filter):
+    """Drop OpenTelemetry 'Failed to detach context' noise when a tester node is cancelled."""
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
+        try:
+            msg = record.getMessage()
+        except Exception:  # noqa: BLE001
+            msg = str(getattr(record, "msg", "") or "")
+        blob = f"{record.name} {msg}"
+        if "Failed to detach context" in blob:
+            return False
+        if "opentelemetry" in (record.name or "").lower() and "detach" in blob.lower():
+            return False
+        if record.exc_info and record.exc_info[1] is not None:
+            err = f"{type(record.exc_info[1]).__name__}: {record.exc_info[1]}"
+            if "Failed to detach context" in err:
+                return False
+        return True
+
+
 class RunErrors:
     """While a run is going, also copy warnings and errors (with tracebacks) to <run>/errors.log."""
 
@@ -93,7 +113,10 @@ class RunErrors:
             return self
         self.h.setLevel(logging.WARNING)
         self.h.setFormatter(logging.Formatter(FMT))
+        self.h.addFilter(_OtelDetachFilter())
         logging.getLogger().addHandler(self.h)
+        # Also quiet known OTEL context detach spam on the library logger.
+        logging.getLogger("opentelemetry.context").setLevel(logging.CRITICAL)
         return self
 
     def __exit__(self, *exc):

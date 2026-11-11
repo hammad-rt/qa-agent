@@ -74,16 +74,45 @@ def _mask_card(m: re.Match) -> str:
     return f"[card ****{digits[-4:]}]"
 
 
-def redact(text: str, keep_emails: tuple[str, ...] = ()) -> str:
+# Protect URL query ids (SuiteCRM/Sugar ``record=…``) from phone/token masking.
+_RECORD_PARAM = re.compile(r"(record=)([0-9a-fA-F-]{8,}|\d{3,})", re.I)
+
+
+def _protect_record_params(text: str) -> tuple[str, dict[str, str]]:
+    """Swap ``record=<id>`` values for placeholders so phone/token regexes cannot eat them."""
+    held: dict[str, str] = {}
+
+    def _hold(m: re.Match) -> str:
+        key = f"__RECID{len(held)}__"
+        held[key] = m.group(2)
+        return f"{m.group(1)}{key}"
+
+    return _RECORD_PARAM.sub(_hold, text), held
+
+
+def _restore_record_params(text: str, held: dict[str, str]) -> str:
+    out = text
+    for key, rid in held.items():
+        out = out.replace(key, rid)
+    return out
+
+
+def redact(text: str, keep_emails: tuple[str, ...] = (), *, mask_phones: bool = True) -> str:
+    """Mask cards/emails/phones/tokens. Never treat ``record=<id>`` query values as phones.
+
+    ``mask_phones=False`` skips phone masking (use for ``record_value`` args/results).
+    """
     if not text:
         return text
-    t = _PASSWORD_KV.sub(lambda m: f"{m.group(1)}: [masked]", text)
+    protected, held = _protect_record_params(text)
+    t = _PASSWORD_KV.sub(lambda m: f"{m.group(1)}: [masked]", protected)
     t = _TOKEN.sub("[token]", t)
     t = _CARD.sub(_mask_card, t)
     keep = {e.lower() for e in keep_emails}
     t = _EMAIL.sub(lambda m: m.group() if m.group().lower() in keep else "[email]", t)
-    t = _PHONE.sub(lambda m: m.group() if _STAMP.search(m.group()) else "[phone]", t)
-    return t
+    if mask_phones:
+        t = _PHONE.sub(lambda m: m.group() if _STAMP.search(m.group()) else "[phone]", t)
+    return _restore_record_params(t, held)
 
 
 SECRET_ENV_HINTS = ("PASSWORD", "TOKEN", "API_KEY", "SECRET")

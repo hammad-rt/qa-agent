@@ -718,9 +718,10 @@ def _run_discovery(plan, case, app, state, testers, memory, fp, key, store, *,
     from .memory.pollution import is_infra_error_text
     # Never persist infrastructure failures (timeouts, cancellations, MCP errors)
     # as learned hints, even if other proposed recipes already exist for the area.
-    useful = bool(notes and not blocked and not notes.startswith("discovery failed")
-                  and not _NO_PROGRESS.search(notes)
-                  and not is_infra_error_text(notes))
+    failed = bool(notes) and (notes.startswith("discovery failed") or is_infra_error_text(notes))
+    # Live recipes still count when discovery found them, unless the turn itself failed.
+    useful = (bool(proposed) and not failed) or bool(
+        notes and not blocked and not failed and not _NO_PROGRESS.search(notes))
     tries = state.data.setdefault("discovery_tries", {})
     tries[key] = tries.get(key, 0) + 1
     store[key] = entry

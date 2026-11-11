@@ -332,3 +332,10 @@ class PollutionFilters(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProductCancelNotInfra(unittest.TestCase):
+    def test_order_cancelled_is_not_infra(self):
+        from agent_tester.memory.pollution import is_infra_error_text
+        self.assertFalse(is_infra_error_text("The order was cancelled and the wallet refunded"))
+        self.assertTrue(is_infra_error_text("Root node tester_crm was cancelled by an external cancellation"))

@@ -129,6 +129,24 @@ class LearningTests(Base):
         self.assertEqual(len(ids), 1)
         self.assertIn("#180966", self.store.get(ids[0])["text"])
 
+    def test_open_bugs_skip_tester_mistakes(self):
+        res = [
+            CaseResult(case_id="TC1", verdict="FAIL",
+                       expected="paste 25.50",
+                       actual="The agent used `browser_type` instead of pasting",
+                       note="test not executed properly"),
+            CaseResult(case_id="TC2", verdict="FAIL",
+                       expected="007 stays 7",
+                       actual="The tester typed 007 then typed 0 without clearing (0070)"),
+            CaseResult(case_id="TC3", verdict="FAIL",
+                       expected="threshold saves", actual="value rejected",
+                       note="app rejected the whole number"),
+        ]
+        ids = self.mem.record_open_bugs(res, "run1", 180966)
+        self.assertEqual(len(ids), 1)
+        self.assertIn("TC3", self.store.get(ids[0])["text"])
+        self.assertNotIn("browser_type", self.store.get(ids[0])["text"])
+
     def test_known_bug_candidates(self):
         c = self.mem.known_bug_candidates("Rewards committed and wallet deducted when Stripe checkout opens; abandoning burns rewards",
                                           self.pack.known_bugs)

@@ -135,9 +135,11 @@ def learned_hints_for(pack_root, area: str | None, app: str, title: str = "",
                       limit: int = MAX_LEARNED_HINTS) -> list[str]:
     """At most a few Stuck / Route lines for this area:app — never the whole learned.md."""
     from .. import learned
+    from .pollution import is_ephemeral_learned_line
     lines = learned.read(pack_root, area, app, title)
-    stuck = [l for l in lines if l.startswith("Stuck")]
-    routes = [l for l in lines if l.startswith("Route") or l.startswith("Discovery")]
+    stuck = [l for l in lines if l.startswith("Stuck") and not is_ephemeral_learned_line(l)]
+    routes = [l for l in lines if (l.startswith("Route") or l.startswith("Discovery"))
+              and not is_ephemeral_learned_line(l)]
     # Prefer recent stuck (file stores newest first under each section), then a couple of routes.
     picked = stuck[:2] + routes[: max(0, limit - min(2, len(stuck)))]
     return picked[:limit]

@@ -256,10 +256,17 @@ class Memory:
         return r
 
     def record_open_bugs(self, results: list, run_id: str, task_id: int) -> list[int]:
-        """End of run: new FAILs (not matching a known bug) saved as open_bug_found."""
+        """End of run: new product-bug FAILs (not matching a known bug) saved as open_bug_found.
+
+        Failures the verdict attributes to the agent, tester, or missing evidence
+        are not stored as bugs (they are tester mistakes, not product defects).
+        """
+        from .pollution import is_product_bug_failure
         ids = []
         for r in results:
             if r is None or r.verdict != "FAIL" or r.known_bug:
+                continue
+            if not is_product_bug_failure(r):
                 continue
             text = f"{r.case_id} on #{task_id}: expected {r.expected}; actual {r.actual}".strip()
             try:

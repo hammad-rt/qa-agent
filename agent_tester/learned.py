@@ -106,7 +106,12 @@ def add(pack_root, area: str | None, app: str, line: str) -> bool:
     line = (line or "").strip().replace("\n", " ")
     if not p or not line:
         return False
+    from .memory.pollution import is_ephemeral_learned_line
+    if is_ephemeral_learned_line(line):
+        return False
     line = scrub(line)
+    if is_ephemeral_learned_line(line):
+        return False
     try:
         # Allow short route lines; assert_safe_lasting rejects empty-after-scrub env noise.
         body_for_guard = re.sub(r"\s*\(\d{4}-\d\d-\d\d.*?\)$", "", line)
@@ -165,7 +170,16 @@ def record_recipe(pack_root, area, app, what: str, actions: list[dict]) -> str |
 
 def record_stuck(pack_root, area, app, case_id: str, why: str, notes: str,
                  actions: list[dict] | None = None) -> str | None:
-    """What went wrong on a failed or stuck turn — read back only for the same area (budgeted)."""
+    """What went wrong on a failed or stuck turn — read back only for the same area (budgeted).
+
+    Stuck-loop click trails and infrastructure errors are not persisted as hints
+    (they pollute later prompts). Those lines are dropped here and by ``add``.
+    """
+    from .memory.pollution import is_infra_error_text, is_stuck_loop_trail
+    kind = "loop" if "loop" in (why or "").lower() or "repeat" in (why or "").lower() else "stuck"
+    # Do not persist loop click trails (reached click … already tried …).
+    if kind == "loop" or is_stuck_loop_trail(why) or is_infra_error_text(why) or is_infra_error_text(notes):
+        return None
     hops = route_from_actions(actions or [], app, limit=12, changes=True)
     tried: list[str] = []
     for a in reversed(actions or []):

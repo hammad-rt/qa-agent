@@ -774,9 +774,66 @@ _STOP_MATCH = frozenset({
     "create", "find", "prep", "into", "onto", "then", "when", "how", "via",
 })
 
+# App-agnostic phrase aliases. Product labels (menu names, module titles) stay in the pack.
+CORE_ROUTE_ALIAS_GROUPS: list[list[str]] = [
+    ["login", "log in", "sign in", "signin", "sign-in"],
+    ["move status", "order status", "change status", "status"],
+    ["wallet", "rewards", "open wallet", "open wallet / rewards"],
+    ["quote", "quotes", "request a quote"],
+    ["invoice", "invoices"],
+    ["detail view", "record detail", "detail", "subpanel"],
+    ["list search", "search", "lookup"],
+    ["record payment", "payment", "payments"],
+    ["receive package", "receive", "package", "parcel"],
+]
+
 
 def _word_tokens(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9]{3,}", (text or "").lower()) if w not in _STOP_MATCH}
+
+
+def _normalize_match_text(text: str) -> str:
+    t = (text or "").lower().replace("&", " and ")
+    t = re.sub(r"[/|]+", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def _phrases_present(text: str, phrases: list[str]) -> list[str]:
+    """Phrases found in text: multi-word substrings, or single tokens of length >= 5."""
+    low = _normalize_match_text(text)
+    hits: list[str] = []
+    if not low:
+        return hits
+    for p in phrases:
+        pn = _normalize_match_text(str(p))
+        if not pn:
+            continue
+        if " " in pn:
+            if pn in low:
+                hits.append(pn)
+        elif len(pn) >= 5 and re.search(rf"\b{re.escape(pn)}\b", low):
+            hits.append(pn)
+    return hits
+
+
+def _alias_phrase_hit(a: str, b: str, synonym_groups: list[list[str]] | None) -> bool:
+    for group in synonym_groups or []:
+        phrases = [str(x) for x in group if x]
+        if _phrases_present(a, phrases) and _phrases_present(b, phrases):
+            return True
+    return False
+
+
+def _load_yaml_synonyms(path: Path, _add) -> None:
+    if not path.is_file():
+        return
+    try:
+        import yaml
+        cfg = yaml.safe_load(path.read_text()) or {}
+        _add(cfg.get("route_synonyms"))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def load_route_synonym_groups(
@@ -784,12 +841,16 @@ def load_route_synonym_groups(
     *,
     platform_id: str | None = None,
     platforms_dir: Path | None = None,
+    pack_root=None,
 ) -> list[list[str]]:
-    """Load synonym groups from pack.yaml and optional platform.yaml (never hardcoded in core).
+    """Load synonym groups: generic core aliases, then pack.yaml, then platform.yaml.
 
-    Each group is a list of equivalent phrases/tokens. Pack wins first; platform groups append.
+    Core aliases are app-agnostic (login, status, wallet, …). Product-specific
+    labels belong in pack ``route_synonyms``. If ``pack_cfg`` has no synonym
+    table, ``pack_root/pack.yaml`` is read as a fallback (live runs historically
+    stored a trimmed pack_cfg without this key).
     """
-    groups: list[list[str]] = []
+    groups: list[list[str]] = [list(g) for g in CORE_ROUTE_ALIAS_GROUPS]
 
     def _add(raw):
         if not isinstance(raw, list):
@@ -800,24 +861,20 @@ def load_route_synonym_groups(
                 if phrases:
                     groups.append(phrases)
 
-    _add((pack_cfg or {}).get("route_synonyms"))
+    cfg_syn = (pack_cfg or {}).get("route_synonyms")
+    _add(cfg_syn)
+    if not cfg_syn and pack_root:
+        _load_yaml_synonyms(Path(pack_root) / "pack.yaml", _add)
     if platform_id:
         from .config import ROOT
         root = platforms_dir or (ROOT / "packs" / "_platforms")
-        yml = root / platform_id / "platform.yaml"
-        if yml.is_file():
-            try:
-                import yaml
-                cfg = yaml.safe_load(yml.read_text()) or {}
-                _add(cfg.get("route_synonyms"))
-            except Exception:  # noqa: BLE001
-                pass
+        _load_yaml_synonyms(root / platform_id / "platform.yaml", _add)
     return groups
 
 
 def expand_match_tokens(text: str, synonym_groups: list[list[str]] | None = None) -> set[str]:
-    """Token set for a screen/checklist string, expanded by pack/platform synonym groups."""
-    low = (text or "").lower()
+    """Token set for a screen/checklist string, expanded by core/pack/platform synonym groups."""
+    low = _normalize_match_text(text)
     out = _word_tokens(low)
     for group in synonym_groups or []:
         phrases = [str(p).lower().strip() for p in group if p]
@@ -827,16 +884,17 @@ def expand_match_tokens(text: str, synonym_groups: list[list[str]] | None = None
         for p in phrases:
             if not p:
                 continue
-            if p in low:
+            pn = _normalize_match_text(p)
+            if pn and pn in low:
                 hit = True
                 break
-            pt = _word_tokens(p)
+            pt = _word_tokens(pn or p)
             if pt and pt <= out:
                 hit = True
                 break
         if hit:
             for p in phrases:
-                out |= _word_tokens(p)
+                out |= _word_tokens(_normalize_match_text(p) or p)
     return out
 
 
@@ -844,16 +902,34 @@ def route_match_score(
     screen: str,
     checklist_item: str,
     synonym_groups: list[list[str]] | None = None,
+    route_text: str | None = None,
 ) -> float:
-    """0..1 overlap after synonym expansion. Pack route screens rarely equal checklist text."""
-    a = expand_match_tokens(screen, synonym_groups)
-    b = expand_match_tokens(checklist_item, synonym_groups)
-    if not a or not b:
-        return 0.0
-    inter = len(a & b)
-    if inter <= 0:
-        return 0.0
-    return inter / float(min(len(a), len(b)))
+    """0..1 overlap after synonym expansion, or a phrase-alias hit.
+
+    Pack route screens rarely equal checklist text word-for-word. When a menu
+    path is provided, the best of screen / path / combined is used so a path
+    like ``Orders > Shipping Only Orders`` can still inform matching.
+    """
+    groups = synonym_groups or []
+    sides = [screen or ""]
+    if route_text:
+        sides.append(route_text)
+        sides.append(f"{screen or ''} {route_text}")
+    best = 0.0
+    item = checklist_item or ""
+    for side in sides:
+        a = expand_match_tokens(side, groups)
+        b = expand_match_tokens(item, groups)
+        sc = 0.0
+        if a and b:
+            inter = len(a & b)
+            if inter > 0:
+                sc = inter / float(min(len(a), len(b)))
+        if _alias_phrase_hit(side, item, groups):
+            sc = max(sc, 0.85)
+        if sc > best:
+            best = sc
+    return best
 
 
 def backfill_from_learned(
@@ -912,20 +988,21 @@ def match_item_to_rows(
 ) -> dict | None:
     """Find a discovery_maps row for a checklist item.
 
-    Exact item_key first, then synonym-aware keyword overlap (pack/platform
-    ``route_synonyms``). Screen names rarely equal checklist text word-for-word.
+    Exact item_key first, then synonym-aware overlap (core aliases + pack/platform
+    ``route_synonyms``) against the screen name and the saved menu path.
     """
     ik = item_key(checklist_item)
     for r in rows:
         if r.get("item_key") == ik:
             return r
     best, score = None, 0.0
-    words = {w for w in re.findall(r"[a-z0-9]{4,}", checklist_item.lower()) if len(w) > 3}
+    words = {w for w in re.findall(r"[a-z0-9]{4,}", (checklist_item or "").lower()) if len(w) > 3}
     for r in rows:
         screen = r.get("checklist_item") or ""
-        sc = route_match_score(screen, checklist_item, synonym_groups)
+        path = r.get("route_text") or ""
+        sc = route_match_score(screen, checklist_item, synonym_groups, route_text=path)
         if sc <= 0 and not synonym_groups:
-            # Legacy distinctive-word overlap when the pack has no synonym table.
+            # Legacy distinctive-word overlap when no synonym table is in play.
             rw = {w for w in re.findall(r"[a-z0-9]{4,}", screen.lower())}
             raw = len(words & rw)
             if raw >= 1:
@@ -934,6 +1011,26 @@ def match_item_to_rows(
         if sc > score:
             best, score = r, sc
     return best if best is not None and score >= min_score else None
+
+
+def route_hints_from_rows(rows: list[dict], *, limit: int = 16) -> list[str]:
+    """Menu paths to hand the discovery tester as hints (even when a row is not reusable)."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for r in rows or []:
+        path = (r.get("route_text") or "").strip()
+        if not path or not route_is_savable(path, r.get("key_labels")):
+            continue
+        screen = (r.get("checklist_item") or "").strip()
+        line = f"{screen}: {path}" if screen else path
+        key = line.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(line)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def parse_routes_from_discovery_notes(notes: str, checklist: list[str]) -> dict[str, tuple[str, list[str]]]:

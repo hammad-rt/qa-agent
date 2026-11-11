@@ -46,3 +46,14 @@ def relevant(facts: str, text: str, limit: int = 9000) -> str:
         picked.append((i, body))
         used += len(body)
     return "\n\n".join(b for _, b in sorted(picked))
+
+
+def safety_rules_text(pack) -> str:
+    """Always-on pack safety rules (generic). Empty when the pack has none."""
+    items = (getattr(pack, "config", None) or {}).get("safety_rules") or []
+    lines = []
+    for item in items:
+        text = item.get("text") if isinstance(item, dict) else str(item or "")
+        if text:
+            lines.append(f"- {text}")
+    return "\n".join(lines)

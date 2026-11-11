@@ -20,10 +20,10 @@ Rewritten 2026-10-06 after the original file was lost. Sources: QA runs on #1809
 - Production: no accounts known yet. Ask.
 
 ## Payments
-- Stripe test card on staging and local: 4242 4242 4242 4242, expiry 12/34, CVC 123.
+- Stripe test card on staging, preprod, and local: 4242 4242 4242 4242, expiry 12/34, CVC 123. Never pay on production. Never use a real card.
 - Buy & Ship (B&S) orders on staging offer only M-Pesa, so card payment is blocked for them.
 - Classic Buy & Ship is paid by bank transfer. Stripe (card) tests for non-Express orders use Shipping Only orders instead: pay an EXISTING unpaid Shipping Only order with the 4242 card; don't create new orders for this (confirmed by Hammad 2026-10-15).
-- M-Pesa: skip unless the user says otherwise. Never pay with M-Pesa in rewards cases (B18 is out of scope).
+- M-Pesa only when the case itself calls for M-Pesa and a phone number is provided; without a number, skip or report BLOCKED with that reason — never guess a phone. Never M-Pesa in rewards cases unless the case explicitly requires it (B18 is out of scope).
 
 ## Local environment (laptop, set up 2026-11-04)
 - Local data is its own database: order numbers and record ids (A1148 etc.) are not the staging ones. Find or create orders each run.
@@ -78,7 +78,7 @@ CRM base https://staging5.rolustech.com:4220/index.php
   setting. Earning also needs Savo Rewards enabled on the CRM contact (`sav_rewards_enabled`); check it in E0.
 - Earning needs the order FULLY paid: a linked payment and a balance of 0 or less. A Paid payment that leaves a
   balance earns nothing, and an unpaid order earns nothing. Any case that earns rewards must (1) pay the whole
-  balance (4242 card on staging/local), (2) confirm the payment is recorded and the balance is 0 (portal and CRM)
+  balance (4242 card on staging/preprod/local), (2) confirm the payment is recorded and the balance is 0 (portal and CRM)
   and only then (3) set Order Delivered. If the payment did not go through, do not move
   the status: the case is BLOCKED ("payment not recorded"), not FAIL. A wallet that stays empty after Order Delivered
   on an unpaid order is expected, not a bug.
@@ -107,7 +107,7 @@ CRM base https://staging5.rolustech.com:4220/index.php
   Current must match CRM W1.
 - CRM contact for E0/E1 (every env): the contact for the portal login/email chosen at run start. Look it up by
   that email or by the orders that login owns — never by a fixed name from KB (any environment).
-- Payments for earn: Stripe test card 4242 only. Never M-Pesa.
+- Payments for earn: Stripe test card 4242 only (staging/preprod/local). Never pay on production. M-Pesa only when the case calls for it with a phone; never guess.
 - Admin Savo Rewards earn %: change only with approval; record the original; restore and re-read after the case.
 - Admin pages (Repair, Savo Rewards): open from Administration index. A typed module URL gives an XSRF error.
 - After a deploy on staging: Admin → Repair → Quick Repair and Rebuild, clear browser cache, hard-reload each
@@ -175,11 +175,11 @@ rewards, cap(s) = R% x unpaid shipping s.
 **R1 Prepare a shipping-only order (A1142):** CRM: open the client's shipping-only order (AOS_Invoices) -> open its parcel, set Received, Save -> move status one step at a time, saving each: Shipped to Warehouse, On Warehouse floor, Ready to Ship, Shipped, Invoiced & Shipped. Portal: open `/shipping-only/invoice/<CRM record id>` directly (read the id from the CRM URL `record=` in the same run; never reuse an old id; "View Invoice" is not needed), wait ~4 s, check the balance, the Pay By Card button and rewards "up to" (= 10% of unpaid shipping; A1142: $44.00, up to $3.50).
 **R2 Buy & Ship (B1465):** AOS_Quotes record; the rewards box shows only at Awaiting Payment or Shipping Fee Invoiced. In USD the only option is Pay to Bank Account; there is no currency switch, so KES/M-Pesa cases are BLOCKED.
 **R3 Apply/remove rewards (portal):** type the amount, click Apply, wait 3-5 s before reading. Remove with the X, then wait again. An amount over the cap is rejected with a message that disappears after a few seconds (read it right away).
-**R4 Stripe (staging only):** Pay By Card -> `/shipping-only/stripe/<id>?appliedRewards=N` -> click the second "Pay by Card" -> on Stripe choose USD -> card 4242 4242 4242 4242, expiry 12/34, CVC 123, cardholder name (required). For B6, leave Stripe without paying and check the wallet did not drop.
+**R4 Stripe (staging/preprod/local):** Pay By Card -> `/shipping-only/stripe/<id>?appliedRewards=N` -> click the second "Pay by Card" -> on Stripe choose USD -> card 4242 4242 4242 4242, expiry 12/34, CVC 123, cardholder name (required). For B6, leave Stripe without paying and check the wallet did not drop.
 **R5 Wallet check:** portal wallet balance; CRM Contacts > <client> -> Total Rewards, Current Rewards, Rewards Used (wait ~10 s, reload if empty). Redemptions are in the order's Rewards Redeemed subpanel.
 - In the CRM, an empty Rewards Redeemed subpanel or wallet total right after a change means it has not loaded yet: reload and read again before recording it.
 **R6 Admin redemption:** CRM order -> Rewards Redeemed subpanel -> Create -> Redeemed Rewards <= Applicable Rewards -> Save. On A1142 this returned HTTP 500: after two failures take a screenshot and record FAIL.
-**R7 Earn rewards (staging only):** pay an order (R4) -> CRM: set it to Order Delivered (earn = 5% of shipping after rewards). To earn faster raise the earn % under Administration > Rewards panel, then restore 5% earn / 10% redeem.
+**R7 Earn rewards (staging/preprod/local):** pay an order (R4) -> CRM: set it to Order Delivered (earn = 5% of shipping after rewards). To earn faster raise the earn % under Administration > Rewards panel, then restore 5% earn / 10% redeem.
 - Not verified: creating a brand-new order of either type. Explore it from the page and propose a recipe.
 
 ## UI recipes

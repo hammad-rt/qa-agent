@@ -578,6 +578,12 @@ numbered_rules:
   2: "Redemption cap is at most 10% of unpaid shipping (not order total)."
   14: "Payments for earn: Stripe test card 4242 only (staging/preprod/local). M-Pesa only when the case calls for it with a phone; never guess."
 
+# Product-specific discovery submit labels (core already blocks save/submit/pay/request quote).
+# Do not list Create / Apply / Search — discovery must open forms and use filters.
+discovery_submit_labels:
+  - request a purchase quote
+  - request a quote
+
 # Deterministic (no-LLM) record lookups for CUSTOMER / data-plan find and wallet field reads.
 lookups:
   platform: suitecrm7

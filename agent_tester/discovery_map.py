@@ -472,6 +472,7 @@ class DiscoveryMapStore:
             self.db.commit()
             return self.get_by_id(existing["id"])  # type: ignore[return-value]
         verified_at = (last_success_at or ts) if status == "verified" else None
+        success_at = verified_at  # stamp pack/verified imports so the 14-day reuse window applies
         sc = int(success_count if success_count is not None else (1 if status == "verified" else 0))
         cur = self.db.execute(
             """INSERT INTO discovery_maps(
@@ -481,8 +482,7 @@ class DiscoveryMapStore:
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (scope, area_s, app, scrub_env_details(item)[:200], ik, env_fingerprint,
              platform, platform_version, route, json.dumps(labels), deploy_marker or None,
-             status, source, verified_at,
-             last_success_at if status == "verified" else (verified_at if status == "verified" else None),
+             status, source, verified_at, success_at,
              sc, ts, ts),
         )
         self.db.commit()
@@ -666,7 +666,8 @@ def is_reusable(row: dict, *, force: bool = False, change_text: str = "",
         return "discover"
     if status == "verified" and int(row.get("success_count") or 0) >= 1:
         age = age_days(row.get("last_success_at") or row.get("verified_at"))
-        if age is None or age <= reuse_max_days():
+        # No success stamp → not reusable forever; keep the DEFAULT_REUSE_MAX_DAYS window.
+        if age is not None and age <= reuse_max_days():
             return "reuse"
         return "discover"
     if status in ("proposed", "partial"):
@@ -891,6 +892,8 @@ def backfill_from_learned(
                 platform_version=platform_version,
                 status="verified",
                 source="pack",
+                last_success_at=_now(),
+                success_count=1,
             )
             written.append(row)
         except EnvDetailError as e:

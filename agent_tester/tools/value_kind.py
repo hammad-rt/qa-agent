@@ -20,19 +20,53 @@ _REDACTION_TOKEN = re.compile(
     r"|\[(?:phone|email|token|card[^\]]*)\]",
     re.I,
 )
-# SuiteCRM / Sugar record ids are UUID-shaped (optional dashes).
-_CRM_UUID = re.compile(
+# UUID shape used when a platform.yaml declares ``id_format: uuid``.
+_UUID = re.compile(
     r"^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$"
 )
-_CRM_PLATFORMS = frozenset({"suitecrm7", "suitecrm", "suitecrm8", "sugar", "sugarcrm"})
 _EMAIL = re.compile(r"^[\w.+-]+@[\w.-]+\.\w{2,}$")
-_UUID = re.compile(r"^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$")
-_HEX_ID = re.compile(r"^[0-9a-fA-F]{8,36}$")
 _ORDER = re.compile(r"^[A-Za-z]{0,4}-?[A-Za-z]?\d[\dA-Za-z-]{1,20}$")  # A1234 / INV-42 / SO-1001
 _MONEY = re.compile(r"(?i)^(?:USD|KES|EUR|GBP|\$|£)?\s*-?\d[\d,]*(?:\.\d+)?\s*(?:USD|KES|EUR|GBP|\$)?$")
 _STATUS = re.compile(r"^[A-Za-z][A-Za-z0-9 &/_-]{1,80}$")
 _TOKENISH = re.compile(r"(?i)^(ORDER-[A-Z0-9_-]+|CUSTOMER|WALLET|\{[A-Za-z_]+\})")
 _PLACEHOLDER_NAME = re.compile(r"(?i)\b(?:ORDER-[A-Z][A-Z0-9_-]*|CUSTOMER|Wallet)\b|\{[A-Za-z_]+\}")
+
+# Cache of platform.yaml record-id rules (id_format / id_param). Empty = no rule.
+_PLATFORM_ID_RULES: dict[str, dict[str, str]] = {}
+
+
+def load_platform_id_rule(platform: str | None, *, platforms_dir=None) -> dict[str, str]:
+    """Read optional ``id_format`` / ``id_param`` from packs/_platforms/<id>/platform.yaml.
+
+    Core stays app-agnostic: with no platform or no rule, record ids are any non-empty string.
+    """
+    plat = (platform or "").strip().lower()
+    if not plat:
+        return {}
+    if plat in _PLATFORM_ID_RULES:
+        return _PLATFORM_ID_RULES[plat]
+    try:
+        from ..config import ROOT
+        from pathlib import Path
+        root = Path(platforms_dir) if platforms_dir else (ROOT / "packs" / "_platforms")
+        yml = root / plat / "platform.yaml"
+        rule: dict[str, str] = {}
+        if yml.is_file():
+            import yaml
+            cfg = yaml.safe_load(yml.read_text()) or {}
+            # Nested ``record_id: {format, param}`` or flat ``id_format`` / ``id_param``.
+            nested = cfg.get("record_id") if isinstance(cfg.get("record_id"), dict) else {}
+            fmt = str(nested.get("format") or cfg.get("id_format") or "").strip().lower()
+            param = str(nested.get("param") or cfg.get("id_param") or "").strip()
+            if fmt:
+                rule["format"] = fmt
+            if param:
+                rule["param"] = param
+        _PLATFORM_ID_RULES[plat] = rule
+        return rule
+    except Exception:  # noqa: BLE001
+        _PLATFORM_ID_RULES[plat] = {}
+        return {}
 
 
 def infer_kind(name: str, declared: str | None = None) -> str:
@@ -121,11 +155,12 @@ def looks_like_placeholder_literal(raw: Any, *, name: str = "", tokens: set[str]
     return False
 
 
-def record_id_from_url(text: str) -> str | None:
-    """Parse the ``record=`` query param from a URL or raw_text that contains one."""
+def record_id_from_url(text: str, *, param: str = "record") -> str | None:
+    """Parse the platform id query param (default ``record=``) from a URL or raw text."""
     if not text:
         return None
-    m = re.search(r"(?:[?&#]|^|[^\w])record=([0-9a-fA-F-]{8,}|\d{3,})", str(text), re.I)
+    key = re.escape((param or "record").strip() or "record")
+    m = re.search(rf"(?:[?&#]|^|[^\w]){key}=([0-9a-fA-F-]{{8,}}|\d{{3,}}|[^\s&#\"']+)", str(text), re.I)
     return m.group(1) if m else None
 
 
@@ -138,21 +173,26 @@ def validate_value(name: str, raw: Any, *, kind: str | None = None,
 
     ``not_found=True`` means the model signalled absence (none/not found) — never store it,
     but callers (find prep) may treat the turn as not_found.
-    For URL-sourced record ids, prefer the ``record=`` query value over the whole string.
-    SuiteCRM/Sugar platforms require a UUID-shaped id (reject bare phone-looking digits).
+    For URL-sourced record ids, prefer the platform ``id_param`` (default ``record=``) value.
+    Format rules come from packs/_platforms/*/platform.yaml (``id_format`` / ``id_param``).
+    With no platform rule, any non-empty string id is accepted.
     """
     declared = (pack_kinds or {}).get(name) if pack_kinds else None
     k = infer_kind(name, kind or declared)
     text = str(raw if raw is not None else "").strip()
-    if k == "record_id" and (source and re.search(r"(?i)url|record", source) or "record=" in text.lower()):
-        parsed = record_id_from_url(text)
+    id_rule = load_platform_id_rule(platform) if k == "record_id" else {}
+    id_param = id_rule.get("param") or "record"
+    urlish = bool(source and re.search(r"(?i)url|record", source)) or (f"{id_param}=" in text.lower())
+    if k == "record_id" and urlish:
+        parsed = record_id_from_url(text, param=id_param)
         if parsed:
             text = parsed
-        elif source and re.search(r"(?i)url|record", source) and "record=" not in text.lower():
-            # Claimed URL source but no record= — refuse phone-looking leftovers / markers.
-            if has_redaction_token(text) or not (_UUID.match(text) or _HEX_ID.match(text) or _CRM_UUID.match(text)):
+        elif source and re.search(r"(?i)url|record", source) and f"{id_param}=" not in text.lower():
+            # Claimed URL source but no id param — refuse redaction leftovers; otherwise keep text
+            # and let the platform format rule (or non-empty default) decide.
+            if has_redaction_token(text):
                 return {"ok": False, "value": None,
-                        "reason": f"{name}: URL record id must come from the record= query param "
+                        "reason": f"{name}: URL record id must come from the {id_param}= query param "
                                   f"(got {text!r})",
                         "not_found": False, "kind": k}
     if has_redaction_token(text):
@@ -175,17 +215,17 @@ def validate_value(name: str, raw: Any, *, kind: str | None = None,
             return {"ok": False, "value": None, "reason": f"{name} must be an email address",
                     "not_found": False, "kind": k}
     elif k == "record_id":
-        plat = (platform or "").strip().lower()
-        if plat in _CRM_PLATFORMS or plat.startswith("suite") or plat.startswith("sugar"):
-            if not _CRM_UUID.match(text):
-                return {"ok": False, "value": None,
-                        "reason": f"{name} must be a UUID record id for {plat or 'CRM'} "
-                                  f"(got {text!r}); open the contact URL and copy record=",
-                        "not_found": False, "kind": k}
-        elif not (_UUID.match(text) or _HEX_ID.match(text) or re.fullmatch(r"\d{3,}", text)):
-            return {"ok": False, "value": None,
-                    "reason": f"{name} must be a CRM record id (uuid/hex/digits from the URL)",
+        if not text:
+            return {"ok": False, "value": None, "reason": f"{name} must be a non-empty record id",
                     "not_found": False, "kind": k}
+        fmt = (id_rule.get("format") or "").lower()
+        if fmt in ("uuid", "guid"):
+            if not _UUID.match(text):
+                return {"ok": False, "value": None,
+                        "reason": f"{name} must be a UUID record id for {platform or 'CRM'} "
+                                  f"(got {text!r}); open the contact URL and copy {id_param}=",
+                        "not_found": False, "kind": k}
+        # No platform rule (or unknown format): accept any non-empty string.
     elif k == "order_number":
         if not _ORDER.match(text) or is_negative_word(text):
             return {"ok": False, "value": None,

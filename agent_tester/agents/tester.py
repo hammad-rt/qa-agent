@@ -1211,7 +1211,9 @@ class TesterSession:
                             f"step needs test data that is missing, finish with notes 'BLOCKED: <what is missing>'."))
                     if self.brief.get("discovery"):
                         from ..discovery_guard import discovery_blocks_click
-                        why = discovery_blocks_click(None, url)
+                        pack_cfg = (getattr(self.pack, "config", None) if getattr(self, "pack", None) else None) \
+                            or ((self.state.data or {}).get("pack_cfg") if self.state else None) or {}
+                        why = discovery_blocks_click(None, url, pack_cfg=pack_cfg)
                         if why:
                             return self._deny(name, args, why)
                     self.policy.check_url(url)
@@ -1220,7 +1222,9 @@ class TesterSession:
                 # Discovery: never click admin/system action buttons (QRR, Execute, cache clear, …).
                 if self.brief.get("discovery") and name == "browser_click":
                     from ..discovery_guard import discovery_blocks_click
-                    why = discovery_blocks_click(label)
+                    pack_cfg = (getattr(self.pack, "config", None) if getattr(self, "pack", None) else None) \
+                        or ((self.state.data or {}).get("pack_cfg") if self.state else None) or {}
+                    why = discovery_blocks_click(label, pack_cfg=pack_cfg)
                     if why:
                         return self._deny(name, args, why)
                 # Case: admin action clicks only when a step asks; refused on preprod/prod unless allowlisted.

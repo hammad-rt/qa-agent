@@ -3,3 +3,6 @@ name: SuiteCRM 8
 docs:
   - https://docs.suitecrm.com
 notes: Starting assumptions only — Angular SPA routes; verify live.
+# Record ids in detail URLs: ?record=<uuid> (legacy) or SPA record routes
+id_format: uuid
+id_param: record

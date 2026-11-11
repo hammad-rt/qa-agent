@@ -100,32 +100,50 @@ def is_admin_checklist_item(text: str | None) -> bool:
     return bool(text) and bool(ADMIN_CHECKLIST_HINT.search(text or ""))
 
 
-# Submit / create / pay / request — discovery may open forms but must not submit them.
+# Real submits only (app-agnostic). Packs add product copy via ``discovery_submit_labels``.
+# Intentionally NOT matching bare create / apply / send / confirm — discovery must open Create
+# menus and use filter Apply/Search. "confirm payment" is a real submit; bare "Confirm" is not.
 DISCOVERY_SUBMIT_CLICK = re.compile(
     r"(?i)\b("
-    r"request(?:\s+a)?\s+purchase\s+quote|request\s+quote|"
-    r"save|submit|pay(?:\s+now)?|place\s+order|checkout|"
-    r"create(?:\s+(?:new\s+)?(?:order|shipment|quote|record|contact))?|"
-    r"confirm|send|finish|apply|update\s+record"
+    r"submit|save|"
+    r"pay(?:\s+now)?|place\s+order|checkout|"
+    r"confirm\s+payment|request\s+quote|"
+    r"update\s+record"
     r")\b"
 )
 
 
-def is_discovery_submit_label(label: str | None) -> bool:
-    return bool(label) and bool(DISCOVERY_SUBMIT_CLICK.search(label or ""))
+def discovery_submit_extras(pack_cfg: dict | None) -> list[str]:
+    """Product-specific submit labels from pack.yaml ``discovery_submit_labels``."""
+    raw = (pack_cfg or {}).get("discovery_submit_labels") or []
+    return [str(x).strip() for x in raw if str(x).strip()]
 
 
-def discovery_blocks_click(label: str | None, url: str | None = None) -> str | None:
+def is_discovery_submit_label(label: str | None, pack_cfg: dict | None = None) -> bool:
+    """True when the click would submit/pay/request — not open a form or run a filter."""
+    if not label:
+        return False
+    low = label.lower()
+    # Pack product copy first (e.g. Savostore "request a purchase quote").
+    for x in discovery_submit_extras(pack_cfg):
+        if x.lower() in low:
+            return True
+    return bool(DISCOVERY_SUBMIT_CLICK.search(label))
+
+
+def discovery_blocks_click(label: str | None, url: str | None = None,
+                           pack_cfg: dict | None = None) -> str | None:
     """If discovery must not click this control, return a short reason; else None.
 
     Mapping Admin / Repair menus is allowed. Clicking the action that *runs* repair /
     execute / cache clear / module loader / studio deploy / scheduler is denied.
-    Submit / create / request / pay clicks are also denied (open forms, then go back).
+    Real submits (save/pay/request quote) are denied; Create menus and filter Apply/Search are not.
+    Pack ``discovery_submit_labels`` adds product-specific submit copy.
     """
-    if is_discovery_submit_label(label):
+    if is_discovery_submit_label(label, pack_cfg):
         return (
             f"discovery is read-only: do not click '{(label or '')[:80]}' "
-            f"(submit/create/request/pay). Open the form to map labels if needed, "
+            f"(submit/pay/request). Open the form or use filters to map labels if needed, "
             f"then go back — never submit."
         )
     if is_admin_action_label(label):

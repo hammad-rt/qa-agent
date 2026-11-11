@@ -25,7 +25,8 @@ PACK = Path(__file__).resolve().parents[1] / "packs/savostore"
 
 
 def _sess(run_dir: Path, *, case_id="DISCO-admin-portal", app="portal", discovery=True):
-    pol = from_pack(load_pack(PACK), "staging", approver=lambda *a: False)
+    pack = load_pack(PACK)
+    pol = from_pack(pack, "staging", approver=lambda *a: False)
     brief = {
         "case_id": case_id,
         "title": f"discover UI for admin on {app}",
@@ -34,8 +35,10 @@ def _sess(run_dir: Path, *, case_id="DISCO-admin-portal", app="portal", discover
         "discovery": discovery,
         "read_only": discovery,
     }
-    s = TesterSession(app, brief, RunState(run_dir), pol, Evidence(run_dir),
-                      max_calls=40, max_minutes=5)
+    state = RunState(run_dir)
+    state.data["pack_cfg"] = pack.config or {}
+    s = TesterSession(app, brief, state, pol, Evidence(run_dir),
+                      max_calls=40, max_minutes=5, pack=pack)
     s.current_step = 1
     s._explored = True
     s.last_snapshot = (
@@ -88,17 +91,27 @@ class StuckGuidanceAfterGo(unittest.TestCase):
 
 
 class DiscoverySubmitBlock(unittest.TestCase):
-    """Item 2: discovery must not click submit/create/request/pay."""
+    """Discovery blocks real submits; Create / Apply / Search stay allowed for mapping."""
 
-    def test_request_quote_blocked(self):
-        self.assertTrue(is_discovery_submit_label("Request a purchase quote"))
-        why = discovery_blocks_click("Request a purchase quote")
+    def setUp(self):
+        self.pack_cfg = (load_pack(PACK).config or {})
+
+    def test_request_quote_blocked_via_pack_labels(self):
+        # Product copy lives in pack.yaml; core alone does not know "purchase quote".
+        self.assertFalse(is_discovery_submit_label("Request a purchase quote"))
+        self.assertTrue(is_discovery_submit_label("Request a purchase quote", self.pack_cfg))
+        why = discovery_blocks_click("Request a purchase quote", pack_cfg=self.pack_cfg)
         self.assertIsNotNone(why)
         self.assertIn("read-only", why.lower())
 
-    def test_save_submit_pay_create_blocked(self):
-        for lab in ("Save", "Submit", "Pay now", "Create order", "Request quote"):
+    def test_core_submits_blocked_create_apply_search_allowed(self):
+        for lab in ("Save", "Submit", "Pay now", "Place order", "Checkout",
+                    "Confirm payment", "Request quote"):
             self.assertIsNotNone(discovery_blocks_click(lab), lab)
+        # Open-form / filter controls must not be blocked (email Advanced Filter needs Apply).
+        for lab in ("Create", "Create order", "Create New Order", "Apply", "Apply filter",
+                    "Search", "Advanced Filter", "Send", "Confirm"):
+            self.assertIsNone(discovery_blocks_click(lab, pack_cfg=self.pack_cfg), lab)
 
     def test_open_form_link_allowed(self):
         self.assertIsNone(discovery_blocks_click("Orders"))
@@ -276,13 +289,17 @@ class RecordIdNotPhone(unittest.TestCase):
         self.assertFalse(bad["ok"])
         digits = validate_value("crm_contact_id", "67071257880822", source="URL record id",
                                 platform="suitecrm7")
-        self.assertFalse(digits["ok"])
+        self.assertFalse(digits["ok"], "suitecrm7 platform.yaml requires uuid")
         ok = validate_value(
             "crm_contact_id",
             "https://crm.example/index.php?module=Contacts&action=DetailView&record=c717b126-aaaa-bbbb-cccc-ddddeeeeffff",
             source="URL record id", platform="suitecrm7")
         self.assertTrue(ok["ok"])
         self.assertEqual(ok["value"], "c717b126-aaaa-bbbb-cccc-ddddeeeeffff")
+        # No platform rule → any non-empty string (e.g. numeric) is accepted.
+        numeric = validate_value("crm_contact_id", "67071257880822", platform=None)
+        self.assertTrue(numeric["ok"])
+        self.assertEqual(numeric["value"], "67071257880822")
 
     def test_record_value_keeps_string_not_float(self):
         with tempfile.TemporaryDirectory() as d:
@@ -374,7 +391,7 @@ class NoChangeClickRepeat(unittest.TestCase):
 
 
 class LoginOnlyWhenSignedOut(unittest.TestCase):
-    """Item 16: login_form checks session before navigating to /login."""
+    """Item 16 / audit: skip login only with positive session evidence."""
 
     def test_session_valid_skips_login(self):
         from agent_tester.helpers.core import login_form as LF
@@ -406,6 +423,87 @@ class LoginOnlyWhenSignedOut(unittest.TestCase):
         self.assertEqual(out["values"]["logged_in"], "yes")
         self.assertIn("skipped login_form", out["notes"].lower())
         self.assertEqual(browser.navigated, [])
+
+    def test_signed_out_public_page_must_login(self):
+        """Public home with no password field and no session evidence → navigate to login."""
+        from agent_tester.helpers.core import login_form as LF
+        import asyncio
+
+        class FakeBrowser:
+            def __init__(self):
+                self.navigated = []
+
+            async def navigate(self, url):
+                self.navigated.append(url)
+
+            async def snapshot(self):
+                return 'Page Title: Welcome\n- link "About" [ref=e1]\n- text: Public portal home'
+
+        class Ctx:
+            app = "portal"
+            state = SimpleNamespace(values={})  # no prior login this run
+            def account(self, _a):
+                # No role_markers → empty markers must NOT count as signed in.
+                return {"username": "u", "password_env": "P", "role_markers": []}
+            config = {"path": "login"}
+            def url(self, p=""):
+                return f"https://portal.example/{p or ''}"
+
+        browser = FakeBrowser()
+        ctx = Ctx()
+        with mock.patch.object(LF, "analyze", return_value={"has_password": False}):
+            already = asyncio.run(LF._session_already_valid(browser, ctx, "customer", ctx.account("c")))
+        self.assertIsNone(already, "no markers / prev_ok / logout → must not skip login")
+
+        async def fake_analyze(_b):
+            if browser.navigated:
+                return {"has_password": True,
+                        "user": {"idx": 0, "name": "user", "label": "Username"},
+                        "password": {"idx": 1, "name": "pass", "label": "Password"},
+                        "submit": {"id": "go", "label": "Log In"}, "error": ""}
+            return {"has_password": False}
+
+        with mock.patch.dict("os.environ", {"P": "longsecret1", "LOGIN_WAIT": "0"}):
+            with mock.patch.object(LF, "analyze", side_effect=fake_analyze):
+                with mock.patch.object(LF, "parse_snapshot", return_value=[]):
+                    try:
+                        asyncio.run(LF._attempt(browser, ctx, "customer", path="login"))
+                    except Exception:
+                        pass
+        self.assertTrue(browser.navigated, "signed-out public page must navigate to login path")
+        self.assertTrue(any("login" in u for u in browser.navigated))
+
+    def test_already_signed_in_skips(self):
+        """Role markers (or logout control) on a page without a password field → skip login."""
+        from agent_tester.helpers.core import login_form as LF
+        import asyncio
+
+        class FakeBrowser:
+            def __init__(self):
+                self.navigated = []
+
+            async def navigate(self, url):
+                self.navigated.append(url)
+
+            async def snapshot(self):
+                return 'Admin Dashboard\n- button "Sign out" [ref=e9]'
+
+        class Ctx:
+            app = "crm"
+            state = SimpleNamespace(values={})
+            def account(self, _a):
+                return {"username": "u", "password_env": "PW", "role_markers": ["Admin Dashboard"]}
+            config = {"path": "index.php?module=Users&action=Login"}
+            def url(self, p=""):
+                return f"https://crm.example/{p}"
+
+        browser = FakeBrowser()
+        with mock.patch.dict("os.environ", {"PW": "longsecret1"}):
+            with mock.patch.object(LF, "analyze", return_value={"has_password": False}):
+                out = asyncio.run(LF.run(browser, Ctx(), "admin"))
+        self.assertEqual(browser.navigated, [])
+        self.assertEqual(out["values"]["logged_in"], "yes")
+        self.assertIn("skipped", out["notes"].lower())
 
 
 class IdlePausesForHuman(unittest.TestCase):

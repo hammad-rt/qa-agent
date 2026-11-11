@@ -134,8 +134,20 @@ async def run(browser, ctx, account: str, path: str = ""):
         return res
 
 
+_LOGOUT_CTRL = re.compile(r"(?i)\b(log\s*out|sign\s*out|signout)\b")
+
+
 async def _session_already_valid(browser, ctx, account: str, acc: dict) -> dict | None:
-    """If the current page already shows a signed-in session, skip login (saves a turn + tokens)."""
+    """Skip login only with positive evidence of a signed-in session.
+
+    A public / signed-out home often has no password field — that alone is not enough.
+    Evidence (any one):
+    - pack ``role_markers`` all appear on the page, or
+    - this run already logged in on this app (``login_form.logged_in``) and there is still
+      no password field, or
+    - a logout / sign-out control is visible.
+    With no markers and no evidence, return None so ``_attempt`` navigates to the login path.
+    """
     try:
         form = await analyze(browser)
     except Exception:  # noqa: BLE001
@@ -147,17 +159,20 @@ async def _session_already_valid(browser, ctx, account: str, acc: dict) -> dict 
         page = await browser.snapshot() or ""
     except Exception:  # noqa: BLE001
         page = ""
-    markers = list(acc.get("role_markers") or [])
-    role_ok = (not markers) or all(m.lower() in page.lower() for m in markers)
+    markers = [m for m in (acc.get("role_markers") or []) if str(m).strip()]
+    markers_match = bool(markers) and all(str(m).lower() in page.lower() for m in markers)
     vals = getattr(getattr(ctx, "state", None), "values", None) or {}
     prev = vals.get("login_form.logged_in") or {}
-    prev_ok = isinstance(prev, dict) and prev.get("value") == "yes" and str(prev.get("source", "")).endswith(f"/{ctx.app}")
-    # No password field + (role markers match OR we already logged in this run) → stay put.
-    if role_ok or prev_ok or (not form.get("has_password") and page and "logout" in page.lower()):
+    prev_ok = (isinstance(prev, dict) and prev.get("value") == "yes"
+               and str(prev.get("source", "")).endswith(f"/{ctx.app}"))
+    has_logout = bool(page) and bool(_LOGOUT_CTRL.search(page))
+    if markers_match or (prev_ok and not form.get("has_password")) or has_logout:
+        how = ("role markers" if markers_match else
+               "prior login this run" if prev_ok else "logout control")
         return {"values": {"logged_in": "yes",
-                           "role_ok": "yes" if role_ok else "skipped (no markers)"},
+                           "role_ok": "yes" if markers_match else f"skipped ({how})"},
                 "screenshots": [],
-                "notes": f"Already logged in on {ctx.app}; skipped login_form (session valid)"}
+                "notes": f"Already logged in on {ctx.app}; skipped login_form ({how})"}
     return None
 
 

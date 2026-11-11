@@ -137,6 +137,20 @@ class DiscoveryMapStoreTests(unittest.TestCase):
         row = self.ms.get_by_id(row["id"])
         self.assertEqual(is_reusable(row, current_marker="old"), "discover")
 
+    def test_verified_without_success_date_is_not_reusable_forever(self):
+        """Audit LOW: missing last_success_at/verified_at → discover (keep 14-day window)."""
+        row = {
+            "status": "verified", "success_count": 1, "fail_count": 0,
+            "route_text": "click 'Orders' -> click 'New'",
+            "key_labels": ["Orders", "New"], "deploy_marker": "m",
+            "checklist_item": "create order",
+            "last_success_at": None, "verified_at": None,
+        }
+        self.assertEqual(is_reusable(row, current_marker="m"), "discover")
+        # Stale beyond DEFAULT_REUSE_MAX_DAYS also rediscovers.
+        row["last_success_at"] = "2020-01-01T00:00:00+00:00"
+        self.assertEqual(is_reusable(row, current_marker="m"), "discover")
+
     def test_spot_check_missing_label(self):
         ok, missing, _ = spot_check_route(
             route_text="click 'Orders'", key_labels=["Orders", "New Order"],

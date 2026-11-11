@@ -266,3 +266,27 @@ class CheckboxClickSession(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UncheckIntentTests(unittest.TestCase):
+    def _sess(self, steps):
+        from types import SimpleNamespace
+        from agent_tester.agents.tester import TesterSession
+        s = TesterSession.__new__(TesterSession)
+        s.brief = {"steps": steps}
+        s.result = SimpleNamespace(steps_done=[])
+        return s
+
+    def test_untick_step_allows_click(self):
+        s = self._sess([{"n": 1, "text": "Untick the shipment protection box"}])
+        self.assertTrue(s._steps_want_uncheck())
+
+    def test_normal_step_blocks(self):
+        s = self._sess([{"n": 1, "text": "Tick the agreement box and click Continue"}])
+        self.assertFalse(s._steps_want_uncheck())
+
+    def test_done_step_ignored(self):
+        from types import SimpleNamespace
+        s = self._sess([{"n": 1, "text": "Uncheck the box"}, {"n": 2, "text": "Click Save"}])
+        s.result = SimpleNamespace(steps_done=[1])
+        self.assertFalse(s._steps_want_uncheck())

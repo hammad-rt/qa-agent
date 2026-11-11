@@ -2083,6 +2083,8 @@ class TesterSession:
         ref = str((args or {}).get("target") or (args or {}).get("ref") or "").removeprefix("ref=").strip()
         if toggle_is_checked(page, label=label, ref=ref) is not True:
             return None
+        if self._steps_want_uncheck():
+            return None  # the case asks to untick/turn off something: allow the click
         hint = toggle_state_hint(page, label=label, ref=ref, already=True)
         if not hint:
             return None
@@ -2090,6 +2092,15 @@ class TesterSession:
                               args=_safe_args(args, tool="browser_click"),
                               plan_step=self.current_step, outcome="already_checked")
         return {"error": hint}
+
+    def _steps_want_uncheck(self) -> bool:
+        """True when an unfinished step asks to untick / deselect / turn off a control."""
+        brief = getattr(self, "brief", None) or {}
+        result = getattr(self, "result", None)
+        done = set(getattr(result, "steps_done", None) or [])
+        texts = [str(st.get("text") or "") for st in (brief.get("steps") or [])
+                 if isinstance(st, dict) and st.get("n") not in done]
+        return bool(_UNCHECK_INTENT.search(" ".join(texts)))
 
     def _control_disabled(self, label: str, snapshot: str | None = None) -> bool:
         snap = snapshot if snapshot is not None else (
@@ -2453,6 +2464,9 @@ from ..page_state import (DEFAULT_MAX_PAGE_CHARS, UNCHANGED, append_page_note,
                           result_already_has_page, reveal_hint, toggle_is_checked,
                           toggle_state_hint, trim_page)
 
+_UNCHECK_INTENT = re.compile(
+    r"(?i)\b(un-?tick|un-?check|de-?select|clear (the )?(box|checkbox|tick)|turn (it )?off|switch off|"
+    r"toggle (it )?off)\b")
 MAX_PAGE_CHARS = DEFAULT_MAX_PAGE_CHARS   # env TESTER_MAX_PAGE_CHARS (default 12000)
 KEEP_PAGE_READS = int(os.environ.get("TESTER_KEEP_PAGE_READS", "2"))  # last two page trees
 TESTER_MAX_TOKENS = int(os.environ.get("TESTER_MAX_TOKENS", "2048"))

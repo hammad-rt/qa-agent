@@ -13,6 +13,9 @@ class FactsPick(unittest.TestCase):
         self.assertIn("FULLY paid", out)
         self.assertIn("## Business rules", out)
         self.assertLessEqual(len(out), 9000)
+        # No environment-bound amount: the old "Production threshold: $150" line must stay gone.
+        self.assertNotIn("$150", FACTS.read_text())
+        self.assertNotIn("Production threshold:", FACTS.read_text())
 
     def test_unrelated_case_skips_rewards_detail(self):
         out = relevant(FACTS.read_text(), "Shipment Protection threshold parcel value")

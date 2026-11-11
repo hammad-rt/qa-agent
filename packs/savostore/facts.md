@@ -59,7 +59,7 @@ CRM base https://staging5.rolustech.com:4220/index.php
 - Redemption cap: rewards cover at most 10% of the shipping price, not the order total.
 - Adding a parcel to an already-paid order: the rewards limit is based only on the new unpaid shipping (confirmed intended by the user; for example a $400 parcel gives a $40 limit on order A1158).
 - A rewards balance of at least $100 or 50,000 KES is needed for the redemption cases.
-- Mandatory Shipment Protection (#180966) applies above a threshold set in the CRM. Production threshold: $150 (as of 30 Sep). Test at the threshold and just above it (150 and 151).
+- Mandatory Shipment Protection (#180966) applies above a threshold set in the CRM (Admin > Shipment Protection, labelled "Mandatory Shipment Protection Threshold (USD)"). The amount differs per environment — read it on that screen for this run; do not hard-code or assume a figure. Test at the current threshold and just above it.
 
 - Test data placeholders in cases (ORDER-MULTI, ORDER-EARN, ORDER-KES...) mean the order prepared for the case: `test_order` (number) and `test_order_record` (CRM id) in values_so_far. On the portal open its invoice directly at `<portal URL>/shipping-only/invoice/<test_order_record>`; there is no `/payment/<number>` page (it is a 404). Buy & Ship: `test_quote`.
 - The wallet invariant (W = L - U, W >= 0, U <= L) is computed by code and given to the judge; a negative wallet with U > L is a FAIL even when W = L - U holds.

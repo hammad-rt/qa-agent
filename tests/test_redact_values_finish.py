@@ -1,6 +1,7 @@
 """Secret scrubbing, value-kind validation, finish sanity, find→create budget."""
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -69,6 +70,42 @@ class RedactSecrets(unittest.TestCase):
     def test_scrub_call_sites_documented(self):
         self.assertIn("run_state.save", SCRUB_CALL_SITES)
         self.assertIn("progress._write", SCRUB_CALL_SITES)
+        self.assertIn("tool args via mask_tool_args", " ".join(SCRUB_CALL_SITES))
+
+    def test_short_password_in_password_field_masked_in_tool_args(self):
+        """Short secrets typed into a password field never appear in logged args/state."""
+        from agent_tester.redact import mask_tool_args
+        from agent_tester.agents.tester import _safe_args
+        env = {"APP_PASSWORD": "ab12"}  # short — global scrub must NOT blank "ab12" everywhere
+        self.assertTrue(is_placeholder_secret("ab12"))
+        # Page note / ordinary text keeps the ordinary word.
+        self.assertEqual(scrub_secrets("step ab12 passed", env), "step ab12 passed")
+        # Password field / _secret tool args mask even short values.
+        logged = mask_tool_args(
+            {"element": "Password", "target": "e1", "text": "ab12", "type": "password"}, env)
+        self.assertEqual(logged["text"], "[masked]")
+        self.assertNotIn("ab12", json.dumps(logged))
+        safe = _safe_args({"element": "password input", "text": "ab12", "_secret": True})
+        self.assertEqual(safe.get("text"), "[masked]")
+        # login_form-style fill
+        form = mask_tool_args({
+            "fields": [{"name": "Password", "type": "password", "value": "ab12"},
+                       {"name": "Username", "type": "text", "value": "admin"}],
+        }, env)
+        self.assertEqual(form["fields"][0]["value"], "[masked]")
+        self.assertEqual(form["fields"][1]["value"], "admin")
+
+    def test_short_secret_env_value_masked_only_when_passed_to_tool(self):
+        from agent_tester.redact import mask_tool_args
+        env = {"X_TOKEN": "zz9"}  # short
+        # Global scrub leaves ordinary text alone (80e1321).
+        self.assertEqual(scrub_secrets("code zz9 ok", env), "code zz9 ok")
+        # Same value as a tool arg matching the secret env is masked in context.
+        logged = mask_tool_args({"element": "API token", "text": "zz9"}, env)
+        self.assertEqual(logged["text"], "[masked]")
+        # Unrelated field with a different ordinary number is untouched.
+        other = mask_tool_args({"element": "Quantity", "text": "42"}, env)
+        self.assertEqual(other["text"], "42")
 
 
 class ValueKind(unittest.TestCase):

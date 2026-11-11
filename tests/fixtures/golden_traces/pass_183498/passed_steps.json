@@ -1,0 +1,23 @@
+{
+  "run_id": "183498-REDACTED-PASS",
+  "note": "Synthetic redacted shape of a green run's passed steps for backfill / no-loop assertions. Replace with redacted laptop extract when available.",
+  "env": "preprod",
+  "cases": [
+    {
+      "id": "TC0",
+      "title": "Quick Repair and Rebuild",
+      "verdict": "PASS",
+      "apps": ["crm"],
+      "route_labels": ["Administrator", "Repair", "Quick Repair and Rebuild"]
+    },
+    {
+      "id": "C1",
+      "title": "Portal and CRM wallet parity",
+      "verdict": "PASS",
+      "apps": ["portal", "crm"],
+      "route_labels": ["Home", "Rewards", "Contacts"]
+    }
+  ],
+  "discovery_writes": false,
+  "page_url_examples": ["https://crm.example/index.php", "https://portal.example/rewards"]
+}

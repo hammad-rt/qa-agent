@@ -1,28 +1,36 @@
 # Agent guide (qa-agent)
 
-**Stack for decisions:** always-on Cursor rules `stack`, `qa-agent-core`, `live-run-gaps`, `root-cause-first`, plus skill [`qa-stack`](.cursor/skills/qa-stack/SKILL.md). Detailed prose: [`docs/stack/`](docs/stack/), status/gaps: [`docs/HANDOVER.md`](docs/HANDOVER.md).
+**Before any code change / PR:** run skill [`pr-gate`](.cursor/skills/pr-gate/SKILL.md) (step one). It runs the regression / env-leak / UI subagents, both-mode unit tests, and the Regression audit PR body. Leave PRs unmerged for laptop testing. No smoke/screenshots unless asked.
 
-**Prompt rules (`agent_tester/agents/prompts.py`):** add a rule as a whole new `- ` line after a complete one, never inside another rule; continuation lines are indented two spaces. `tests/test_prompt_lint.py` fails on spliced, orphaned or duplicate rules.
+**Always-on rules:** `preserve-behaviour`, `protected-behaviours`, `graphify`, `stack`, `qa-agent-core`, `live-run-gaps`, `root-cause-first`, plus `agent-tester-python` / `packs` when those trees change.
 
-**Web console work:** follow skill [`web-ui-ux`](.cursor/skills/web-ui-ux/SKILL.md) (no jumping on live updates, ASK prompts, headless check) and use [`ui-ux-pro-max`](.cursor/skills/ui-ux-pro-max/SKILL.md) for visual and UX decisions (tokens, contrast, focus, icons); search it with `python3 .cursor/skills/ui-ux-pro-max/scripts/search.py "<query>" --domain ux`.
+**Code navigation:** query the local graph before grep. Prefer `graphify query` / `graphify explain` / `graphify path` (skill [`.agents/skills/graphify`](.agents/skills/graphify/SKILL.md); rule `graphify`). Rebuild with `graphify update .` after structural edits. Fall back to grep only for literal strings the graph cannot answer.
+
+**Stack for decisions:** skill [`qa-stack`](.cursor/skills/qa-stack/SKILL.md). Prose: [`docs/stack/`](docs/stack/), status: [`docs/HANDOVER.md`](docs/HANDOVER.md).
+
+**Prompt rules (`agent_tester/agents/prompts.py`):** add a rule as a whole new `- ` line after a complete one; indented continuations only. `tests/test_prompt_lint.py` enforces this.
+
+**Web console:** [`web-ui-ux`](.cursor/skills/web-ui-ux/SKILL.md) + [`ui-ux-pro-max`](.cursor/skills/ui-ux-pro-max/SKILL.md). Polling must not steal focus or wipe typed text.
 
 | Need | Open |
 |---|---|
+| **Open / update a PR** | skill **`pr-gate`** first |
+| Regression audit of a branch | `.cursor/agents/regression-auditor.md` |
+| Env-bound identity / secrets / fixtures | `.cursor/agents/env-leak-checker.md` |
+| Web tabs / guidance / focus | `.cursor/agents/ui-invariants-checker.md` |
+| HANDOVER gaps / readiness | `.cursor/agents/auditor.md` (also points at the three above) |
 | Choose ADK vs fixed code vs helper vs pack | rule `stack`, skill `qa-stack` |
 | Edit `agent_tester/**/*.py` | rule `agent-tester-python` |
 | Edit `packs/**` | rule `packs` |
 | Run / resume / report | skill `run-qa-test` |
-| New project | skill `onboard-pack` |
-| New helper | skill `write-helper` |
-| Failed live run | skill `debug-live-run` |
-| Browser / login / CAPTCHA session bug | skill `debug-browser-session` |
-| Any bug fix | rule `root-cause-first` (evidence before edits) |
-| Audit gaps / code readiness | subagent `.cursor/agents/auditor.md` |
+| New project / helper | `onboard-pack` / `write-helper` |
+| Failed live run / browser session | `debug-live-run` / `debug-browser-session` |
+| Any bug fix | rule `root-cause-first` |
+| Locked behaviours | rule `protected-behaviours`, `tests/test_protected_behaviours.py` |
+| Find code / architecture | `graphify query` / `explain` / `path` (before grep) |
 | Labels / workflow | `core/core-testing-spec.md` |
 
-Do not invent features ahead of HANDOVER §9. Secrets only via masked prompt → `.env`.
-
-**Knowledge layers + stuck ladder:** domain (`domain:crm`/`domain:erp`) → platform (`packs/_platforms/<id>`, only when detected) → project (always wins). Detection stores `platform` / `platform_version` on the discovery fingerprint, not as facts. When stuck, run memory → code → platform docs → web → explore → ask_user (`docs/stack/redmine-memory.md`). Core stays app-agnostic; no project names in core seeds.
+Do not invent features ahead of HANDOVER §9. Secrets only via masked prompt → `.env`. Core stays app-agnostic; no project names in core seeds. No env-bound identity in facts, memory, discovery_maps, learned.md, settings, or golden-trace fixtures.
 
 ## Learned User Preferences
 

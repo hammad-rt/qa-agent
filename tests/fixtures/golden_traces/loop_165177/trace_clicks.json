@@ -1,0 +1,22 @@
+{
+  "run_id": "165177-REDACTED-LOOP",
+  "note": "Synthetic redacted shape of the portal discovery loop (Request a purchase quote ×8). Replace with redacted laptop extract when available.",
+  "app": "portal",
+  "case_id": "DISCO-admin-portal",
+  "clicks": [
+    {"element": "Request a purchase quote", "target": "e67"},
+    {"element": "Request a purchase quote", "target": "e67"},
+    {"element": "Request a purchase quote", "target": "e67"},
+    {"element": "Request a purchase quote", "target": "e67"},
+    {"element": "Request a purchase quote", "target": "e67"},
+    {"element": "Request a purchase quote", "target": "e67"},
+    {"element": "Request a purchase quote", "target": "e67"},
+    {"element": "Request a purchase quote", "target": "e67"}
+  ],
+  "stuck_at_attempt": 3,
+  "guidance_after_stuck": "Try a different control or route to the same goal",
+  "continue_token": "go",
+  "forbidden_after_go": {"element": "Request a purchase quote", "target": "e67"},
+  "page_url": "https://portal.example/buy-and-ship",
+  "page_title": "Buy & Ship"
+}

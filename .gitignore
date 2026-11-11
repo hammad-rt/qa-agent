@@ -18,3 +18,6 @@ agent_error.log
 models/
 .playwright-mcp/
 logs/
+# Rebuilt on install via `graphify update .` — do not commit.
+graphify-out/
+

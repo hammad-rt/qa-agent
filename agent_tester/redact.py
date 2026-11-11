@@ -175,4 +175,98 @@ SCRUB_CALL_SITES = (
     "progress._write",
     "ask_user/stuck_ask answers",
     "report builder (via state)",
+    "tool args via mask_tool_args (_safe_args)",
 )
+
+_PASSWORD_HINT = re.compile(r"(?i)password|passwd|pwd|secret|api[_ -]?key|one.?time|otp|passcode")
+
+
+def _field_looks_secret(args: dict, key: str = "") -> bool:
+    """True when this arg is a password/secret field by context (not by value length)."""
+    if args.get("_secret") is True:
+        return True
+    blob = " ".join(str(args.get(k) or "") for k in ("element", "name", "label", "type", "role"))
+    if _PASSWORD_HINT.search(blob):
+        return True
+    if str(args.get("type") or "").lower() == "password":
+        return True
+    if key.lower() in ("password", "passwd", "pwd", "secret", "token", "api_key"):
+        return True
+    return False
+
+
+def mask_tool_args(args: dict | None, env: dict | None = None) -> dict:
+    """Mask secrets in tool-call args for the action log / traces (context-based).
+
+    Masks:
+    - ``text`` / ``value`` typed into a password or secret field (``type=password``,
+      element/name hints, or ``_secret=True`` — as ``login_form`` sets).
+    - ``fill_form`` field values that are password-typed or secret-hinted.
+    - Any arg value that equals a secret env var **at the point it is passed to a tool**,
+      including short secrets (global ``scrub_secrets`` still skips short values).
+
+    Does **not** change length-gated global redaction: ordinary notes/page text that
+    happen to equal a short env secret are left alone by ``scrub_secrets``.
+    """
+    import os
+    args = dict(args or {})
+    env = env if env is not None else os.environ
+    # Exact secret-env values (including short ones) — only for this tool-arg context.
+    secret_vals = []
+    for _k, v, _ok in iter_secret_env(env):
+        if v and str(v).strip():
+            secret_vals.append(str(v))
+    secret_vals.sort(key=len, reverse=True)
+
+    def _mask_if_secret_value(val):
+        if not isinstance(val, str) or not val:
+            return val
+        for s in secret_vals:
+            if val == s:
+                return "[masked]"
+        return val
+
+    out: dict = {}
+    for k, v in args.items():
+        if k == "_secret":
+            continue  # never persist the marker
+        if k == "fields" and isinstance(v, list):
+            fields = []
+            for f in v:
+                if not isinstance(f, dict):
+                    fields.append(f)
+                    continue
+                ff = dict(f)
+                if _field_looks_secret(ff) and isinstance(ff.get("value"), str) and ff["value"]:
+                    ff["value"] = "[masked]"
+                else:
+                    ff["value"] = _mask_if_secret_value(ff.get("value"))
+                ff.pop("_secret", None)
+                fields.append(ff)
+            out[k] = fields
+            continue
+        if k in ("text", "value", "password") and isinstance(v, str) and v:
+            if _field_looks_secret(args, k):
+                out[k] = "[masked]"
+            else:
+                out[k] = _mask_if_secret_value(v)
+            continue
+        if isinstance(v, str):
+            out[k] = _mask_if_secret_value(v)
+        else:
+            out[k] = v
+    return out
+
+
+def mask_tool_result(result, *, secret: bool = False, env: dict | None = None):
+    """Mask tool results that echo a just-typed secret (or equal a secret env value in context)."""
+    import os
+    env = env if env is not None else os.environ
+    if secret and isinstance(result, str) and result:
+        return "[masked]"
+    if isinstance(result, dict):
+        return mask_tool_args(result, env)
+    if isinstance(result, str):
+        # Only replace exact secret-env equals when caller marked the call secret.
+        return result
+    return result

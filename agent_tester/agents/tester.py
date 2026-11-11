@@ -21,7 +21,7 @@ from ..models import StepResult
 from ..redact import redact
 from ..run_state import RunState
 from ..tools import values as V
-from ..tools.policy import Policy, PolicyViolation
+from ..tools.policy import Policy, PolicyViolation, label_matches_action_type
 from ..tools.screenshots import Evidence
 from . import prompts
 from .llm import model, run_agent
@@ -102,6 +102,7 @@ STUCK_MAX_ATTEMPTS = max(1, int(os.environ.get("STUCK_MAX_ATTEMPTS", "3")))
 LOOP_WARN = max(1, STUCK_MAX_ATTEMPTS - 1)   # e.g. 2 when max is 3
 LOOP_STOP = STUCK_MAX_ATTEMPTS               # e.g. 3: ladder, not a longer silent retry
 IDLE_READS = 8                       # page reads in a row with nothing done in between: stalled, not working
+UNCHANGED_SNAP_LOOP = 3              # identical short-circuited snapshots before it counts as a loop
 NAV_THRASH_MAX = 3                   # consecutive navigates with no intervening snapshot/click → stall
 EXPLORE_ACTIONS = 15                 # extra actions for one exploration of a screen when a step is stuck
 NO_CHANGE_CLICK_MSG = (
@@ -930,7 +931,13 @@ class TesterSession:
             browser = McpBrowser(adk_caller(s.toolset, tool_context), evidence_dir=shots)
             ctx = HelperContext(pack=s.pack, env=s.env, app=s.app, case_id=s.case_id, state=s.state,
                                 policy=s.policy, shot_prefix=str(shots) + "/")
+            if name == "login_form":
+                skipped = s._skip_login_if_already_in()
+                if skipped is not None:
+                    return skipped
             out = await _run(info, browser, ctx, params)
+            if name == "login_form":
+                out = s._after_login_helper(out)
             for k, v in (out.get("values") or {}).items():
                 s.result.values[f"{name}.{k}"] = v
             for x in out.get("screenshots", []):
@@ -954,17 +961,29 @@ class TesterSession:
             tools += [ledger_record, record_original, record_restored]
         return tools
 
-    def _step_action_type(self) -> str | None:
-        """action_type of the current plan step (or the next unfinished step that has one)."""
+    def _step_action_type(self, label: str | None = None) -> str | None:
+        """action_type of the current plan step, if this control is that action.
+
+        A later unfinished step's action_type is used only when ``label`` matches
+        that action (e.g. an Execute button for execute_repair_sql). A click on an
+        unrelated control such as an Administrator user-menu must not inherit it.
+        """
         steps = self.brief.get("steps") or []
+        def _at(st):
+            return st.get("action_type") if isinstance(st, dict) else None
         if self.current_step is not None:
             for st in steps:
-                if st.get("n") == self.current_step and st.get("action_type"):
-                    return st["action_type"]
-        done = set(self.result.steps_done or [])
-        for st in steps:
-            if st.get("action_type") and st.get("n") not in done:
-                return st["action_type"]
+                if isinstance(st, dict) and st.get("n") == self.current_step and _at(st):
+                    at = _at(st)
+                    if label and not label_matches_action_type(at, label):
+                        return None
+                    return at
+        if label:
+            done = set(self.result.steps_done or [])
+            for st in steps:
+                at = _at(st)
+                if at and st.get("n") not in done and label_matches_action_type(at, label):
+                    return at
         return None
 
     # ---- callbacks: the code side of every tool call --------------------------------
@@ -972,16 +991,36 @@ class TesterSession:
         name = tool.name
         # Keep for stuck-ask evidence capture (sync path needs the live MCP context).
         self._tool_context = tool_context
-        # Unchanged snapshot short-circuit: do not count as a loop/idle-read step.
+        # Unchanged snapshot short-circuit: the first one is free; repeats count as a loop.
         if (name == "browser_snapshot" and getattr(self, "_page_hash", None)
                 and getattr(self, "_page_fresh", False)
                 and getattr(self, "_need_fresh_snap", False) is not True):
+            self._need_fresh_snap = False
+            self._unchanged_snaps = int(getattr(self, "_unchanged_snaps", 0) or 0) + 1
+            n_same = self._unchanged_snaps
             self.state.log_action(case_id=self.case_id, app=self.app, tool="browser_snapshot",
                                   args={"unchanged": True}, plan_step=self.current_step,
                                   outcome="unchanged")
+            page = getattr(self, "_page_state", "") or ""
+            if n_same >= UNCHANGED_SNAP_LOOP:
+                self._reads = int(getattr(self, "_reads", 0) or 0) + 1
+                self.state.log_action(case_id=self.case_id, app=self.app, tool="loop_detected",
+                                      args={"call": "browser_snapshot", "repeats": n_same},
+                                      plan_step=self.current_step, outcome="unchanged_loop")
+                self.result.loop = True
+                return {"error": (
+                    "The page is unchanged; you already have the current snapshot. "
+                    "Do not call browser_snapshot again. Use the current page and continue the step "
+                    "(or mark it done)."
+                ), "page_state": page}
             # KEEP_PAGE_READS may have stubbed earlier results; return the full last page,
             # including any opened menu items (do not cap at a short prefix).
-            return {"result": UNCHANGED, "page_state": getattr(self, "_page_state", "") or ""}
+            out = {"result": UNCHANGED, "page_state": page}
+            if n_same > 1:
+                self._reads = int(getattr(self, "_reads", 0) or 0) + 1
+                out["note"] = ("Page unchanged. Use this page_state; do not snapshot again "
+                               "unless the page changes.")
+            return out
         self.calls += 1
         self._tool_t0 = time.monotonic()
         if getattr(self, "finished", False) is True:
@@ -1068,7 +1107,9 @@ class TesterSession:
                     "browser_hover", "paste_text"):
             ref = str(args.get("target") or args.get("ref") or "").removeprefix("ref=").strip()
             snap = self.last_snapshot if isinstance(self.last_snapshot, str) else ""
-            if ref and snap and not self._ref_in_snapshot(ref, snap):
+            raw = getattr(self, "_raw_snapshot", "") or ""
+            # Fresh if the ref is in the trimmed page, the full/raw snapshot, or a recent find.
+            if ref and (snap or raw) and not self._ref_in_snapshot(ref):
                 self.state.log_action(case_id=self.case_id, app=self.app, tool=name, args=_safe_args(args),
                                       plan_step=self.current_step, outcome="stale_ref")
                 return {"error": (
@@ -1275,7 +1316,7 @@ class TesterSession:
                         f"Execute needs request_approval with action_type '{self._repair_kind}' (from check_repair_sql) first.")
                 if name not in READ_ONLY_BROWSER and name != "browser_navigate":
                     risky = self.policy.is_risky(label) or bool(args.get("submit"))
-                    action_type = self._step_action_type()
+                    action_type = self._step_action_type(label)
                     if self.policy.prod_change(name, label, args) or (self.policy.env == "prod" and risky):
                         # production: every action that may change a value asks, each time
                         how = self.policy.gate(f"{name}: {label}", f"{self.case_id} on {self.app}",
@@ -1378,6 +1419,18 @@ class TesterSession:
                 if not key:
                     continue
                 self._sig_page[key] = page_h
+            if name == "browser_click":
+                before_now = (getattr(self, "_raw_snapshot", "")
+                              or getattr(self, "_page_state", "")
+                              or (self.last_snapshot if isinstance(self.last_snapshot, str) else "")
+                              or "")
+                stored = getattr(self, "_sig_page_before", None)
+                if stored is None:
+                    self._sig_page_before = {}
+                    stored = self._sig_page_before
+                for key in (sig, intent):
+                    if key and key not in stored:
+                        stored[key] = before_now
             self._sigs[sig] = self._sigs.get(sig, 0) + 1
             if intent:
                 self._sigs[intent] = self._sigs.get(intent, 0) + 1
@@ -1497,7 +1550,11 @@ class TesterSession:
             self.last_snapshot if isinstance(self.last_snapshot, str) else "")
         label = str(args.get("element") or args.get("name") or "control").strip() or "control"
         ref = str(args.get("target") or args.get("ref") or "").removeprefix("ref=").strip()
-        hint = reveal_hint("", page or "")
+        sig = _call_sig("browser_click", args)
+        intent = _intent_sig("browser_click", args, page or "")
+        stored = getattr(self, "_sig_page_before", None) or {}
+        before = stored.get(sig) or stored.get(intent) or ""
+        hint = reveal_hint(before, page or "")
         toggle = (toggle_state_hint(page or "", label=label, ref=ref, already=True)
                   or toggle_state_hint(page or "", label=label, ref=ref))
         # At STUCK_MAX an open menu or an already-checked toggle postpones the ask.
@@ -2021,16 +2078,30 @@ class TesterSession:
                 self.result.snapshots.append(txt.name)
         args["filename"] = str(png.resolve())
 
-    def _remember_page(self, text: str) -> str:
-        """Trim, store hash, mark fresh; return trimmed text."""
-        trimmed = trim_page(text or "", MAX_PAGE_CHARS)
+    def _remember_page(self, text: str, before: str | None = None) -> str:
+        """Trim, store hash, mark fresh; return trimmed text.
+
+        Keeps the full/raw snapshot for stale-ref checks (trimmed pages can drop refs
+        that browser_find still returned). ``before`` is the pre-click page so only
+        newly revealed menus are hoisted in the trim.
+        """
+        raw = text or ""
+        self._raw_snapshot = raw
+        trimmed = trim_page(raw, MAX_PAGE_CHARS, before=before)
         h = page_hash(trimmed)
         prev = getattr(self, "_page_hash", None)
         self.last_snapshot = trimmed
         self._page_state = trimmed
         self._page_hash = h
         self._page_fresh = True
+        self._need_fresh_snap = False
+        self._unchanged_snaps = 0
         self._last_snap = time.monotonic()
+        # Drop find-refs that are no longer in the latest full snapshot.
+        if raw:
+            keep = {r for r in (getattr(self, "_find_refs", None) or set())
+                    if self._ref_token_in(r, raw)}
+            self._find_refs = keep
         # Durable for discovery spot-checks / reuse (same auto page state PR #8 maintains).
         try:
             by_app = self.state.data.setdefault("_page_state_by_app", {})
@@ -2063,13 +2134,123 @@ class TesterSession:
         except Exception:  # noqa: BLE001
             log.debug("failed to publish now_doing status", exc_info=True)
 
-    def _ref_in_snapshot(self, ref: str, snapshot: str | None = None) -> bool:
-        snap = snapshot if snapshot is not None else (
-            self.last_snapshot if isinstance(self.last_snapshot, str) else "")
+    @staticmethod
+    def _ref_token_in(ref: str, snap: str) -> bool:
         if not ref or not snap:
             return False
         ref = str(ref).removeprefix("ref=").strip()
         return f"ref={ref}]" in snap or f"ref={ref} " in snap or f"[ref={ref}]" in snap
+
+    def _ref_in_snapshot(self, ref: str, snapshot: str | None = None) -> bool:
+        """Fresh if the ref is in the given snapshot, the trimmed page, the latest raw snapshot, or a recent find."""
+        ref = str(ref or "").removeprefix("ref=").strip()
+        if not ref:
+            return False
+        if snapshot is not None:
+            return self._ref_token_in(ref, snapshot)
+        trimmed = self.last_snapshot if isinstance(self.last_snapshot, str) else ""
+        raw = getattr(self, "_raw_snapshot", "") or ""
+        if self._ref_token_in(ref, trimmed) or self._ref_token_in(ref, raw):
+            return True
+        if ref in (getattr(self, "_find_refs", None) or set()) and (not raw or self._ref_token_in(ref, raw)):
+            return True
+        return False
+
+    def _login_helper_cfg(self) -> dict:
+        info = (self.helpers or {}).get("login_form")
+        return dict(getattr(info, "config", None) or {}) if info else {}
+
+    def _current_login_step_n(self) -> int | None:
+        """Plan step number if the current/next unfinished step is a login for this app."""
+        from ..plan_checks import is_login_step, is_session_switch_step
+        if (self.brief or {}).get("discovery"):
+            return None
+        steps = (self.brief or {}).get("steps") or []
+        done = set(getattr(self.result, "steps_done", None) or [])
+        candidates = []
+        if self.current_step is not None:
+            candidates = [st for st in steps if isinstance(st, dict) and st.get("n") == self.current_step]
+        if not candidates:
+            candidates = [st for st in steps if isinstance(st, dict) and st.get("n") not in done][:1]
+        for st in candidates:
+            if not is_login_step(st.get("text") or "") or is_session_switch_step(st.get("text") or ""):
+                continue
+            app = st.get("app") or self.app
+            if app in (self.app, "", None):
+                return st.get("n")
+        return None
+
+    def _page_allows_login_skip(self) -> bool:
+        from ..helpers.core.login_form import is_login_path, page_has_password_field
+        page = getattr(self, "_raw_snapshot", "") or (
+            self.last_snapshot if isinstance(self.last_snapshot, str) else "") or (
+            getattr(self, "_page_state", "") or "")
+        if page_has_password_field(page):
+            return False
+        return not is_login_path(page, self._login_helper_cfg())
+
+    def _advance_past_done_steps(self) -> None:
+        done = set(self.result.steps_done or [])
+        if self.current_step is not None and self.current_step not in done:
+            return
+        for st in (self.brief or {}).get("steps") or []:
+            if isinstance(st, dict) and st.get("n") not in done:
+                self.current_step = st.get("n")
+                break
+        self.since_progress, self._sigs = 0, {}
+        try:
+            self._publish_now_doing()
+        except Exception:  # noqa: BLE001
+            log.debug("failed to publish now_doing after login skip", exc_info=True)
+
+    def _complete_login_step(self, reason: str) -> None:
+        n = self._current_login_step_n()
+        if n is None:
+            return
+        if n not in (self.result.steps_done or []):
+            self.result.steps_done.append(n)
+            self.state.log_action(case_id=self.case_id, app=self.app, tool="mark_step",
+                                  args={"n": n, "reason": reason}, plan_step=n)
+        if self.current_step is None or self.current_step == n:
+            self._advance_past_done_steps()
+
+    def _skip_login_if_already_in(self) -> dict | None:
+        """Auto-complete a login step when this app already signed in this run."""
+        from ..helpers.core.login_form import logged_in_this_run
+        if (self.brief or {}).get("discovery"):
+            return None
+        if self._current_login_step_n() is None:
+            return None
+        if not logged_in_this_run(type("C", (), {"state": self.state, "app": self.app})(), self.app):
+            return None
+        if not self._page_allows_login_skip():
+            return None
+        self._complete_login_step("already logged in this run; skipped login helper")
+        return {"values": {"logged_in": "yes", "role_ok": "skipped (already logged in this run)"},
+                "screenshots": [],
+                "notes": ("Already logged in on this app this run; login step marked done. "
+                          "Continue with the next step.")}
+
+    def _after_login_helper(self, out: dict) -> dict:
+        """If the helper reports already-logged-in / no form, complete the login step."""
+        out = dict(out or {})
+        vals = out.get("values") or {}
+        err = str(out.get("error") or "")
+        notes = str(out.get("notes") or "")
+        signed = str(vals.get("logged_in") or "").strip().lower() in ("yes", "true", "1")
+        no_form = ("no login form" in err.lower() or "already logged in" in err.lower()
+                   or "skip the login step" in err.lower() or "skipped login" in notes.lower())
+        if self._current_login_step_n() is None:
+            return out
+        if signed or (no_form and self._page_allows_login_skip()):
+            why = notes or err or "already logged in; login step marked done"
+            self._complete_login_step(why)
+            if err and not signed:
+                out.pop("error", None)
+                out["values"] = {**vals, "logged_in": "yes"}
+                out["notes"] = why
+                out.setdefault("screenshots", [])
+        return out
 
     def _already_checked_guidance(self, args: dict) -> dict | None:
         """Refuse a click that would uncheck a box that is already on."""
@@ -2142,6 +2323,9 @@ class TesterSession:
             else:
                 self._find_miss_need_read = False
                 self._nav_without_read = 0
+                found = set(re.findall(r"\[ref=([^\]]+)\]", _text_of(tool_response) or ""))
+                if found:
+                    self._find_refs = set(getattr(self, "_find_refs", None) or set()) | found
         if tool.name == "browser_take_screenshot":
             raw = args.get("filename") or ""
             png = Path(raw) if Path(raw).is_absolute() else self.ev.shots / Path(raw).name
@@ -2188,10 +2372,11 @@ class TesterSession:
             # so the model never needs a separate browser_snapshot turn.
             if is_state_changing(tool.name, text) and not err:
                 before_h = getattr(self, "_page_hash", None)
-                before_page = getattr(self, "_page_state", "") or ""
+                before_page = getattr(self, "_raw_snapshot", "") or getattr(self, "_page_state", "") or ""
+                self._page_before_capture = before_page
                 had_page = result_already_has_page(text)
                 if had_page:
-                    trimmed = self._remember_page(text)
+                    trimmed = self._remember_page(text, before=before_page)
                     out = merge_page_into_result(out, trimmed, keep_emails=self.keep_emails, cap=MAX_PAGE_CHARS)
                     out = self._annotate_revealed(tool, args, out, before_h, before_page, True, True)
                 else:
@@ -2283,7 +2468,7 @@ class TesterSession:
             return ""
         if not snap:
             return ""
-        return self._remember_page(snap)
+        return self._remember_page(snap, before=getattr(self, "_page_before_capture", None))
 
     def _try_capture_page(self, tool_context) -> str:
         """Sync capture when no event loop is running. Never starts a second loop."""

@@ -112,7 +112,7 @@ def _walk_open_subtrees(snapshot: str):
         i = j
 
 
-def revealed_choice_items(snapshot: str, *, limit: int = 20) -> list[str]:
+def revealed_choice_items(snapshot: str, *, limit: int | None = 20) -> list[str]:
     """Labels of items in an open menu / expanded submenu (collapsed bars yield [])."""
     out: list[str] = []
     seen: set[str] = set()
@@ -128,7 +128,7 @@ def revealed_choice_items(snapshot: str, *, limit: int = 20) -> list[str]:
                 continue
             seen.add(key)
             out.append(lab)
-            if len(out) >= limit:
+            if limit is not None and len(out) >= limit:
                 return out
     return out
 
@@ -151,16 +151,50 @@ def revealed_choice_block(snapshot: str, *, limit: int = 40) -> str:
 
 
 def reveal_hint(before: str, after: str) -> str | None:
-    """If a menu opened (new choice items), tell the model to pick one of them."""
+    """If a menu became expanded as a result of this click, tell the model to pick one item.
+
+    Never hints for a menu that was already open before the click. An empty ``before``
+    is inconclusive (the menu may have been open already), so this returns None.
+    """
+    if not (before or "").strip():
+        return None
     after_items = revealed_choice_items(after or "")
     if not after_items:
         return None
-    before_set = {x.lower() for x in revealed_choice_items(before or "")}
+    # Full set — the default 20-item cap would treat later already-open items as "new".
+    before_set = {x.lower() for x in revealed_choice_items(before or "", limit=None)}
     new_items = [x for x in after_items if x.lower() not in before_set]
-    pick = new_items or (after_items if (not before or _has_open_menu(after or "")) else [])
-    if not pick:
+    if not new_items:
         return None
-    return "the menu opened; pick one of: " + ", ".join(pick[:12])
+    return "the menu opened; pick one of: " + ", ".join(new_items[:12])
+
+
+def newly_revealed_choice_block(before: str, after: str, *, limit: int = 40) -> str:
+    """Accessibility-tree lines for menus that became expanded since ``before`` (refs kept)."""
+    if not (before or "").strip():
+        return ""
+    before_set = {x.lower() for x in revealed_choice_items(before or "", limit=None)}
+    chunks: list[str] = []
+    used = 0
+    for _depth, block in _walk_open_subtrees(after or ""):
+        if len(block) <= 1 and not _OPEN_MENU.match(block[0]):
+            continue
+        labels = []
+        for ln in block[1:] if len(block) > 1 else block:
+            if _HIDDEN.search(ln) or not _ITEMISH.search(ln):
+                continue
+            lab = _line_label(ln)
+            if lab:
+                labels.append(lab)
+        if not any(lab.lower() not in before_set for lab in labels):
+            continue
+        take = block[: max(1, limit - used)]
+        if take:
+            chunks.append("\n".join(take))
+            used += len(take)
+        if used >= limit:
+            break
+    return "\n".join(chunks)
 
 
 def overlay_hint(snapshot: str) -> str | None:
@@ -217,11 +251,15 @@ def append_page_note(tool_response, note: str):
     return {"result": str(tool_response)[:2000], "note": note}
 
 
-def trim_page(text: str, limit: int | None = None) -> str:
+def trim_page(text: str, limit: int | None = None, *, before: str | None = None) -> str:
     """Keep the main content region; drop collapsed nav/footers/hidden chrome.
 
     Always keep open menus, expanded submenu items, forms, tables, dialogs and
     alerts. Falls back to a length-capped full page.
+
+    Newly revealed menus (appeared since ``before``) are placed first so a
+    length cap cannot cut them off. An already-open, unrelated user menu is
+    not hoisted — it must not crowd out the main content.
     """
     limit = DEFAULT_MAX_PAGE_CHARS if limit is None else limit
     raw = text or ""
@@ -283,8 +321,8 @@ def trim_page(text: str, limit: int | None = None) -> str:
         if first:
             stubs.append(f"[chrome omitted: {first[:80]}]")
 
-    # Put revealed menu trees first so TESTER_MAX_PAGE_CHARS cannot cut them off.
-    revealed = revealed_choice_block(raw)
+    # Hoist only menus newly revealed by the last click, not ones already open.
+    revealed = newly_revealed_choice_block(before or "", raw) if before else ""
     parts = meta + stubs
     if revealed:
         parts.append(revealed)

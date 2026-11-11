@@ -23,6 +23,35 @@ PROD_WRITE_LABEL = re.compile(
     r"reset|restore|enable|disable|activate|deactivate|assign|convert|duplicate|upload|pay|place order|checkout|"
     r"redeem|transfer|move|mark as|change status|set status)\b")
 _PAY = re.compile(r"(?i)\bpay|stripe|card|checkout|place order")
+# Commit / run verbs used to decide whether a click is the gated action itself.
+_ACTION_COMMIT = re.compile(r"(?i)\b(save|submit|apply|confirm|update|execute|run|ok)\b")
+_ACTION_STOP = frozenset({
+    "the", "a", "an", "to", "and", "or", "of", "sql", "type", "for", "with",
+})
+
+
+def label_matches_action_type(action_type: str | None, label: str | None) -> bool:
+    """True when this control is the action the pack/step action_type is about.
+
+    A pending ``execute_repair_sql`` step must not gate a click on an 'Administrator'
+    user-menu button. An 'Execute' button (or a 'Save' on a change_settings step) should.
+    """
+    at = (action_type or "").strip().lower()
+    lab = (label or "").strip()
+    if not at or not lab:
+        return False
+    words = [w for w in re.split(r"[_\s]+", at) if w and w not in _ACTION_STOP]
+    if not words:
+        return False
+    if re.search(rf"(?i)\b{re.escape(words[0])}\b", lab):
+        return True
+    if any(w in {"change", "settings", "config", "update", "save"} for w in words) and _ACTION_COMMIT.search(lab):
+        return True
+    if words[0] in {"execute", "run", "repair"} and re.search(r"(?i)\b(execute|run)\b", lab):
+        return True
+    return False
+
+
 
 
 @dataclass

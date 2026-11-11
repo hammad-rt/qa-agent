@@ -8,8 +8,8 @@ Shape (use exactly these field names; omit fields you don't need, they have defa
    "preconditions": ["..."], "depends_on": [], "expected": "the task's expected result",
    "evidence_required": ["screenshot of ..."], "values_to_record": ["balance_before"],
    "steps": [
-     {{"text": "Log in to the web app as the customer", "app": "web", "inferred": true,
-      "inferred_reason": "the task assumes a logged-in user", "inferred_source": "facts.md"}},
+     {{"text": "Open checkout from the cart", "app": "web", "inferred": true,
+      "inferred_reason": "the task assumes the user is already at checkout", "inferred_source": "facts.md"}},
      {{"text": "Apply a 10% discount code at checkout", "app": "web", "changes_data": true, "action_type": "apply_discount"}}
    ]}}],
  "requirements": [{{"key": "env.staging.web", "kind": "url", "needed_by": ["TC1"]}},
@@ -21,8 +21,11 @@ Rules:
 - One PlannedCase per test case in the task. Keep the task's case ids (TC1, TC2...).
 - Each step has `app` = one of: {apps} (or "none"). Steps that change data set changes_data and an action_type
   from: {action_types}. Paying sets costs_money. Steps that cannot be undone set irreversible and `record`.
-- If the task leaves a step out but it is needed (login, navigation, setup), add it with inferred=true,
+- If the task leaves a step out but it is needed (navigation, setup), add it with inferred=true,
   inferred_reason and inferred_source ("facts.md", "lesson", "task comment"...). Never invent expected results.
+- Do not add inferred login or logout steps: the run logs the tester in itself. Keep an explicit
+  ticket login/logout step when the case is about logging in or out, and always keep an explicit
+  log out or a login that switches user ("log in as another client", "log in again").
 - Put irreversible steps last for a record, or use a fresh record.
 - Never make up amounts for limits, thresholds or settings. First read the current value (a step that records it,
   listed in values_to_record), then write later steps relative to it: "declared value = the recorded threshold",

@@ -148,9 +148,75 @@ class TrimPage(unittest.TestCase):
             '  - heading "Dashboard" [ref=e4]\n'
             + main
         )
-        out = trim_page(raw, limit=800)
+        closed = (
+            "Page URL: https://example.test/app\n"
+            "Page Title: Home\n"
+            '- navigation:\n'
+            '  - menuitem "Orders" [ref=f1e11]\n'
+            '- main:\n'
+            '  - heading "Dashboard" [ref=e4]\n'
+        )
+        out = trim_page(raw, limit=800, before=closed)
         self.assertIn("Export", out)
         self.assertIn("f1e20", out)
+
+    def test_already_open_user_menu_is_not_hoisted_over_main(self):
+        """An already-expanded user menu at the end must not be hoisted over main content."""
+        menu = "\n".join([f'  - menuitem "Recent {i}" [ref=u{i}]' for i in range(80)])
+        raw = (
+            "Page URL: https://example.test/admin\n"
+            "Page Title: Administration\n"
+            "- main:\n"
+            '  - heading "Administration" [ref=e4]\n'
+            '  - link "Repair" [ref=f2e267]\n'
+            '- button "Administrator" [expanded] [ref=e33]:\n'
+            + menu + "\n"
+        )
+        # Already open: do not hoist the huge menu in front of Repair.
+        out = trim_page(raw, limit=600, before=raw)
+        self.assertIn("f2e267", out)
+        self.assertIn('link "Repair"', out)
+        self.assertLess(out.find("Repair"), out.find("Recent 0") if "Recent 0" in out else len(out))
+        closed = (
+            "Page URL: https://example.test/admin\n"
+            "Page Title: Administration\n"
+            "- main:\n"
+            '  - heading "Administration" [ref=e4]\n'
+            '  - link "Repair" [ref=f2e267]\n'
+            '- button "Administrator" [ref=e33]\n'
+        )
+        # A huge newly opened menu is hoisted first so the cap cannot cut it.
+        huge = trim_page(raw, limit=600, before=closed)
+        self.assertIn("Recent 0", huge)
+        self.assertLess(huge.find("Recent 0"), huge.find("Repair") if "Repair" in huge else len(huge))
+        # Over the cap, a modest newly opened menu is hoisted in front of Repair.
+        modest_menu = "\n".join([f'  - menuitem "Recent {i}" [ref=u{i}]' for i in range(8)])
+        pad = "\n".join([f'  - listitem "Pad {i}" [ref=p{i}]' for i in range(40)])
+        modest = (
+            "Page URL: https://example.test/admin\n"
+            "Page Title: Administration\n"
+            "- main:\n"
+            '  - heading "Administration" [ref=e4]\n'
+            '  - link "Repair" [ref=f2e267]\n'
+            + pad + "\n"
+            '- button "Administrator" [expanded] [ref=e33]:\n'
+            + modest_menu + "\n"
+        )
+        self.assertGreater(len(modest), 600)
+        hoisted = trim_page(modest, limit=600, before=closed)
+        self.assertIn("Repair", hoisted)
+        self.assertIn("Recent 0", hoisted)
+        self.assertLess(hoisted.find("Recent 0"), hoisted.find("Repair"))
+
+    def test_reveal_hint_ignores_already_open_menu_and_empty_before(self):
+        opened = (
+            "Page URL: https://example.test/app\n"
+            '- menuitem "Orders" [expanded] [ref=e1]:\n'
+            '  - menu:\n'
+            '    - menuitem "Export" [ref=e2]\n'
+        )
+        self.assertIsNone(reveal_hint("", opened))
+        self.assertIsNone(reveal_hint(opened, opened))
 
 
 

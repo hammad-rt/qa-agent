@@ -972,11 +972,15 @@ class TesterSession:
         # Keep for stuck-ask evidence capture (sync path needs the live MCP context).
         self._tool_context = tool_context
         # Unchanged snapshot short-circuit: do not count as a loop/idle-read step.
-        if name == "browser_snapshot" and getattr(self, "_page_hash", None) and getattr(self, "_page_fresh", False):
+        if (name == "browser_snapshot" and getattr(self, "_page_hash", None)
+                and getattr(self, "_page_fresh", False)
+                and getattr(self, "_need_fresh_snap", False) is not True):
             self.state.log_action(case_id=self.case_id, app=self.app, tool="browser_snapshot",
                                   args={"unchanged": True}, plan_step=self.current_step,
                                   outcome="unchanged")
-            return {"result": UNCHANGED, "page_state": getattr(self, "_page_state", "")[:500]}
+            # KEEP_PAGE_READS may have stubbed earlier results; return the full last page,
+            # including any opened menu items (do not cap at a short prefix).
+            return {"result": UNCHANGED, "page_state": getattr(self, "_page_state", "") or ""}
         self.calls += 1
         self._tool_t0 = time.monotonic()
         if getattr(self, "finished", False) is True:
@@ -1424,7 +1428,15 @@ class TesterSession:
             # _start_exploring resets counters and let portal/CRM loops run for minutes.
             if cycling:
                 n = stop_at
+            if n == warn_at and name == "browser_click":
+                recovered = self._repeat_click_guidance(args, attempt=n, stop_at=stop_at, final=False)
+                if recovered is not None:
+                    return recovered
             if n >= stop_at:
+                if name == "browser_click":
+                    recovered = self._repeat_click_guidance(args, attempt=n, stop_at=stop_at, final=True)
+                    if recovered is not None:
+                        return recovered
                 asked = self._maybe_stuck_ask(
                     why=("the same actions kept repeating" if cycling else
                          f"{name} was repeated {n} times without finishing a step"),
@@ -1461,6 +1473,50 @@ class TesterSession:
             self.result.limit_hit = True
             return {"error": "Limit reached. Call finish() now with what you have, saying which step you reached."}
         return None
+
+    def _repeat_click_guidance(self, args: dict, *, attempt: int, stop_at: int,
+                               final: bool) -> dict | None:
+        """If a repeated click left an open menu, modal, or validation, tell the model once.
+
+        On the last attempt (final=True) this runs *before* the stuck ask: when the page
+        already shows a submenu or a form/message, surface that instead of asking a person.
+        Only one such recovery per control; the next identical click still stuck-asks.
+        """
+        from ..page_state import form_validation_messages, overlay_hint, reveal_hint
+        page = getattr(self, "_page_state", "") or (
+            self.last_snapshot if isinstance(self.last_snapshot, str) else "")
+        label = str(args.get("element") or args.get("name") or "control").strip() or "control"
+        hint = reveal_hint("", page or "")
+        # At STUCK_MAX only an open menu postpones the ask (pick an item).
+        # Validation/overlay already had a chance at LOOP_WARN; the 3rd repeat must ask.
+        over = None
+        if not hint and not final:
+            over = overlay_hint(page or "")
+            if not over:
+                msgs = form_validation_messages(page or "")
+                if msgs:
+                    over = "a validation or status message appeared: " + "; ".join(msgs[:6])
+        if not hint and not over:
+            return None
+        if final:
+            tried = getattr(self, "_repeat_recover_tried", None)
+            if tried is None:
+                self._repeat_recover_tried = set()
+                tried = self._repeat_recover_tried
+            key = (label.strip().lower(), str(args.get("target") or args.get("ref") or "").removeprefix("ref=").strip())
+            if key in tried:
+                return None
+            tried.add(key)
+            self.state.log_action(case_id=self.case_id, app=self.app, tool="browser_click",
+                                  args=_safe_args(args, tool="browser_click"),
+                                  plan_step=self.current_step, outcome="repeat_recover_reveal")
+        what = hint or over
+        return {"error": (
+            f"Blocked: you already did this click and the page URL did not change. {what}. "
+            f"Do not click {label!r} again — use what is now on the page. "
+            f"(Attempt {attempt}/{stop_at} on this control"
+            + ("; next repeat will ask for help.)" if final else ".)")
+        )}
 
     def _can_stuck_ask(self) -> bool:
         """True when a person can answer: web UI or an interactive tty (not unattended auto)."""
@@ -2088,40 +2144,39 @@ class TesterSession:
             # so the model never needs a separate browser_snapshot turn.
             if is_state_changing(tool.name, text) and not err:
                 before_h = getattr(self, "_page_hash", None)
-                captured = ""
+                before_page = getattr(self, "_page_state", "") or ""
                 had_page = result_already_has_page(text)
                 if had_page:
                     trimmed = self._remember_page(text)
                     out = merge_page_into_result(out, trimmed, keep_emails=self.keep_emails, cap=MAX_PAGE_CHARS)
+                    out = self._annotate_revealed(tool, args, out, before_h, before_page, True, True)
                 else:
-                    # Capture via MCP when the tool result had no page tree (sync best-effort flag;
-                    # async capture runs when tool_context is available through auto path).
-                    captured = self._try_capture_page(tool_context)
-                    if captured:
-                        out = merge_page_into_result(out, captured, keep_emails=self.keep_emails, cap=MAX_PAGE_CHARS)
-                    elif getattr(self, "_page_state", ""):
-                        # Still attach last known state so the model does not immediately re-snapshot.
-                        out = merge_page_into_result(out, self._page_state, keep_emails=self.keep_emails,
-                                                     cap=MAX_PAGE_CHARS)
-                after_h = getattr(self, "_page_hash", None)
-                if tool.name in ("browser_click", "browser_type", "browser_fill_form",
-                                 "browser_select_option", "browser_press_key"):
-                    # Wizard / SPA step changes: next action must use refs from a fresh snapshot.
-                    changed = bool(before_h and after_h and before_h != after_h)
-                    if changed:
-                        self._need_fresh_snap = True
-                        self._no_change_click = None
-                        self._nav_without_read = 0
-                    elif tool.name == "browser_click" and before_h and after_h and before_h == after_h:
-                        # Same URL/heading/hash after click → read before re-clicking (modal/tab/scroll).
-                        self._need_fresh_snap = True
-                        self._no_change_click = {
-                            "element": str(args.get("element") or ""),
-                            "target": str(args.get("target") or args.get("ref") or "")
-                                .removeprefix("ref=").strip(),
-                        }
-                    elif not had_page and not captured:
-                        self._need_fresh_snap = True
+                    def _after_capture(captured: str, local_out=out):
+                        got = bool(captured)
+                        if captured:
+                            local_out = merge_page_into_result(
+                                local_out, captured, keep_emails=self.keep_emails, cap=MAX_PAGE_CHARS)
+                        else:
+                            # Never reattach a stale page as if it were the current one.
+                            self._page_fresh = False
+                            self._need_fresh_snap = True
+                        return self._annotate_revealed(
+                            tool, args, local_out, before_h, before_page, False, got)
+
+                    async def _capture_and_finish():
+                        captured = await self._capture_page_async(tool_context)
+                        return _after_capture(captured)
+
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop = None
+                    if loop is not None and loop.is_running():
+                        return _capture_and_finish()
+                    try:
+                        out = asyncio.run(_capture_and_finish())
+                    except Exception:  # noqa: BLE001
+                        out = _after_capture("")
             elif tool.name == "browser_snapshot":
                 trimmed = getattr(self, "_page_state", "") or trim_page(text, MAX_PAGE_CHARS)
                 out = _cap_obj(_redact_obj({"result": trimmed}, self.keep_emails), MAX_PAGE_CHARS)
@@ -2129,14 +2184,73 @@ class TesterSession:
             return out
         return None
 
+    def _annotate_revealed(self, tool, args, out, before_h, before_page, had_page: bool, captured: bool):
+        """Attach a menu/modal hint and set need-fresh / no-change flags after a page update."""
+        after_h = getattr(self, "_page_hash", None)
+        after_page = getattr(self, "_page_state", "") or ""
+        if tool.name not in ("browser_click", "browser_type", "browser_fill_form",
+                             "browser_select_option", "browser_press_key"):
+            return out
+        hint = reveal_hint(before_page, after_page) if tool.name == "browser_click" else None
+        over = (overlay_hint(after_page) if tool.name == "browser_click" and not hint else None)
+        note = hint or over
+        if note:
+            out = append_page_note(out, note)
+        changed = bool(before_h and after_h and before_h != after_h)
+        url_same = (not before_page) or (page_url(before_page) == page_url(after_page))
+        if note and url_same:
+            # Menu/modal opened in place: the auto page state already has the new
+            # items/refs — let the model pick one instead of re-clicking the toggle.
+            self._need_fresh_snap = False
+            self._no_change_click = None
+            self._nav_without_read = 0
+        elif changed:
+            self._need_fresh_snap = True
+            self._no_change_click = None
+            self._nav_without_read = 0
+        elif tool.name == "browser_click" and before_h and after_h and before_h == after_h:
+            # Same URL/heading/hash after click → read before re-clicking (modal/tab/scroll).
+            self._need_fresh_snap = True
+            self._no_change_click = {
+                "element": str((args or {}).get("element") or ""),
+                "target": str((args or {}).get("target") or (args or {}).get("ref") or "")
+                    .removeprefix("ref=").strip(),
+            }
+        elif not had_page and not captured:
+            self._need_fresh_snap = True
+        return out
+
+    async def _capture_page_async(self, tool_context) -> str:
+        """browser_snapshot on this MCP session (same event loop). Never opens a second browser."""
+        tc = tool_context or getattr(self, "_tool_context", None)
+        if getattr(self, "toolset", None) is None or tc is None:
+            return ""
+        try:
+            from ..helpers import adk_caller
+            call = adk_caller(self.toolset, tc)
+            snap = str(await call("browser_snapshot", {}) or "")
+        except Exception:  # noqa: BLE001
+            log.debug("post-click snapshot failed", exc_info=True)
+            return ""
+        if not snap:
+            return ""
+        return self._remember_page(snap)
+
     def _try_capture_page(self, tool_context) -> str:
-        """Best-effort sync capture is not available; return '' (async path uses auto_shot helpers)."""
-        # Playwright MCP usually embeds the snapshot; when it does not, leave _page_fresh false so
-        # record_value still asks for a real snapshot. Optional async capture is done in auto_shot.
-        return ""
+        """Sync capture when no event loop is running. Never starts a second loop."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            return ""
+        try:
+            return asyncio.run(self._capture_page_async(tool_context))
+        except Exception:  # noqa: BLE001
+            return ""
 
     def before_model(self, callback_context, llm_request):
-        """Keep history lean (latest page only) and stamp LLM-call timing for the trace."""
+        """Keep history lean (latest two page trees) and stamp LLM-call timing for the trace."""
         self._llm_t0 = time.monotonic()
         contents = getattr(llm_request, "contents", None)
         prune_history(contents or [], KEEP_PAGE_READS)
@@ -2294,24 +2408,53 @@ class TesterSession:
         return {"error": f"Blocked: {why}. Do not retry this; continue or call finish()."}
 
 
-from ..page_state import (DEFAULT_MAX_PAGE_CHARS, UNCHANGED, is_state_changing,
-                          merge_page_into_result, page_hash, result_already_has_page, trim_page)
+from ..page_state import (DEFAULT_MAX_PAGE_CHARS, UNCHANGED, append_page_note,
+                          is_state_changing, merge_page_into_result, overlay_hint,
+                          page_hash, page_url, result_already_has_page, reveal_hint,
+                          trim_page)
 
 MAX_PAGE_CHARS = DEFAULT_MAX_PAGE_CHARS   # env TESTER_MAX_PAGE_CHARS (default 12000)
-KEEP_PAGE_READS = int(os.environ.get("TESTER_KEEP_PAGE_READS", "1"))  # only latest page state
+KEEP_PAGE_READS = int(os.environ.get("TESTER_KEEP_PAGE_READS", "2"))  # last two page trees
 TESTER_MAX_TOKENS = int(os.environ.get("TESTER_MAX_TOKENS", "2048"))
 DROPPED = "[older page state removed; the latest page state is in the most recent tool result]"
 
 
+def _function_response_text(response) -> str:
+    """Flatten a function-response payload to text for page-tree detection."""
+    if isinstance(response, str):
+        return response
+    if isinstance(response, dict):
+        parts = []
+        for k in ("result", "text", "page_state", "snapshot"):
+            v = response.get(k)
+            if isinstance(v, str):
+                parts.append(v)
+        content = response.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                else:
+                    t = getattr(item, "text", None)
+                    if isinstance(t, str):
+                        parts.append(t)
+        return "\n".join(parts)
+    return str(response or "")
+
+
 def prune_history(contents, keep: int) -> int:
-    """Keep only the last `keep` page-bearing browser results; stub the rest with one line."""
+    """Stub older *page-bearing* browser results; keep the last `keep` page trees.
+
+    Results that do not carry a page tree (tab lists, short click acks) are left intact.
+    """
     refs = []
     for c in contents:
         for p in (getattr(c, "parts", None) or []):
             fr = getattr(p, "function_response", None)
             name = (getattr(fr, "name", "") or "") if fr is not None else ""
-            if fr is not None and name.startswith("browser_"):
-                # Prefer stubbing results that carry page text (snapshots / auto page state).
+            if fr is None or not name.startswith("browser_"):
+                continue
+            if result_already_has_page(_function_response_text(getattr(fr, "response", None))):
                 refs.append(fr)
     dropped = 0
     for fr in refs[:-keep] if keep > 0 else refs:
@@ -2496,6 +2639,10 @@ def _safe_args(args: dict, *, tool: str = "") -> dict:
 def _text_of(resp) -> str:
     if isinstance(resp, str):
         return resp
+    if isinstance(resp, dict):
+        flat = _function_response_text(resp)
+        if flat.strip():
+            return flat
     try:
         return json.dumps(resp, default=str) if not hasattr(resp, "content") else "\n".join(
             getattr(c, "text", "") for c in resp.content)

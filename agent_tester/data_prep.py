@@ -105,6 +105,9 @@ def _create_parts_for_env(plan, rule: dict, parts: list[dict], case=None, state=
             kept.append(p)
             continue
         if _MPESA.search(text):
+            if env in _NO_PAY_ENVS:
+                return (f"create needs a payment step, which is not allowed on {plan.env}; "
+                        f"top up / pay by hand on this environment and rerun")
             why = mpesa_gate(case=case, state=state, text=text)
             if why:
                 return why

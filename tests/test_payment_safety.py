@@ -31,6 +31,12 @@ class PayEnvs(unittest.TestCase):
         self.assertIsInstance(err, str)
         self.assertIn("payment", err.lower())
 
+    def test_mpesa_create_blocked_on_production_even_with_phone(self):
+        parts = [{"app": "portal", "text": "pay with M-Pesa phone +254712345678 for the test client"}]
+        err = _create_parts_for_env(TestPlan(task_id=1, env="prod"), {}, parts)
+        self.assertIsInstance(err, str)
+        self.assertIn("payment", err.lower())
+
     def test_do_not_pay_create_is_kept_on_production(self):
         parts = [{"app": "crm", "text": "Add a parcel. Do not pay and do not apply rewards."}]
         plan_prod = TestPlan(task_id=1, env="prod")

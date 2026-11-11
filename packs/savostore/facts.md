@@ -216,6 +216,8 @@ rewards, cap(s) = R% x unpaid shipping s.
 - The rate accepts decimals (e.g. 2.5); the minimum accepts 0.
 - Rounding is intended: the CRM protection cost shows whole dollars (4.02 shows as 4.00) while the USD field keeps cents.
 - A client exemption always overrides the threshold. Declining protection means no charge anywhere.
+- Mandatory-protection threshold (Admin > Shipment Protection): the setting is labelled "Mandatory Shipment Protection Threshold (USD)" and differs per environment — read the current value from that screen for this run; do not assume an amount. Shipment Protection is mandatory only when the billing contact requires it and the order's declared value (Shipment Value USD / parcel total) is above that threshold. At or below the threshold, protection is optional and the Yes/No control stays editable, which is not a failure of the mandatory-lock check. A client exemption always overrides the threshold. To test the mandatory lock, first read the current threshold and use an order whose declared value is above it. Shipment Value and Shipment Value (USD) on the Shipping Only EditView are calculated from Parcel Value (USD) and are marked read-only in the form after #183498, regardless of the threshold; if they look editable, run Quick Repair and Rebuild and hard-reload before treating that as a result (see CRM repair).
+
 - Portal Parcel Value drops decimals (200.50 becomes 200, pasting 25.50 gives 25) and 1,000 becomes 1000. 0 shows "Enter a value greater than zero"; typing "-" shows the "Whole dollars only" hint.
 - Buy & Ship orders have no protection step.
 - Fixing old orders (TC7 of #182941) is a repair script run on production; it can't be tested on staging.

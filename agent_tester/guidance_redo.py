@@ -41,8 +41,44 @@ def is_redo_intent(text: str) -> bool:
     return bool(_REDO_INTENT.search(text or ""))
 
 
+def redo_progress_line(cases: list[str]) -> str:
+    """Console / progress.log line when a redo is requested mid-run."""
+    return f"Redo of {', '.join(cases)} requested by guidance; it runs next"
+
+
+def pause_for_redo_note(cases: list[str]) -> str:
+    return f"paused for requested redo of {', '.join(cases)}"
+
+
+def announce_pending_redo(state, hit: dict) -> None:
+    """Write the redo progress line once per note. Safe if state has no data/save."""
+    data = getattr(state, "data", None)
+    if not isinstance(data, dict):
+        return
+    announced = data.setdefault("guidance_redo_announced", [])
+    idx = hit["note_idx"]
+    if idx in announced:
+        return
+    announced.append(idx)
+    line = redo_progress_line(hit.get("cases") or [])
+    data.setdefault("notes", []).append(line)
+    try:
+        with (state.dir / "progress.log").open("a") as f:
+            from datetime import datetime
+            f.write(f"{datetime.now().isoformat(timespec='seconds')} {line}\n")
+    except OSError:
+        pass
+    checkpoint = getattr(state, "checkpoint", None)
+    if callable(checkpoint):
+        checkpoint(line)
+    save = getattr(state, "save", None)
+    if callable(save):
+        save()
+
+
 def finished_ids(state) -> set[str]:
-    return set((state.data.get("results") or {}).keys())
+    data = getattr(state, "data", None) or {}
+    return set((data.get("results") or {}).keys())
 
 
 def dependents(plan, roots: list[str]) -> list[str]:
@@ -91,7 +127,8 @@ def pending_redo(state, plan) -> dict | None:
     Notes already consumed (state.data['guidance_redo_done']) are skipped.
     """
     rows = _rows(state.dir)
-    done = set(state.data.get("guidance_redo_done") or [])
+    data = getattr(state, "data", None) or {}
+    done = set(data.get("guidance_redo_done") or [])
     finished = finished_ids(state)
     for i, row in enumerate(rows):
         if i in done:
@@ -119,6 +156,7 @@ def apply_redo(state, plan, pack_cfg: dict | None = None) -> list[str] | None:
     hit = pending_redo(state, plan)
     if hit is None:
         return None
+    announce_pending_redo(state, hit)
     roots = hit["cases"]
     queue = dependents(plan, roots)
     # Fresh data for mutating placeholders used by the reopened set.
@@ -169,7 +207,11 @@ def undelivered_guidance(state, plan) -> list[dict]:
         targets = guide_targets(text, plan)
         if i in redo_done:
             continue
-        if targets and targets <= finished and not is_redo_intent(text):
+        if is_redo_intent(text) and targets:
+            out.append({"note_idx": i, "text": text, "targets": sorted(targets),
+                        "why": "redo-intent note was never consumed"})
+            continue
+        if targets and targets <= finished:
             # Named finished cases but we never treated it as redo and no session claimed it.
             out.append({"note_idx": i, "text": text, "targets": sorted(targets),
                         "why": "named finished cases but was never delivered or redone"})

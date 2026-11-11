@@ -10,6 +10,7 @@ import re
 from . import raw_calls
 from urllib.parse import urlparse
 import os
+import select
 import sys
 import time
 import logging
@@ -79,6 +80,13 @@ _AFTER_STOP_OK = {"finish", "record_value", "mark_step", "evidence_name", "note_
 
 class TesterHardStop(Exception):
     """Raised from before_tool when the model ignores a stop: ends the tester turn without another model call."""
+
+
+class RedoPause(Exception):
+    """A redo note arrived while a stuck ask was waiting; end this case so the redo can run."""
+    def __init__(self, hit: dict):
+        self.hit = hit
+        super().__init__(hit.get("text") or "redo requested")
 
 
 def _hard_stop_in(e: BaseException) -> bool:
@@ -1752,8 +1760,13 @@ class TesterSession:
         from ..stuck_summary import format_stuck_prompt
         return format_stuck_prompt(self._stuck_summary(why, thread=thread))
 
-    def _ask_stuck_line(self, prompt: str, ask_id: str, *, summary: dict | None = None) -> str:
-        """One interactive stuck prompt (web ASK carries structured summary for the UI)."""
+    def _ask_stuck_line(self, prompt: str, ask_id: str, *, summary: dict | None = None,
+                       should_abort=None) -> str:
+        """One interactive stuck prompt (web ASK carries structured summary for the UI).
+
+        should_abort, if set, is called between short stdin waits and may return a
+        redo hit; a truthy result raises RedoPause so the stuck wait can end.
+        """
         from ..auto import ask_line, web_mode
         from .llm import pause_idle_for_human
         import signal
@@ -1780,6 +1793,15 @@ class TesterSession:
                     from ..auto import flush_stdin, _parse_answer_line
                     flush_stdin()
                     while True:
+                        hit = should_abort() if should_abort else None
+                        if hit:
+                            raise RedoPause(hit)
+                        try:
+                            ready, _, _ = select.select([sys.stdin], [], [], 1.0)
+                        except (ValueError, OSError, TypeError):
+                            ready = [sys.stdin]
+                        if not ready:
+                            continue
                         line = sys.stdin.readline()
                         if not line:
                             raise EOFError("no answer (the web UI closed the run)")
@@ -1808,6 +1830,10 @@ class TesterSession:
         from ..stuck_summary import (agent_chat_reply, format_stuck_prompt, is_continue,
                                      load_thread, persist_thread)
         from ..redact import scrub_user_answer
+
+        hit = self._pending_redo_hit()
+        if hit:
+            return self._end_paused_for_redo(hit)
 
         explored = bool(getattr(self, "_explored", False))
         asks = int(getattr(self, "_stuck_asks", 0))
@@ -1849,6 +1875,10 @@ class TesterSession:
         deadline = time.time() + max(1, STUCK_ASK_TIMEOUT_SEC)
         final_kind, final_rest = None, ""
         while time.time() < deadline:
+            hit = self._pending_redo_hit()
+            if hit:
+                persist_thread(self.state.dir, self.case_id, thread, summary)
+                return self._end_paused_for_redo(hit)
             left = max(1, int(deadline - time.time()))
             # Reuse ask-time shot/page; do not fall back to stale login helper PNGs.
             summary = self._stuck_summary(why, thread=thread, fresh_shot=fresh_shot, ask_at=ask_at)
@@ -1856,7 +1886,16 @@ class TesterSession:
             q = format_stuck_prompt(summary)
             ask_id = f"stuck-{self.case_id}-{uuid.uuid4().hex[:8]}"
             try:
-                ans = self._ask_stuck_line(q, ask_id, summary=summary)
+                try:
+                    ans = self._ask_stuck_line(
+                        q, ask_id, summary=summary,
+                        should_abort=lambda: self._pending_redo_hit())
+                except TypeError:
+                    # Test doubles of _ask_stuck_line may not take should_abort.
+                    ans = self._ask_stuck_line(q, ask_id, summary=summary)
+            except RedoPause as e:
+                persist_thread(self.state.dir, self.case_id, thread, summary)
+                return self._end_paused_for_redo(e.hit)
             except (EOFError, TimeoutError):
                 ans = ""
             safe_ans = scrub_user_answer(ans)[:500]
@@ -2603,9 +2642,52 @@ class TesterSession:
         return ("XSRF / acceptable-referer page detected. Do not browser_navigate to this admin deep-link again. "
                 "Open the screen via the discovery menu/label path (Home or Administration menu), then continue.")
 
+    def _pending_redo_hit(self):
+        """If a new note asks to redo a finished case, announce it and return the hit."""
+        from ..guidance_redo import announce_pending_redo, pending_redo
+        plan = getattr(self.state, "plan", None)
+        if plan is None:
+            return None
+        try:
+            hit = pending_redo(self.state, plan)
+        except Exception:
+            log.debug("pending redo check failed", exc_info=True)
+            return None
+        if hit:
+            announce_pending_redo(self.state, hit)
+        return hit
+
+    def _end_paused_for_redo(self, hit: dict) -> dict:
+        """Stop a stuck case so a requested redo is not blocked waiting on the user."""
+        from ..guidance_redo import pause_for_redo_note
+        cases = hit.get("cases") or []
+        note = pause_for_redo_note(cases)
+        self.result.stuck = True
+        self.result.notes = note
+        self.finished = True
+        data = getattr(self.state, "data", None)
+        if isinstance(data, dict):
+            data.setdefault("notes", []).append(note)
+        checkpoint = getattr(self.state, "checkpoint", None)
+        if callable(checkpoint):
+            checkpoint(f"{self.case_id}: {note}")
+        save = getattr(self.state, "save", None)
+        if callable(save):
+            save()
+        return {"error": f"{note}. The redo runs next. Call finish(notes, stuck=True) now."}
+
     def _new_guidance(self) -> str | None:
         """Notes the user typed in the web UI while the run goes (run_dir/guidance.jsonl). Each session sees
-        every note once, at its next tool call. Guidance is advice only: approvals and safety rules still apply."""
+        every note once, at its next tool call. Guidance is advice only: approvals and safety rules still apply.
+
+        The seen marker only advances past notes that were delivered to this session. Notes rejected by
+        _guide_fits stay pending for their target case or a redo.
+        """
+        first_poll = not getattr(self, "_guide_polled", False)
+        self._guide_polled = True
+        poll = getattr(self, "_pending_redo_hit", None)
+        if callable(poll):
+            poll()
         f = self.state.dir / "guidance.jsonl"
         if not f.exists():
             return None
@@ -2613,12 +2695,19 @@ class TesterSession:
             rows = [json.loads(l) for l in f.read_text().splitlines() if l.strip()]
         except (OSError, ValueError):
             return None
-        seen = getattr(self, "_guide_seen", 0)
-        new = [r for r in rows[seen:] if _guide_fits(r, getattr(self, "case_id", ""), self.state)]
-        self._guide_seen = len(rows)
+        delivered = set(getattr(self, "_guide_delivered", set()) or [])
+        new = []
+        for i, r in enumerate(rows):
+            if i in delivered:
+                continue
+            if _guide_fits(r, getattr(self, "case_id", ""), self.state):
+                new.append(r)
+                delivered.add(i)
+        self._guide_delivered = delivered
         if not new:
             return None
-        older = "" if seen else " Earlier notes may have been meant for an earlier case; use them only where they fit."
+        older = "" if not first_poll else (
+            " Earlier notes may have been meant for an earlier case; use them only where they fit.")
         lines = "\n".join(f"- {str(r.get('text', '')).strip()}" for r in new if str(r.get("text", "")).strip())
         if not lines:
             return None

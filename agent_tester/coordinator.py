@@ -1298,6 +1298,11 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
             _learn_failure(case, app, state, log_mark, "not_found", sr.notes or "")
             return result
         if sr.stuck or sr.limit_hit:
+            if "paused for requested redo" in (sr.notes or "").lower():
+                note = (sr.notes or "").strip()
+                return CaseResult(case_id=case.id, verdict="PARTIAL", expected=case.expected,
+                                  values={k: v for r in results for k, v in r.values.items()},
+                                  evidence=[s for r in results for s in r.screenshots], note=note)
             why = ("kept repeating the same action without progress" if getattr(sr, "loop", False)
                    else "hit the step/time limit" if sr.limit_hit else "got stuck")
             # Safety net: if this turn used a reused map and the route failed (missing label / loop / 404 / XSRF),

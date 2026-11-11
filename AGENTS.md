@@ -4,7 +4,7 @@
 
 **Always-on rules:** `preserve-behaviour`, `protected-behaviours`, `graphify`, `stack`, `qa-agent-core`, `live-run-gaps`, `root-cause-first`, plus `agent-tester-python` / `packs` when those trees change.
 
-**Code navigation:** query the local graph before grep. Prefer `graphify query` / `graphify explain` / `graphify path` (skill [`.agents/skills/graphify`](.agents/skills/graphify/SKILL.md); rule `graphify`). Rebuild with `graphify update .` after structural edits. Fall back to grep only for literal strings the graph cannot answer.
+**Code navigation (graph first, grep last):** always-on rule [`graphify`](.cursor/rules/graphify.mdc) + skill [`graphify-code-nav`](.cursor/skills/graphify-code-nav/SKILL.md). Prefer `graphify explain` (callers/callees), `graphify path` (A→B), `graphify query --budget N` (open questions). Open only the lines the graph returns. Grep only for exact literals. Rebuild with `graphify update .` after edits / before audit; local clones may use `graphify hook install`. Upstream skill bundle: [`.agents/skills/graphify`](.agents/skills/graphify/SKILL.md).
 
 **Stack for decisions:** skill [`qa-stack`](.cursor/skills/qa-stack/SKILL.md). Prose: [`docs/stack/`](docs/stack/), status: [`docs/HANDOVER.md`](docs/HANDOVER.md).
 
@@ -27,7 +27,7 @@
 | Failed live run / browser session | `debug-live-run` / `debug-browser-session` |
 | Any bug fix | rule `root-cause-first` |
 | Locked behaviours | rule `protected-behaviours`, `tests/test_protected_behaviours.py` |
-| Find code / architecture | `graphify query` / `explain` / `path` (before grep) |
+| Find code / architecture | rule `graphify` + skill `graphify-code-nav` (before grep) |
 | Labels / workflow | `core/core-testing-spec.md` |
 
 Do not invent features ahead of HANDOVER §9. Secrets only via masked prompt → `.env`. Core stays app-agnostic; no project names in core seeds. No env-bound identity in facts, memory, discovery_maps, learned.md, settings, or golden-trace fixtures.

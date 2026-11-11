@@ -112,6 +112,7 @@ class ProtectedEnvFixtures(unittest.TestCase):
         self.assertTrue((RULES / "preserve-behaviour.mdc").is_file())
         self.assertTrue((RULES / "protected-behaviours.mdc").is_file())
         self.assertTrue((RULES / "graphify.mdc").is_file())
+        self.assertTrue((ROOT / ".cursor" / "skills" / "graphify-code-nav" / "SKILL.md").is_file())
         self.assertTrue((ROOT / ".cursor" / "skills" / "pr-gate" / "SKILL.md").is_file())
         self.assertTrue((ROOT / ".agents" / "skills" / "graphify" / "SKILL.md").is_file())
         self.assertTrue((ROOT / ".cursor" / "agents" / "regression-auditor.md").is_file())

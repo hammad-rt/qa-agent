@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS discovery_maps (
   key_labels TEXT,
   deploy_marker TEXT,
   status TEXT NOT NULL DEFAULT 'proposed',
+  source TEXT,
   verified_at TEXT,
   last_success_at TEXT,
   success_count INTEGER NOT NULL DEFAULT 0,
@@ -50,6 +51,14 @@ CREATE TABLE IF NOT EXISTS discovery_maps (
 CREATE INDEX IF NOT EXISTS ix_disco_map_lookup
   ON discovery_maps(scope, area, app, env_fingerprint, status);
 """
+
+
+def _ensure_map_columns(db: sqlite3.Connection) -> None:
+    """Add columns introduced after the first schema (idempotent)."""
+    cols = {r[1] for r in db.execute("PRAGMA table_info(discovery_maps)")}
+    if "source" not in cols:
+        db.execute("ALTER TABLE discovery_maps ADD COLUMN source TEXT")
+        db.commit()
 
 STATUSES = {"proposed", "verified", "partial", "stale"}
 
@@ -324,6 +333,7 @@ class DiscoveryMapStore:
             self._owns = False
         self.db.executescript(MAP_SCHEMA)
         self.db.commit()
+        _ensure_map_columns(self.db)
 
     @classmethod
     def from_memory(cls, memory) -> "DiscoveryMapStore | None":
@@ -351,6 +361,7 @@ class DiscoveryMapStore:
         platform: str | None = None,
         platform_version: str | None = None,
         status: str = "proposed",
+        source: str | None = None,
     ) -> dict:
         """Atomic write of a scrubbed route. Never stores env-bound identity."""
         assert status in STATUSES, status
@@ -364,26 +375,36 @@ class DiscoveryMapStore:
             self.db.execute(
                 """UPDATE discovery_maps SET route_text=?, key_labels=?, deploy_marker=COALESCE(?, deploy_marker),
                    platform=COALESCE(?, platform), platform_version=COALESCE(?, platform_version),
-                   status=?, updated_at=?,
+                   status=?, source=COALESCE(?, source), updated_at=?,
                    checklist_item=?
                    WHERE id=?""",
                 (route, json.dumps(labels), deploy_marker or None, platform, platform_version,
                  status if existing["status"] != "verified" or status == "verified" else existing["status"],
-                 ts, scrub_env_details(checklist_item)[:200], existing["id"]),
+                 source, ts, scrub_env_details(checklist_item)[:200], existing["id"]),
             )
             # Keep verified if already verified unless explicitly stale.
             if existing["status"] == "verified" and status == "proposed":
                 self.db.execute("UPDATE discovery_maps SET status='verified' WHERE id=?", (existing["id"],))
+            if status == "verified":
+                self.db.execute(
+                    """UPDATE discovery_maps SET verified_at=COALESCE(verified_at, ?),
+                       last_success_at=COALESCE(last_success_at, ?),
+                       success_count=CASE WHEN success_count < 1 THEN 1 ELSE success_count END
+                       WHERE id=?""",
+                    (ts, ts, existing["id"]),
+                )
             self.db.commit()
             return self.get_by_id(existing["id"])  # type: ignore[return-value]
+        verified_at = ts if status == "verified" else None
         cur = self.db.execute(
             """INSERT INTO discovery_maps(
                  scope, area, app, checklist_item, item_key, env_fingerprint, platform, platform_version,
-                 route_text, key_labels, deploy_marker, status, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 route_text, key_labels, deploy_marker, status, source, verified_at, last_success_at,
+                 success_count, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (scope, area_s, app, scrub_env_details(checklist_item)[:200], ik, env_fingerprint,
              platform, platform_version, route, json.dumps(labels), deploy_marker or None,
-             status, ts, ts),
+             status, source, verified_at, verified_at, 1 if status == "verified" else 0, ts, ts),
         )
         self.db.commit()
         return self.get_by_id(cur.lastrowid)  # type: ignore[return-value]
@@ -619,6 +640,7 @@ def flush_pending(state, memory) -> int:
                 deploy_marker=e.get("deploy_marker"), platform=e.get("platform"),
                 platform_version=e.get("platform_version"),
                 status=e.get("status") or "proposed",
+                source=e.get("source"),
             )
             n += 1
         except EnvDetailError:
@@ -636,6 +658,51 @@ def flush_pending(state, memory) -> int:
 def scope_for(memory) -> str:
     slug = getattr(memory, "slug", None) or "unknown"
     return f"project:{slug}"
+
+
+def backfill_from_learned(
+    pack_root,
+    store: "DiscoveryMapStore | None",
+    *,
+    scope: str,
+    env_fingerprint: str,
+    platform: str | None = None,
+    platform_version: str | None = None,
+    warn=None,
+) -> list[dict]:
+    """Import confirmed ``## Routes`` lines from pack learned.md as verified map rows.
+
+    Source is ``pack``. Every line is env-filtered (host/URL/email/id → skip + warn).
+    Does not edit learned.md. Returns the upserted rows.
+    """
+    from . import learned as _learned
+
+    warn = warn or (lambda _m: None)
+    if store is None or not pack_root:
+        return []
+    routes = _learned.parse_confirmed_routes(pack_root, warn=warn)
+    written: list[dict] = []
+    for r in routes:
+        try:
+            row = store.upsert_route(
+                scope=scope,
+                area="general",
+                app=r["app"],
+                checklist_item=r["screen"],
+                env_fingerprint=env_fingerprint or "pack",
+                route_text=r["path"],
+                key_labels=labels_from_route(r["path"]),
+                platform=platform,
+                platform_version=platform_version,
+                status="verified",
+                source="pack",
+            )
+            written.append(row)
+        except EnvDetailError as e:
+            warn(f"skipping Routes import ({e}): {r.get('screen')}")
+        except Exception as e:  # noqa: BLE001
+            warn(f"skipping Routes import ({type(e).__name__}): {r.get('screen')}")
+    return written
 
 
 def match_item_to_rows(rows: list[dict], checklist_item: str) -> dict | None:

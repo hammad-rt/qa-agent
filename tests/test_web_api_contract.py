@@ -161,6 +161,150 @@ class WebApiContract(unittest.TestCase):
                 self.assertTrue(started)
                 self.assertIn("--headed", started[0])
 
+    def _start_rerun_no_plan(self, root: Path, d: Path, body: dict | None = None):
+        started = []
+
+        class FakeJob:
+            def __init__(self, args):
+                started.append(list(args))
+                self.id = "j1"
+                self.args = args
+
+            def info(self, since=0):
+                return {"id": self.id, "args": self.args, "running": False, "out": "", "len": 0,
+                        "waiting": False, "prompt": "", "ask_id": ""}
+
+        with mock.patch.object(W, "RUNS", root), mock.patch.object(W, "Job", FakeJob), \
+                mock.patch.object(W, "JOBS", {}):
+            class H(W.Handler):
+                def __init__(self):
+                    self.path = "/api/start"
+                    self.headers = {"Content-Length": "0"}
+                    self._code = self._resp = None
+
+                def _body(self):
+                    return body or {"rerun": d.name}
+
+                def _run(self, name):
+                    return d if name == d.name else None
+
+                def _send(self, code, obj, **kw):
+                    self._code, self._resp = code, obj
+
+            h = H()
+            h.do_POST()
+            return h._code, h._resp, started
+
+    def test_rerun_no_plan_cases_file_keeps_scope(self):
+        """Cancelled-before-plan rerun of a cases-file run must keep --no-subtasks + --cases-file."""
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            d = root / "42-20261111-070000"
+            d.mkdir()
+            (d / "cases_file.md").write_text("### A1\nDo the thing\n")
+            (d / "state.json").write_text(json.dumps({
+                "status": "cancelled",
+                "env": "staging",
+                "mode": {"subtasks": False, "cases_file": "test-cases.md"},
+            }))
+            code, _resp, started = self._start_rerun_no_plan(root, d)
+            self.assertEqual(code, 200)
+            self.assertTrue(started)
+            args = started[0]
+            self.assertEqual(args[:4], ["test", "42", "--env", "staging"])
+            self.assertIn("--no-subtasks", args)
+            cf_i = args.index("--cases-file")
+            self.assertEqual(args[cf_i + 1], str(d / "cases_file.md"))
+            self.assertNotIn("--rediscover", args)
+
+    def test_rerun_no_plan_subtasks_run_omits_scope_flags(self):
+        """Cancelled-before-plan rerun of a feature/subtasks run must not add --no-subtasks / --cases-file."""
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            d = root / "77-20261111-070000"
+            d.mkdir()
+            (d / "state.json").write_text(json.dumps({
+                "status": "cancelled",
+                "env": "preprod",
+                "mode": {"subtasks": True},
+            }))
+            code, _resp, started = self._start_rerun_no_plan(root, d)
+            self.assertEqual(code, 200)
+            args = started[0]
+            self.assertEqual(args[:4], ["test", "77", "--env", "preprod"])
+            self.assertNotIn("--no-subtasks", args)
+            self.assertNotIn("--cases-file", args)
+            self.assertNotIn("--rediscover", args)
+
+    def test_rerun_no_plan_carries_recorded_rediscover(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            d = root / "88-20261111-070000"
+            d.mkdir()
+            (d / "state.json").write_text(json.dumps({
+                "status": "cancelled",
+                "env": "staging",
+                "mode": {"subtasks": True},
+                "rediscover": True,
+            }))
+            code, _resp, started = self._start_rerun_no_plan(root, d)
+            self.assertEqual(code, 200)
+            self.assertIn("--rediscover", started[0])
+
+    def test_execute_draft_keeps_cases_file(self):
+        """Execute of a plan-only draft from a cases-file run must pass --cases-file."""
+        started = []
+
+        class FakeJob:
+            def __init__(self, args):
+                started.append(list(args))
+                self.id = "j1"
+                self.args = args
+
+            def info(self, since=0):
+                return {"id": self.id, "args": self.args, "running": False, "out": "", "len": 0,
+                        "waiting": False, "prompt": "", "ask_id": ""}
+
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            d = root / "55-20261111-070000"
+            d.mkdir()
+            (d / "cases_file.md").write_text("### B1\nx\n")
+            (d / "state.json").write_text(json.dumps({
+                "status": "dry_run",
+                "mode": {"subtasks": False, "cases_file": "test-cases.md"},
+                "plan": {
+                    "task_id": 55, "env": "staging",
+                    "cases": [{"id": "B1", "title": "t", "expected": "ok",
+                               "steps": [{"text": "go"}], "type": "ui"}],
+                },
+            }))
+            with mock.patch.object(W, "RUNS", root), mock.patch.object(W, "Job", FakeJob), \
+                    mock.patch.object(W, "JOBS", {}):
+                class H(W.Handler):
+                    def __init__(self):
+                        self.path = "/api/start"
+                        self.headers = {"Content-Length": "0"}
+                        self._code = self._resp = None
+
+                    def _body(self):
+                        return {"execute": d.name}
+
+                    def _run(self, name):
+                        return d if name == d.name else None
+
+                    def _send(self, code, obj, **kw):
+                        self._code, self._resp = code, obj
+
+                h = H()
+                h.do_POST()
+                self.assertEqual(h._code, 200)
+                args = started[0]
+                self.assertIn("--from-draft", args)
+                self.assertIn("--no-subtasks", args)
+                self.assertIn("--cases-file", args)
+                self.assertEqual(args[args.index("--cases-file") + 1], str(d / "cases_file.md"))
+
 
 if __name__ == "__main__":
     unittest.main()

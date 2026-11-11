@@ -90,7 +90,8 @@ helpers:
   crm_add_parcel:       {path: null, fields: {}, submit_label: null, success_text: null, read_labels: []}
   crm_ship_parcel:      {path: null, fields: {}, submit_label: null, success_text: null, read_labels: []}
 
-# Data preparation, every environment (test client only; payments on production are always skipped):
+# Data preparation, every environment (test client only; card pay OK on staging/preprod/local;
+# production never pays; M-Pesa needs an explicit phone):
 # before a matching case, find a usable record or create one, then check it on the portal.
 data_prep:
   - id: shipping_only_order
@@ -236,10 +237,10 @@ data_prep:
     when:
       areas: [rewards, portal]
       any: ["max(imum)?", "full cap", "\\bcap\\b", "more than", "exceed"]
-    envs: [staging, local]          # earning needs a payment, which never happens on pre-prod/production
+    envs: [staging, preprod, local]   # card pay OK on preprod (4242); production never pays
     blocked_note: >-
       the case needs a rewards balance above the cap, and topping it up means paying an order, which the agent
-      never does on pre-prod or production; top up the test client's wallet by hand and rerun
+      never does on production; top up the test client's wallet by hand and rerun
     app: crm
     value: wallet_ready
     min_value: 0.01        # checked in code: a negative or zero wallet is never "ready"
@@ -250,7 +251,7 @@ data_prep:
       enough: record_value('wallet_ready', 'none').
     create: >-
       Earn rewards: take a QA-AGENT TEST shipping-only order of {client}, pay it on the portal with the Stripe test
-      card from the Payments facts (staging only), then move it to "Order Delivered" in the CRM so 5% is earned.
+      card from the Payments facts (staging/preprod/local, 4242). Never pay on production. Then move it to "Order Delivered" in the CRM so 5% is earned.
       Repeat until Current Rewards is enough, then record_value('wallet_ready', '<Current Rewards>').
 
 # Each app's stack: testers call lookup_docs for these when a screen or workflow is unfamiliar (cached in docs/).
@@ -266,3 +267,10 @@ invariants:
       L: "^l$|total_?(rewards|earned)|lifetime"
       U: "^u$|used"
     checks: ["W == L - U", "W >= 0", "U <= L"]
+
+# Safety rules: always injected into every tester turn; pack-specific, not core.
+safety_rules:
+  - text: "Stripe test card 4242 4242 4242 4242 only (staging/preprod/local). Never use a real card. Never pay on production."
+    always_send: true
+  - text: "M-Pesa only when the case itself calls for M-Pesa AND a phone number is provided for it; without a number, skip/BLOCKED with that reason — never guess a phone. Never M-Pesa in rewards cases unless the case explicitly requires it."
+    always_send: true

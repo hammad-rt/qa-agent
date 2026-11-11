@@ -333,6 +333,12 @@ def _run_case(plan, case, state, testers, judge, max_retries, manual_login=None,
             continue
         return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,
                           note=f"depends on {dep} ({r.verdict})")
+    # M-Pesa only when the case asks for it AND a phone is provided; otherwise SKIPPED with reason.
+    from .data_prep import case_calls_for_mpesa, mpesa_gate
+    if case_calls_for_mpesa(case):
+        why = mpesa_gate(case=case, state=state)
+        if why:
+            return CaseResult(case_id=case.id, verdict="SKIPPED", expected=case.expected, note=why)
     results: list[StepResult] = []
     for app, steps in app_turns(case):
         if app in ("none", "redmine"):

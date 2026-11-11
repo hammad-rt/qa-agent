@@ -29,12 +29,20 @@ def fr(name, text):
 
 class History(unittest.TestCase):
     def test_prune_keeps_last_two_browser_reads(self):
+        def page(n):
+            return f"Page URL: https://example.test/p{n}\nPage Title: T{n}\n- main:\n  - heading \"H{n}\" [ref=e{n}]"
         contents = [types.Content(role="user", parts=[types.Part(text="do TC5")]),
-                    fr("browser_snapshot", "page1"), fr("record_value", "ok"),
-                    fr("browser_snapshot", "page2"), fr("browser_click", "page3"), fr("browser_snapshot", "page4")]
-        self.assertEqual(T.prune_history(contents, 2), 2)
+                    fr("browser_snapshot", page(1)), fr("record_value", "ok"),
+                    fr("browser_snapshot", page(2)), fr("browser_click", "clicked"), fr("browser_snapshot", page(4))]
+        # Only page-bearing browser results are stubbed (the click ack is left).
+        # Last two page trees (page2, page4) stay; page1 is dropped. That's 1 drop.
+        self.assertEqual(T.prune_history(contents, 2), 1)
         got = [c.parts[0].function_response.response["result"] for c in contents[1:]]
-        self.assertEqual(got, [T.DROPPED, "ok", T.DROPPED, "page3", "page4"])
+        self.assertEqual(got[0], T.DROPPED)
+        self.assertEqual(got[1], "ok")
+        self.assertIn("example.test/p2", got[2])
+        self.assertEqual(got[3], "clicked")
+        self.assertIn("example.test/p4", got[4])
         self.assertEqual(T.prune_history(contents, 2), 0)          # already pruned
         self.assertEqual(contents[0].parts[0].text, "do TC5")
 

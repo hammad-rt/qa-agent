@@ -374,7 +374,8 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory,
     """
     from .discovery_map import (
         DiscoveryMapStore, age_days, backfill_from_learned, estimate_calls_saved,
-        is_reusable, match_item_to_rows, scope_for, spot_check_route,
+        is_reusable, load_route_synonym_groups, match_item_to_rows, scope_for,
+        spot_check_route,
     )
     key = discovery_key(case.area, app)
     store = state.data.setdefault("discovery", {})
@@ -430,6 +431,10 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory,
             pass
     # Pack routes land under area=general; also list area-specific rows for this case.
     known_rows = []
+    synonym_groups = load_route_synonym_groups(
+        state.data.get("pack_cfg") if state else None,
+        platform_id=state.data.get("detected_platform") if state else None,
+    )
     if map_store is not None:
         sc = scope_for(memory)
         known_rows = map_store.list_for(sc, case.area, app, fp)
@@ -442,7 +447,7 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory,
         if force or item in stale_items:
             need_live.append(item)
             continue
-        row = match_item_to_rows(known_rows, item)
+        row = match_item_to_rows(known_rows, item, synonym_groups=synonym_groups)
         if not row:
             need_live.append(item)
             continue

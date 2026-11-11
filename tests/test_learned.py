@@ -119,3 +119,42 @@ class ConfirmedRoutesSection(unittest.TestCase):
             self.assertIsNotNone(login)
             self.assertIn("Login", login["route_text"])
             store.close()
+
+    def test_routes_section_does_not_break_area_app_parsing(self):
+        """## Routes is additive; ## area:app lines still feed learned.read()."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "learned.md").write_text(self.SAMPLE)
+            area_lines = learned.read(root, "parcel_value", "portal")
+            self.assertTrue(any("Continue" in x for x in area_lines))
+            routes = learned.parse_confirmed_routes(root)
+            self.assertTrue(any(r["screen"] == "login" for r in routes))
+            # area:app Route lines are not ## Routes confirmed rows
+            self.assertFalse(any("Continue" in (r.get("path") or "") for r in routes))
+
+
+class RouteSynonymMatch(unittest.TestCase):
+    """Screen↔checklist matching via pack fixture synonyms (no product labels in the test body)."""
+
+    FIXTURE = Path(__file__).resolve().parent / "fixtures" / "packs" / "route_synonyms"
+
+    def test_fixture_pairs_match_via_pack_synonyms(self):
+        import yaml
+        from agent_tester.discovery_map import (
+            load_route_synonym_groups, match_item_to_rows, route_match_score,
+        )
+        pack_cfg = yaml.safe_load((self.FIXTURE / "pack.yaml").read_text()) or {}
+        pairs = (yaml.safe_load((self.FIXTURE / "pairs.yaml").read_text()) or {}).get("pairs") or []
+        self.assertGreaterEqual(len(pairs), 3)
+        groups = load_route_synonym_groups(pack_cfg)
+        self.assertTrue(groups)
+        rows = [{"checklist_item": p["screen"], "item_key": f"k{i}", "route_text": p["screen"]}
+                for i, p in enumerate(pairs)]
+        for p in pairs:
+            score = route_match_score(p["screen"], p["checklist"], groups)
+            self.assertGreaterEqual(
+                score, 0.5,
+                f"{p['screen']!r} vs {p['checklist']!r} score={score}")
+            hit = match_item_to_rows(rows, p["checklist"], synonym_groups=groups)
+            self.assertIsNotNone(hit, f"no row for checklist {p['checklist']!r}")
+            self.assertEqual(hit["checklist_item"], p["screen"])

@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS discovery_maps (
   key_labels TEXT,
   deploy_marker TEXT,
   status TEXT NOT NULL DEFAULT 'proposed',
+  source TEXT,
   verified_at TEXT,
   last_success_at TEXT,
   success_count INTEGER NOT NULL DEFAULT 0,
@@ -50,6 +51,14 @@ CREATE TABLE IF NOT EXISTS discovery_maps (
 CREATE INDEX IF NOT EXISTS ix_disco_map_lookup
   ON discovery_maps(scope, area, app, env_fingerprint, status);
 """
+
+
+def _ensure_map_columns(db: sqlite3.Connection) -> None:
+    """Add columns introduced after the first schema (idempotent)."""
+    cols = {r[1] for r in db.execute("PRAGMA table_info(discovery_maps)")}
+    if "source" not in cols:
+        db.execute("ALTER TABLE discovery_maps ADD COLUMN source TEXT")
+        db.commit()
 
 STATUSES = {"proposed", "verified", "partial", "stale"}
 
@@ -324,6 +333,7 @@ class DiscoveryMapStore:
             self._owns = False
         self.db.executescript(MAP_SCHEMA)
         self.db.commit()
+        _ensure_map_columns(self.db)
 
     @classmethod
     def from_memory(cls, memory) -> "DiscoveryMapStore | None":
@@ -351,6 +361,7 @@ class DiscoveryMapStore:
         platform: str | None = None,
         platform_version: str | None = None,
         status: str = "proposed",
+        source: str | None = None,
     ) -> dict:
         """Atomic write of a scrubbed route. Never stores env-bound identity."""
         assert status in STATUSES, status
@@ -364,26 +375,36 @@ class DiscoveryMapStore:
             self.db.execute(
                 """UPDATE discovery_maps SET route_text=?, key_labels=?, deploy_marker=COALESCE(?, deploy_marker),
                    platform=COALESCE(?, platform), platform_version=COALESCE(?, platform_version),
-                   status=?, updated_at=?,
+                   status=?, source=COALESCE(?, source), updated_at=?,
                    checklist_item=?
                    WHERE id=?""",
                 (route, json.dumps(labels), deploy_marker or None, platform, platform_version,
                  status if existing["status"] != "verified" or status == "verified" else existing["status"],
-                 ts, scrub_env_details(checklist_item)[:200], existing["id"]),
+                 source, ts, scrub_env_details(checklist_item)[:200], existing["id"]),
             )
             # Keep verified if already verified unless explicitly stale.
             if existing["status"] == "verified" and status == "proposed":
                 self.db.execute("UPDATE discovery_maps SET status='verified' WHERE id=?", (existing["id"],))
+            if status == "verified":
+                self.db.execute(
+                    """UPDATE discovery_maps SET verified_at=COALESCE(verified_at, ?),
+                       last_success_at=COALESCE(last_success_at, ?),
+                       success_count=CASE WHEN success_count < 1 THEN 1 ELSE success_count END
+                       WHERE id=?""",
+                    (ts, ts, existing["id"]),
+                )
             self.db.commit()
             return self.get_by_id(existing["id"])  # type: ignore[return-value]
+        verified_at = ts if status == "verified" else None
         cur = self.db.execute(
             """INSERT INTO discovery_maps(
                  scope, area, app, checklist_item, item_key, env_fingerprint, platform, platform_version,
-                 route_text, key_labels, deploy_marker, status, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 route_text, key_labels, deploy_marker, status, source, verified_at, last_success_at,
+                 success_count, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (scope, area_s, app, scrub_env_details(checklist_item)[:200], ik, env_fingerprint,
              platform, platform_version, route, json.dumps(labels), deploy_marker or None,
-             status, ts, ts),
+             status, source, verified_at, verified_at, 1 if status == "verified" else 0, ts, ts),
         )
         self.db.commit()
         return self.get_by_id(cur.lastrowid)  # type: ignore[return-value]
@@ -619,6 +640,7 @@ def flush_pending(state, memory) -> int:
                 deploy_marker=e.get("deploy_marker"), platform=e.get("platform"),
                 platform_version=e.get("platform_version"),
                 status=e.get("status") or "proposed",
+                source=e.get("source"),
             )
             n += 1
         except EnvDetailError:
@@ -638,20 +660,169 @@ def scope_for(memory) -> str:
     return f"project:{slug}"
 
 
-def match_item_to_rows(rows: list[dict], checklist_item: str) -> dict | None:
+_STOP_MATCH = frozenset({
+    "from", "with", "their", "this", "that", "open", "list", "and", "the", "for",
+    "create", "find", "prep", "into", "onto", "then", "when", "how", "via",
+})
+
+
+def _word_tokens(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]{3,}", (text or "").lower()) if w not in _STOP_MATCH}
+
+
+def load_route_synonym_groups(
+    pack_cfg: dict | None = None,
+    *,
+    platform_id: str | None = None,
+    platforms_dir: Path | None = None,
+) -> list[list[str]]:
+    """Load synonym groups from pack.yaml and optional platform.yaml (never hardcoded in core).
+
+    Each group is a list of equivalent phrases/tokens. Pack wins first; platform groups append.
+    """
+    groups: list[list[str]] = []
+
+    def _add(raw):
+        if not isinstance(raw, list):
+            return
+        for g in raw:
+            if isinstance(g, (list, tuple)) and g:
+                phrases = [str(x).strip() for x in g if str(x).strip()]
+                if phrases:
+                    groups.append(phrases)
+
+    _add((pack_cfg or {}).get("route_synonyms"))
+    if platform_id:
+        from .config import ROOT
+        root = platforms_dir or (ROOT / "packs" / "_platforms")
+        yml = root / platform_id / "platform.yaml"
+        if yml.is_file():
+            try:
+                import yaml
+                cfg = yaml.safe_load(yml.read_text()) or {}
+                _add(cfg.get("route_synonyms"))
+            except Exception:  # noqa: BLE001
+                pass
+    return groups
+
+
+def expand_match_tokens(text: str, synonym_groups: list[list[str]] | None = None) -> set[str]:
+    """Token set for a screen/checklist string, expanded by pack/platform synonym groups."""
+    low = (text or "").lower()
+    out = _word_tokens(low)
+    for group in synonym_groups or []:
+        phrases = [str(p).lower().strip() for p in group if p]
+        if not phrases:
+            continue
+        hit = False
+        for p in phrases:
+            if not p:
+                continue
+            if p in low:
+                hit = True
+                break
+            pt = _word_tokens(p)
+            if pt and pt <= out:
+                hit = True
+                break
+        if hit:
+            for p in phrases:
+                out |= _word_tokens(p)
+    return out
+
+
+def route_match_score(
+    screen: str,
+    checklist_item: str,
+    synonym_groups: list[list[str]] | None = None,
+) -> float:
+    """0..1 overlap after synonym expansion. Pack route screens rarely equal checklist text."""
+    a = expand_match_tokens(screen, synonym_groups)
+    b = expand_match_tokens(checklist_item, synonym_groups)
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    if inter <= 0:
+        return 0.0
+    return inter / float(min(len(a), len(b)))
+
+
+def backfill_from_learned(
+    pack_root,
+    store: "DiscoveryMapStore | None",
+    *,
+    scope: str,
+    env_fingerprint: str,
+    platform: str | None = None,
+    platform_version: str | None = None,
+    warn=None,
+) -> list[dict]:
+    """Import confirmed ``## Routes`` lines from pack learned.md as verified map rows.
+
+    Source is ``pack``. Every line is env-filtered (host/URL/email/id → skip + warn).
+    Does not edit learned.md. Returns the upserted rows.
+    """
+    from . import learned as _learned
+
+    warn = warn or (lambda _m: None)
+    if store is None or not pack_root:
+        return []
+    routes = _learned.parse_confirmed_routes(pack_root, warn=warn)
+    written: list[dict] = []
+    for r in routes:
+        try:
+            row = store.upsert_route(
+                scope=scope,
+                area="general",
+                app=r["app"],
+                checklist_item=r["screen"],
+                env_fingerprint=env_fingerprint or "pack",
+                route_text=r["path"],
+                key_labels=labels_from_route(r["path"]),
+                platform=platform,
+                platform_version=platform_version,
+                status="verified",
+                source="pack",
+            )
+            written.append(row)
+        except EnvDetailError as e:
+            warn(f"skipping Routes import ({e}): {r.get('screen')}")
+        except Exception as e:  # noqa: BLE001
+            warn(f"skipping Routes import ({type(e).__name__}): {r.get('screen')}")
+    return written
+
+
+def match_item_to_rows(
+    rows: list[dict],
+    checklist_item: str,
+    *,
+    synonym_groups: list[list[str]] | None = None,
+    min_score: float = 0.5,
+) -> dict | None:
+    """Find a discovery_maps row for a checklist item.
+
+    Exact item_key first, then synonym-aware keyword overlap (pack/platform
+    ``route_synonyms``). Screen names rarely equal checklist text word-for-word.
+    """
     ik = item_key(checklist_item)
     for r in rows:
         if r.get("item_key") == ik:
             return r
-    # Fuzzy: distinctive word overlap
+    best, score = None, 0.0
     words = {w for w in re.findall(r"[a-z0-9]{4,}", checklist_item.lower()) if len(w) > 3}
-    best, score = None, 0
     for r in rows:
-        rw = {w for w in re.findall(r"[a-z0-9]{4,}", (r.get("checklist_item") or "").lower())}
-        sc = len(words & rw)
+        screen = r.get("checklist_item") or ""
+        sc = route_match_score(screen, checklist_item, synonym_groups)
+        if sc <= 0 and not synonym_groups:
+            # Legacy distinctive-word overlap when the pack has no synonym table.
+            rw = {w for w in re.findall(r"[a-z0-9]{4,}", screen.lower())}
+            raw = len(words & rw)
+            if raw >= 1:
+                sc = raw / float(max(1, min(len(words) or 1, len(rw) or 1)))
+                sc = max(sc, 0.5)
         if sc > score:
             best, score = r, sc
-    return best if score >= 1 else None
+    return best if best is not None and score >= min_score else None
 
 
 def parse_routes_from_discovery_notes(notes: str, checklist: list[str]) -> dict[str, tuple[str, list[str]]]:

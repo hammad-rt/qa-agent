@@ -373,8 +373,9 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory,
     / web checkbox / DISCOVERY_REUSE=0.
     """
     from .discovery_map import (
-        DiscoveryMapStore, age_days, estimate_calls_saved, is_reusable, match_item_to_rows,
-        scope_for, spot_check_route,
+        DiscoveryMapStore, age_days, backfill_from_learned, estimate_calls_saved,
+        is_reusable, load_route_synonym_groups, match_item_to_rows, scope_for,
+        spot_check_route,
     )
     key = discovery_key(case.area, app)
     store = state.data.setdefault("discovery", {})
@@ -408,14 +409,45 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory,
     need_live: list[str] = []
     spot_n = 0
     map_store = DiscoveryMapStore.from_memory(memory) if memory is not None else None
-    known_rows = (map_store.list_for(scope_for(memory), case.area, app, fp)
-                  if map_store is not None else [])
+    # Once per run: import pack ## Routes as verified (source=pack); skip env-bound lines.
+    if map_store is not None and not state.data.get("_learned_routes_backfilled"):
+        warnings: list[str] = []
+        try:
+            backfill_from_learned(
+                state.data.get("pack_root"), map_store,
+                scope=scope_for(memory), env_fingerprint=fp,
+                platform=state.data.get("detected_platform"),
+                platform_version=plat_ver,
+                warn=warnings.append,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        for w in warnings:
+            state.data.setdefault("notes", []).append(w)
+        state.data["_learned_routes_backfilled"] = True
+        try:
+            state.save()
+        except Exception:  # noqa: BLE001
+            pass
+    # Pack routes land under area=general; also list area-specific rows for this case.
+    known_rows = []
+    synonym_groups = load_route_synonym_groups(
+        state.data.get("pack_cfg") if state else None,
+        platform_id=state.data.get("detected_platform") if state else None,
+    )
+    if map_store is not None:
+        sc = scope_for(memory)
+        known_rows = map_store.list_for(sc, case.area, app, fp)
+        for r in map_store.list_for(sc, "general", app, fp):
+            if r not in known_rows and not any(
+                    x.get("item_key") == r.get("item_key") for x in known_rows):
+                known_rows.append(r)
 
     for item in want:
         if force or item in stale_items:
             need_live.append(item)
             continue
-        row = match_item_to_rows(known_rows, item)
+        row = match_item_to_rows(known_rows, item, synonym_groups=synonym_groups)
         if not row:
             need_live.append(item)
             continue

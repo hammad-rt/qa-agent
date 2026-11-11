@@ -1,0 +1,8 @@
+# screen (## Routes) ↔ checklist item pairs that must match via route_synonyms.
+pairs:
+  - screen: Client wallet
+    checklist: open wallet / rewards
+  - screen: Order Payments subpanel
+    checklist: record payment
+  - screen: Receive package
+    checklist: parcel / package

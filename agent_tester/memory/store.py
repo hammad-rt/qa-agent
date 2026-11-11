@@ -281,6 +281,14 @@ def public(row: dict) -> dict:
 
 def dump_json(store: MemoryStore, path: Path) -> None:
     """Plain-text export for the git backup (embeddings dropped)."""
+    from .pollution import is_polluted_memory_text
     scopes = [r[0] for r in store.db.execute("SELECT DISTINCT scope FROM memories")]
-    rows = [public(r) for r in store.query(scopes, statuses=tuple(STATUSES))] if scopes else []
+    rows = []
+    if scopes:
+        for r in store.query(scopes, statuses=tuple(STATUSES)):
+            if (r.get("status") or "") == "retired":
+                continue
+            if is_polluted_memory_text(r.get("text") or "", kind=r.get("kind")):
+                continue
+            rows.append(public(r))
     path.write_text(json.dumps(rows, indent=2))

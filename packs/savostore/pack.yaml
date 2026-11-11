@@ -84,9 +84,14 @@ memory_areas: [rewards, protection, parcels, orders, payments, ui]
 # Synonym groups for matching ## Routes screen names to discovery checklist items.
 # Core only expands these tokens/phrases — product labels stay in the pack.
 route_synonyms:
-  - ["client wallet", "open wallet", "wallet", "rewards"]
+  - ["client wallet", "open wallet", "open wallet / rewards", "Contact wallet", "Portal rewards wallet", "wallet", "rewards"]
   - ["order payments subpanel", "order payments", "record payment", "payment", "payments"]
   - ["receive package", "parcel", "package"]
+  - ["move status", "order status", "Order status to Order Delivered", "change status"]
+  - ["buy & ship / quote", "buy & ship", "Buy & Ship create", "quote", "quotes", "Request a purchase quote"]
+  - ["login", "CRM login", "Portal login", "log in", "sign in"]
+  - ["Invoices", "Shipping Only Orders", "Orders > Shipping Only Orders"]
+  - ["Quotes", "Buy and Ship Orders", "Orders > Buy and Ship Orders"]
 
 # Helpers (phase 6). Core helpers login_form and read_table need no setup. Project helpers stay disabled
 # until their path and labels are confirmed on the real UI (fill these from a live run, never guessed).

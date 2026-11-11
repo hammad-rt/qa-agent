@@ -404,8 +404,8 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory,
     """
     from .discovery_map import (
         DiscoveryMapStore, age_days, backfill_from_learned, estimate_calls_saved,
-        is_reusable, load_route_synonym_groups, match_item_to_rows, scope_for,
-        spot_check_route,
+        is_reusable, load_route_synonym_groups, match_item_to_rows, route_hints_from_rows,
+        scope_for, spot_check_route,
     )
     key = discovery_key(case.area, app)
     store = state.data.setdefault("discovery", {})
@@ -475,6 +475,7 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory,
     synonym_groups = load_route_synonym_groups(
         state.data.get("pack_cfg") if state else None,
         platform_id=state.data.get("detected_platform") if state else None,
+        pack_root=state.data.get("pack_root") if state else None,
     )
     if map_store is not None:
         known_rows = map_store.list_for(sc, case.area, app, fp)
@@ -573,8 +574,12 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory,
     if prior is None and reuse_routes:
         prior = {"source": "memory", "recipes": reuse_routes, "notes": "\n".join(reuse_routes),
                  "checklist": [r.get("checklist_item") for r in reused_rows], "env": fp}
+    # Even when a saved route is not fully reusable (or does not match a checklist
+    # name exactly), pass its menu path so live discovery does not start from scratch.
+    path_hints = route_hints_from_rows(known_rows)
     entry = _run_discovery(plan, case, app, state, testers, memory, fp, key, store,
-                           want=need_live, incremental=bool(reused_rows or prior), prior=prior)
+                           want=need_live, incremental=bool(reused_rows or prior), prior=prior,
+                           route_hints=path_hints)
     if reuse_routes:
         entry["recipes"] = list(dict.fromkeys(reuse_routes + list(entry.get("recipes") or [])))[:12]
         entry["reused_items"] = [r.get("checklist_item") for r in reused_rows]
@@ -591,10 +596,13 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory,
 
 
 def _run_discovery(plan, case, app, state, testers, memory, fp, key, store, *,
-                   want: list[str], incremental: bool, prior: dict | None) -> dict:
+                   want: list[str], incremental: bool, prior: dict | None,
+                   route_hints: list[str] | None = None) -> dict:
     from . import learned
-    hints = recipes_covering(memory, case.area, app, state=state, title=case.title or "",
+    learned_hints = recipes_covering(memory, case.area, app, state=state, title=case.title or "",
                              pack_root=state.data.get("pack_root"))
+    # Known menu paths first so live discovery can follow saved routes (e.g. Orders > …).
+    hints = list(dict.fromkeys(list(route_hints or []) + list(learned_hints or [])))
     tester = testers.get(app)
     if tester is None:
         entry = {"source": "skipped", "recipes": list(hints), "hints": list(hints),
@@ -613,7 +621,8 @@ def _run_discovery(plan, case, app, state, testers, memory, fp, key, store, *,
     hint_note = ""
     if hints:
         hint_note = (
-            f" Prior recipes/routes for this area are HINTS only ({len(hints)}): verify each against the live UI; "
+            f" Prior recipes and known menu paths are HINTS only ({len(hints)}): verify each against the live UI; "
+            "follow a matching path rather than exploring menus from scratch; "
             "ignore stale or wrong paths; map the real menus, search and screens you see now.")
     need_detail = any(re.search(r"(?i)detail|subpanel|payment|status|record", x) for x in goal_lines)
     detail_note = ""
@@ -706,8 +715,12 @@ def _run_discovery(plan, case, app, state, testers, memory, fp, key, store, *,
                                    notes, proposed + list(hints), entry)
     except Exception:  # noqa: BLE001
         pass
-    useful = bool(proposed) or bool(notes and not blocked and not notes.startswith("discovery failed")
-                                    and not _NO_PROGRESS.search(notes))
+    from .memory.pollution import is_infra_error_text
+    # Never persist infrastructure failures (timeouts, cancellations, MCP errors)
+    # as learned hints, even if other proposed recipes already exist for the area.
+    useful = bool(notes and not blocked and not notes.startswith("discovery failed")
+                  and not _NO_PROGRESS.search(notes)
+                  and not is_infra_error_text(notes))
     tries = state.data.setdefault("discovery_tries", {})
     tries[key] = tries.get(key, 0) + 1
     store[key] = entry

@@ -452,6 +452,7 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
     state.data["pack_cfg"] = {
         "placeholders": (pack.config or {}).get("placeholders"),
         "data_prep": (pack.config or {}).get("data_prep"),
+        "route_synonyms": (pack.config or {}).get("route_synonyms"),
     }
     state.data["_data_plan_rules"] = data_plan
     ok, pre, corrections = gate.plan_gate(plan, policy=policy, issues=check_plan(plan), data_plan=data_plan)
@@ -534,7 +535,13 @@ def _execute(settings, pack, plan, state, policy, memory) -> int:
                 "placeholders": (pack.config or {}).get("placeholders"),
                 "data_prep": (pack.config or {}).get("data_prep"),
                 "admin_repair_envs": (pack.config or {}).get("admin_repair_envs"),
+                "route_synonyms": (pack.config or {}).get("route_synonyms"),
             }
+            cfg = state.data["pack_cfg"] or {}
+            if not cfg.get("route_synonyms") and (pack.config or {}).get("route_synonyms"):
+                cfg = dict(cfg)
+                cfg["route_synonyms"] = pack.config.get("route_synonyms")
+                state.data["pack_cfg"] = cfg
             state.save()
             login = make_manual_login(pack, plan, state)
             login_first(pack, plan, state, login)
@@ -681,7 +688,20 @@ def cmd_correct(settings, run_dir: Path, case_id: str, verdict: str, why: str, g
     return 0
 
 
-def cmd_memory(settings, action: str, ids: list[int], pack_slug: str) -> int:
+def cmd_memory(settings, action: str, ids: list[int], pack_slug: str,
+               dry_run: bool = False, export_path=None) -> int:
+    if action == "clean-pollution":
+        from .config import ROOT
+        from .memory.pollution import clean_polluted_memory, format_clean_report
+        from .memory.store import MemoryStore
+        store = MemoryStore(settings.memory_db)
+        export = Path(export_path) if export_path else (ROOT / "memory" / "memory-export.json")
+        try:
+            report = clean_polluted_memory(store, export_path=export, dry_run=dry_run)
+        finally:
+            store.close()
+        print(format_clean_report(report))
+        return 0
     from .preflight.pack_loader import load_pack
     mem = open_memory(settings, load_pack(settings.packs_dir / pack_slug))
     if action == "list":
@@ -791,6 +811,7 @@ def cmd_rerun(settings: Settings, task_id: int, cases: str | None, src_run: str 
     state.data["pack_cfg"] = {
         "placeholders": (pack.config or {}).get("placeholders"),
         "data_prep": (pack.config or {}).get("data_prep"),
+        "route_synonyms": (pack.config or {}).get("route_synonyms"),
     }
     state.data["_data_plan_rules"] = data_plan
     ok, pre, corrections = gate.plan_gate(plan, policy=policy, issues=check_plan(plan), data_plan=data_plan)
@@ -1207,9 +1228,13 @@ def _main(argv=None) -> int:
     c.add_argument("--general", action="store_true")
     c.add_argument("--project")
     m = sub.add_parser("memory")
-    m.add_argument("action", choices=["list", "pending", "approve", "retire"])
+    m.add_argument("action", choices=["list", "pending", "approve", "retire", "clean-pollution"])
     m.add_argument("ids", nargs="*", type=int)
     m.add_argument("--project")
+    m.add_argument("--dry-run", action="store_true",
+                   help="for clean-pollution: print rows that would be removed, change nothing")
+    m.add_argument("--export", type=Path,
+                   help="memory-export.json to clean (default: memory/memory-export.json)")
     ev = sub.add_parser("eval", help="replay self-test against past reports")
     ev.add_argument("--project")
     ev.add_argument("--live", action="store_true", help="use the real judge (needs the LLM)")
@@ -1275,7 +1300,9 @@ def _main(argv=None) -> int:
     if a.cmd == "correct":
         return cmd_correct(settings, a.run_dir, a.case_id, a.verdict, a.why, a.general, a.project)
     if a.cmd == "memory":
-        return cmd_memory(settings, a.action, a.ids, a.project)
+        return cmd_memory(settings, a.action, a.ids, a.project,
+                          dry_run=getattr(a, "dry_run", False),
+                          export_path=getattr(a, "export", None))
     if a.cmd == "leftovers":
         return cmd_leftovers(a.run_dir)
     if a.cmd == "onboard":

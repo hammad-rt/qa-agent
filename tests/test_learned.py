@@ -36,7 +36,7 @@ class Learned(unittest.TestCase):
 
 
 class StuckKB(unittest.TestCase):
-    def test_stuck_line_keeps_tried_and_route(self):
+    def test_stuck_loop_trail_is_not_persisted(self):
         with tempfile.TemporaryDirectory() as d:
             acts = [
                 {"app": "crm", "tool": "browser_click", "args": {"element": "CREATE"}},
@@ -50,11 +50,10 @@ class StuckKB(unittest.TestCase):
             line = learned.record_stuck(Path(d), "rewards", "crm", "E1",
                                         "kept repeating the same action without progress",
                                         "stuck at Ready to Ship", acts)
-            self.assertIsNotNone(line)
-            self.assertIn("Stuck (loop)", line)
-            self.assertIn("already tried", line)
-            self.assertIn("reached", line)
-            self.assertTrue(any("Stuck" in x for x in learned.read(Path(d), "rewards", "crm")))
+            # Loop click trails must not be persisted as later-run hints.
+            self.assertIsNone(line)
+            self.assertFalse(any("Stuck" in x for x in learned.read(Path(d), "rewards", "crm")))
+            self.assertFalse(any("already tried" in x for x in learned.read(Path(d), "rewards", "crm")))
 
 
 class ConfirmedRoutesSection(unittest.TestCase):

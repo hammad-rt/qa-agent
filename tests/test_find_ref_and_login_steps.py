@@ -410,3 +410,24 @@ class RoleMarkerPrefix(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SessionSwitchKeptTests(unittest.TestCase):
+    def test_switch_and_logout_steps_kept(self):
+        from agent_tester.plan_checks import is_session_switch_step, strip_run_handled_auth_steps
+        self.assertTrue(is_session_switch_step("Log in as another client"))
+        self.assertTrue(is_session_switch_step("Log in again as admin"))
+        self.assertFalse(is_session_switch_step("Log in to the CRM as admin"))
+        self.assertFalse(is_session_switch_step("Open the Invoices list"))
+        from agent_tester.models import TestPlan
+        plan = TestPlan.model_validate({"task_id": 1, "cases": [{"id": "C1", "title": "Wallet balance", "steps": [
+            {"n": 1, "text": "Log in to the portal as the client"},
+            {"n": 2, "text": "Open Wallet"},
+            {"n": 6, "text": "Read the balance"},
+            {"n": 7, "text": "Open Orders"},
+            {"n": 8, "text": "Open Profile"},
+            {"n": 3, "text": "Log out"},
+            {"n": 4, "text": "Log in as another client"},
+            {"n": 5, "text": "Log in as admin", "inferred": True}]}]})
+        texts = [s.text for s in strip_run_handled_auth_steps(plan).cases[0].steps]
+        self.assertEqual(texts, ["Open Wallet", "Read the balance", "Open Orders", "Open Profile", "Log out", "Log in as another client"])

@@ -67,8 +67,21 @@ def strip_run_handled_auth_steps(plan: TestPlan) -> TestPlan:
         if case_is_about_auth(c):
             c.steps = [s for s in c.steps if not (s.inferred and is_auth_step(s.text))]
         else:
-            c.steps = [s for s in c.steps if not is_auth_step(s.text)]
+            c.steps = [s for s in c.steps
+                       if not is_auth_step(s.text)
+                       or (not s.inferred and (is_logout_step(s.text) or is_session_switch_step(s.text)))]
     return plan
+
+
+# An explicit login that switches user/session ("log out and log in as another client",
+# "log in again") must be kept and never auto-skipped.
+_SWITCH = re.compile(
+    r"(?i)\b(another|different|second|other|switch|again|re-?log(?:in)?|new (user|account|client|session))\b")
+
+
+def is_session_switch_step(text: str) -> bool:
+    """True for a login step that changes or re-opens the session (keep it, never skip it)."""
+    return is_login_step(text) and bool(_SWITCH.search(text or ""))
 
 
 

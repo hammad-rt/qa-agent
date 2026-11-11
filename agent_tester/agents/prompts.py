@@ -24,7 +24,8 @@ Rules:
 - If the task leaves a step out but it is needed (navigation, setup), add it with inferred=true,
   inferred_reason and inferred_source ("facts.md", "lesson", "task comment"...). Never invent expected results.
 - Do not add inferred login or logout steps: the run logs the tester in itself. Keep an explicit
-  ticket login/logout step only when the case itself is about logging in or out.
+  ticket login/logout step when the case is about logging in or out, and always keep an explicit
+  log out or a login that switches user ("log in as another client", "log in again").
 - Put irreversible steps last for a record, or use a fresh record.
 - Never make up amounts for limits, thresholds or settings. First read the current value (a step that records it,
   listed in values_to_record), then write later steps relative to it: "declared value = the recorded threshold",

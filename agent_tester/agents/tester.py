@@ -2162,7 +2162,7 @@ class TesterSession:
 
     def _current_login_step_n(self) -> int | None:
         """Plan step number if the current/next unfinished step is a login for this app."""
-        from ..plan_checks import is_login_step
+        from ..plan_checks import is_login_step, is_session_switch_step
         if (self.brief or {}).get("discovery"):
             return None
         steps = (self.brief or {}).get("steps") or []
@@ -2173,7 +2173,7 @@ class TesterSession:
         if not candidates:
             candidates = [st for st in steps if isinstance(st, dict) and st.get("n") not in done][:1]
         for st in candidates:
-            if not is_login_step(st.get("text") or ""):
+            if not is_login_step(st.get("text") or "") or is_session_switch_step(st.get("text") or ""):
                 continue
             app = st.get("app") or self.app
             if app in (self.app, "", None):

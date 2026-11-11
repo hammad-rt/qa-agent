@@ -1,0 +1,26 @@
+{
+  "run_id": "165177-REDACTED-LOOP",
+  "note": "Redacted stuck-ask shape derived from the portal discovery loop (Request a purchase quote ×N). Placeholders only.",
+  "brief": {
+    "case_id": "DISCO-admin-portal",
+    "title": "Map admin portal screens",
+    "goal": "Discover buy-and-ship routes without submitting",
+    "steps": [
+      {"n": 1, "text": "open Buy & Ship", "app": "portal"},
+      {"n": 2, "text": "find how to request a purchase quote", "app": "portal"}
+    ]
+  },
+  "case_id": "DISCO-admin-portal",
+  "app": "portal",
+  "current_step": 2,
+  "why": "browser_click was repeated 3 times on the same control",
+  "recent": [
+    "click:button Request a purchase quote",
+    "click:button Request a purchase quote",
+    "click:button Request a purchase quote"
+  ],
+  "snapshot": "Page URL: https://portal.example/buy-and-ship\nPage Title: Buy & Ship\n- heading \"Buy & Ship\" [level=1] [ref=e10]\n- button \"Request a purchase quote\" [ref=e67]\n- button \"View orders\" [ref=e68]\n- link \"Help\" [ref=e69]\n",
+  "stuck_at_attempt": 3,
+  "guidance_after_stuck": "Try a different control or route to the same goal",
+  "continue_token": "go"
+}

@@ -24,9 +24,12 @@ MAYBE_NAV = frozenset({"browser_evaluate", "browser_run_code", "browser_run_code
 UNCHANGED = ("Page unchanged since the last captured page state — see that result "
              "(no new snapshot taken).")
 
-# Accessibility roles that are chrome / repeated UI.
+# Accessibility roles that are omit-able chrome (never menus or navigation —
+# those hold dropdown items the model must click).
 _CHROME = re.compile(
-    r"^\s*-\s+(navigation|banner|contentinfo|menubar|menu|complementary|search)\b", re.I | re.M)
+    r"^\s*-\s+(banner|contentinfo|complementary|search)\b", re.I | re.M)
+_KEEP_NAV = re.compile(
+    r"^\s*-\s+(navigation|menubar|menu)\b", re.I)
 _MAINISH = re.compile(
     r"^\s*-\s+(main|article|region|document|form|table|grid|dialog|alertdialog|alert|status|"
     r"heading|tabpanel)\b", re.I | re.M)
@@ -35,6 +38,14 @@ _KEEP_INLINE = re.compile(
     r"form|table|grid|dialog|modal|toast)\b")
 _PAGE_META = re.compile(r"(?im)^(Page URL:|Page Title:|###\s)")
 _HIDDEN = re.compile(r"\[(?:hidden|disabled|readonly)[^\]]*\]", re.I)
+# Open popups (not the collapsed menubar/navigation chrome).
+_OPEN_MENU = re.compile(r"^\s*-\s+menu\b", re.I)
+_ITEMISH = re.compile(
+    r"^\s*-\s+(menuitem|menuitemcheckbox|menuitemradio|option|treeitem|link|button)\b", re.I)
+_EXPANDED = re.compile(
+    r"\[(?:expanded|opened|open|aria-expanded(?:=true)?)\b[^\]]*\]", re.I)
+_LABEL_QUOTED = re.compile(r'"([^"]{1,200})"')
+_DIALOG = re.compile(r"^\s*-\s+(dialog|alertdialog)\b", re.I)
 
 
 def page_hash(text: str) -> str:
@@ -48,15 +59,174 @@ def _line_depth(line: str) -> int:
     return len(line) - len(line.lstrip(" "))
 
 
-def trim_page(text: str, limit: int | None = None) -> str:
-    """Keep the main content region; drop nav/menus/footers/hidden chrome when possible.
+def page_url(text: str) -> str:
+    """Page URL: header from a snapshot, or empty."""
+    m = re.search(r"(?im)^Page URL:\s*(\S+)", text or "")
+    return (m.group(1) if m else "").strip()
 
-    Generic for SuiteCRM-like UIs: prefer the largest main/content container; always keep
-    forms, tables, subpanel headers and alerts. Falls back to a length-capped full page.
+
+def _line_label(line: str) -> str:
+    m = _LABEL_QUOTED.search(line or "")
+    if m:
+        return re.sub(r"\s+", " ", m.group(1)).strip()
+    plain = re.sub(r"\[ref=[^\]]*\]", "", line or "")
+    plain = re.sub(r"\[[^\]]*\]", "", plain)
+    plain = re.sub(r"^\s*-\s*[\w-]+\s*", "", plain)
+    return re.sub(r"\s+", " ", plain).strip(" :")[:80]
+
+
+def _has_open_menu(snapshot: str) -> bool:
+    for ln in (snapshot or "").splitlines():
+        if _HIDDEN.search(ln):
+            continue
+        if _OPEN_MENU.match(ln) or _EXPANDED.search(ln):
+            return True
+    return False
+
+
+def _walk_open_subtrees(snapshot: str):
+    """Yield (start_depth, [lines]) for each open menu or expanded control subtree."""
+    rows = []
+    for ln in (snapshot or "").splitlines():
+        if ln.strip():
+            rows.append((_line_depth(ln), ln))
+    i = 0
+    n = len(rows)
+    while i < n:
+        depth, ln = rows[i]
+        if _HIDDEN.search(ln):
+            i += 1
+            continue
+        start = None
+        if _OPEN_MENU.match(ln) or _EXPANDED.search(ln):
+            start = i
+        if start is None:
+            i += 1
+            continue
+        block = [ln]
+        j = i + 1
+        while j < n and rows[j][0] > depth:
+            block.append(rows[j][1])
+            j += 1
+        yield depth, block
+        i = j
+
+
+def revealed_choice_items(snapshot: str, *, limit: int = 20) -> list[str]:
+    """Labels of items in an open menu / expanded submenu (collapsed bars yield [])."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for _depth, block in _walk_open_subtrees(snapshot):
+        for ln in block[1:] if len(block) > 1 else block:
+            if _HIDDEN.search(ln) or not _ITEMISH.search(ln):
+                continue
+            lab = _line_label(ln)
+            if not lab:
+                continue
+            key = lab.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(lab)
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def revealed_choice_block(snapshot: str, *, limit: int = 40) -> str:
+    """Accessibility-tree lines for open menus / expanded controls (refs kept)."""
+    chunks: list[str] = []
+    used = 0
+    for _depth, block in _walk_open_subtrees(snapshot):
+        # Skip a lone expanded toggle with no children (nothing new to show).
+        if len(block) <= 1 and not _OPEN_MENU.match(block[0]):
+            continue
+        take = block[: max(1, limit - used)]
+        if take:
+            chunks.append("\n".join(take))
+            used += len(take)
+        if used >= limit:
+            break
+    return "\n".join(chunks)
+
+
+def reveal_hint(before: str, after: str) -> str | None:
+    """If a menu opened (new choice items), tell the model to pick one of them."""
+    after_items = revealed_choice_items(after or "")
+    if not after_items:
+        return None
+    before_set = {x.lower() for x in revealed_choice_items(before or "")}
+    new_items = [x for x in after_items if x.lower() not in before_set]
+    pick = new_items or (after_items if (not before or _has_open_menu(after or "")) else [])
+    if not pick:
+        return None
+    return "the menu opened; pick one of: " + ", ".join(pick[:12])
+
+
+def overlay_hint(snapshot: str) -> str | None:
+    """If a dialog/form or validation message is visible, describe it for the model."""
+    msgs = form_validation_messages(snapshot or "")
+    if msgs:
+        return "a validation or status message appeared: " + "; ".join(msgs[:6])
+    title = ""
+    actions: list[str] = []
+    in_dialog = None
+    for ln in (snapshot or "").splitlines():
+        if not ln.strip():
+            continue
+        depth = _line_depth(ln)
+        if in_dialog is not None and depth <= in_dialog:
+            in_dialog = None
+        if in_dialog is None and _DIALOG.match(ln):
+            in_dialog = depth
+            title = _line_label(ln)
+            continue
+        if in_dialog is not None and _ITEMISH.search(ln) and not _HIDDEN.search(ln):
+            lab = _line_label(ln)
+            if lab and lab.lower() not in {a.lower() for a in actions}:
+                actions.append(lab)
+    if in_dialog is None and not title and not actions:
+        return None
+    bits = ["a dialog or form opened"]
+    if title:
+        bits.append(f'("{title}")')
+    if actions:
+        bits.append("visible actions: " + ", ".join(actions[:8]))
+    return " ".join(bits)
+
+
+def append_page_note(tool_response, note: str):
+    """Append a short plain-text note the model will see with the tool result."""
+    note = (note or "").strip()
+    if not note:
+        return tool_response
+    block = "\n" + note
+    if isinstance(tool_response, str):
+        return tool_response + block
+    if isinstance(tool_response, dict):
+        out = dict(tool_response)
+        if "text" in out and isinstance(out["text"], str):
+            out["text"] = out["text"] + block
+        elif "result" in out and isinstance(out["result"], str):
+            out["result"] = out["result"] + block
+        elif "page_state" in out and isinstance(out["page_state"], str):
+            out["page_state"] = out["page_state"] + block
+        else:
+            out["note"] = note
+        return out
+    return {"result": str(tool_response)[:2000], "note": note}
+
+
+def trim_page(text: str, limit: int | None = None) -> str:
+    """Keep the main content region; drop collapsed nav/footers/hidden chrome.
+
+    Always keep open menus, expanded submenu items, forms, tables, dialogs and
+    alerts. Falls back to a length-capped full page.
     """
     limit = DEFAULT_MAX_PAGE_CHARS if limit is None else limit
     raw = text or ""
-    if len(raw) <= limit and not _CHROME.search(raw):
+    # Under the cap, keep the full tree (including navigation / menus).
+    if len(raw) <= limit:
         return _drop_hidden(raw)
 
     lines = raw.splitlines()
@@ -85,6 +255,10 @@ def trim_page(text: str, limit: int | None = None) -> str:
     for blk in blocks:
         head = blk[0] if blk else ""
         blob = "\n".join(blk)
+        # Navigation / menus hold dropdown items; never omit them as chrome.
+        if _KEEP_NAV.match(head) or _OPEN_MENU.match(head):
+            keep.append(blob)
+            continue
         if _CHROME.match(head) and not _KEEP_INLINE.search(blob[:400]):
             chrome.append(blob)
             continue
@@ -109,7 +283,13 @@ def trim_page(text: str, limit: int | None = None) -> str:
         if first:
             stubs.append(f"[chrome omitted: {first[:80]}]")
 
-    out = "\n".join(meta + stubs + keep)
+    # Put revealed menu trees first so TESTER_MAX_PAGE_CHARS cannot cut them off.
+    revealed = revealed_choice_block(raw)
+    parts = meta + stubs
+    if revealed:
+        parts.append(revealed)
+    parts.extend(keep)
+    out = "\n".join(parts)
     out = _drop_hidden(out)
     if len(out) > limit:
         out = (out[:limit] + f"\n[... page text cut: {len(out) - limit} more characters. "
@@ -166,7 +346,10 @@ def result_already_has_page(text: str) -> bool:
     t = text or ""
     if "--- page state (auto) ---" in t:
         return True
-    # Playwright MCP often returns a snapshot after click/navigate.
+    # Playwright MCP often returns a snapshot after click/navigate. A short
+    # tree (few refs, e.g. a frame or just-opened menu) is still a page.
+    if re.search(r"(?i)Page URL:", t) and re.search(r"^\s*-\s+", t, re.M):
+        return True
     refs = len(re.findall(r"\[ref=", t))
     return refs >= 8 and ("Page URL:" in t or "- " in t)
 

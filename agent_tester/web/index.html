@@ -350,18 +350,40 @@ function stuckCard(p,meta,stuck){
 function genericAsk(p,secret,meta){
  return `<div class="ask" style="flex-direction:column;align-items:stretch"><div class="ask-head">${ic('alert')}${esc((meta&&meta.title)||'Waiting for your answer')}<span class="cd" id="askCd"></span></div><div class="ask-body">${esc(p)}</div><div class="ask-acts" style="align-items:center"><input id="ans" type="${secret?'password':'text'}" autocomplete="off" placeholder="Type an answer, or leave empty for the default" onkeydown="if(event.key=='Enter')answer()" style="flex:1"><button class="pri" onclick="answer()">Send</button></div></div>`}
 function askIdOf(j){return (j&&j.ask_id)||($('#promptPin')&&$('#promptPin').dataset.ask)||''}
+function typingInField(el){
+ // True when focus is in a text field the user may be editing (guidance / stuck / answer).
+ if(!el||el===document.body||el===document.documentElement)return false;
+ const t=(el.tagName||'').toUpperCase();
+ if(t==='TEXTAREA')return true;
+ if(t==='INPUT'&&!/checkbox|radio|button|submit|reset|file|hidden|range|color/.test((el.type||'').toLowerCase()))return true;
+ return false}
 function renderPrompt(j){const pin=$('#promptPin'),banner=$('#waitBanner');
  if(!j||!j.waiting||!j.prompt){clearPromptUi();return}
  const meta={kind:j.prompt_kind||'question',title:j.prompt_title||'',timeout_sec:j.prompt_timeout_sec};
- const key=(j.ask_id||'')+'|'+(j.prompt||'')+(j.waiting_since||'')+'|'+JSON.stringify(j.stuck||{}).slice(0,80);
+ // Ask identity only — do NOT include stuck JSON (it changes every poll and used to re-focus / wipe inputs).
+ const key=(j.ask_id||'')+'|'+(j.prompt||'')+'|'+(j.waiting_since||'');
  const isStuck=meta.kind==='stuck_ask'||meta.kind==='stuck_chat'||/Options:\s*\(1\)\s*(give guidance|send a chat)/i.test(j.prompt)||/^Stuck on\s+/i.test(j.prompt||'');
- const html=isStuck?stuckCard(j.prompt,meta,j.stuck||{}):approvalCard(j.prompt,meta)||genericAsk(j.prompt,j.secret,meta);
  banner.classList.add('on');banner.innerHTML=`${ic('alert')} Waiting for your answer${meta.title?': '+esc(meta.title):''}`;
- if(pin.dataset.p===j.prompt&&pin.dataset.ask===(j.ask_id||'')&&pin.innerHTML&&!j.stuck){startCountdown($('#askCd'),j.waiting_since,meta.timeout_sec||(isStuck?600:null));return}
+ // Same ask (incl. stuck): never rewrite pin — that wiped #stuckGuide/#ans on every 1s poll.
+ if(pin.dataset.p===j.prompt&&pin.dataset.ask===(j.ask_id||'')&&pin.innerHTML){
+  startCountdown($('#askCd'),j.waiting_since,meta.timeout_sec||(isStuck?600:null));
+  if(isStuck&&j.stuck){
+   const chat=$('#stuckChat');if(chat)setHTML(chat,chatHtml(j.stuck.thread||[]));
+   const img=pin.querySelector('img.shot-thumb');
+   if(img&&j.stuck.screenshot){const u=stuckShotUrl(j.stuck.screenshot);const src=img.getAttribute('src')||'';if(u&&src.indexOf(j.stuck.screenshot)<0)img.src=u}
+  }
+  return}
+ const html=isStuck?stuckCard(j.prompt,meta,j.stuck||{}):approvalCard(j.prompt,meta)||genericAsk(j.prompt,j.secret,meta);
+ // Preserve any in-pin draft if a redraw somehow races (guideIn lives outside pin).
+ const keep={};pin.querySelectorAll('textarea,input:not([type=checkbox]):not([type=radio]):not([type=button]):not([type=submit])').forEach(el=>{
+  if(el.id&&(el.value||typingInField(el)))keep[el.id]={v:el.value,s:el.selectionStart,e:el.selectionEnd,f:document.activeElement===el}});
  pin.dataset.p=j.prompt;pin.dataset.ask=j.ask_id||'';pin.innerHTML=html;
+ Object.entries(keep).forEach(([id,k])=>{const el=$('#'+id);if(!el)return;el.value=k.v;try{if(k.s!=null)el.setSelectionRange(k.s,k.e)}catch(e){}if(k.f)try{el.focus({preventScroll:true})}catch(e){}});
  startCountdown($('#askCd'),j.waiting_since,meta.timeout_sec||(isStuck?600:null));
  if(key!==lastPromptKey){lastPromptKey=key;startTitleFlash('Waiting for answer — QA Agent');maybeNotify(meta.title||'QA Agent needs input',j.prompt);
   requestAnimationFrame(()=>{try{pin.scrollTop=0}catch(e){}
+   // Auto-focus only once for a new ask, and never steal from #guideIn or another field.
+   if(typingInField(document.activeElement))return;
    const focusEl=$('#stuckGuide')||$('#ans');if(focusEl)try{focusEl.focus({preventScroll:true})}catch(e){}})}}
 async function decide(v){if(!job)return;try{await api(`/api/jobs/${job.id}/input`,{text:v,ask_id:askIdOf(job)});clearPromptUi()}catch(e){alert(e.message||e)}}
 async function answer(){if(!job)return;const i=$('#ans');try{await api(`/api/jobs/${job.id}/input`,{text:i?i.value:'',ask_id:askIdOf(job)});clearPromptUi()}catch(e){alert(e.message||e)}}

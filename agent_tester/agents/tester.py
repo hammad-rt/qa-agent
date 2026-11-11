@@ -1015,6 +1015,12 @@ class TesterSession:
             forbidden = TesterSession._deny_forbidden_after_stuck(self, name, args)
             if forbidden is not None:
                 return forbidden
+            # Already-checked checkbox/radio/switch: do not click (a re-click would
+            # toggle it off). Guidance only — does not count toward the stuck budget.
+            if name == "browser_click":
+                checked = TesterSession._already_checked_guidance(self, args)
+                if checked is not None:
+                    return checked
             limit = self._budget_check(name, args)
             counted = True
             if limit:
@@ -1073,8 +1079,11 @@ class TesterSession:
             if name == "browser_click" and _SUBMIT.search(label) and self._control_disabled(label, snap):
                 self.state.log_action(case_id=self.case_id, app=self.app, tool=name, args=_safe_args(args),
                                       plan_step=self.current_step, outcome="disabled_control")
+                missing = empty_required_fields(snap or "")
+                extra = (" Required fields still empty: " + "; ".join(missing) + "."
+                         if missing else "")
                 return {"error": (
-                    f"{label!r} is disabled on the current page. Do not click it again. "
+                    f"{label!r} is disabled on the current page. Do not click it again.{extra} "
                     "Find the unfilled required choice on this wizard/step (radio, checkbox, or dropdown), "
                     "fill it, take a fresh browser_snapshot, then click Continue/Next only when it is enabled."
                 )}
@@ -1483,21 +1492,24 @@ class TesterSession:
         already shows a submenu or a form/message, surface that instead of asking a person.
         Only one such recovery per control; the next identical click still stuck-asks.
         """
-        from ..page_state import form_validation_messages, overlay_hint, reveal_hint
+        from ..page_state import form_validation_messages, overlay_hint, reveal_hint, toggle_state_hint
         page = getattr(self, "_page_state", "") or (
             self.last_snapshot if isinstance(self.last_snapshot, str) else "")
         label = str(args.get("element") or args.get("name") or "control").strip() or "control"
+        ref = str(args.get("target") or args.get("ref") or "").removeprefix("ref=").strip()
         hint = reveal_hint("", page or "")
-        # At STUCK_MAX only an open menu postpones the ask (pick an item).
+        toggle = (toggle_state_hint(page or "", label=label, ref=ref, already=True)
+                  or toggle_state_hint(page or "", label=label, ref=ref))
+        # At STUCK_MAX an open menu or an already-checked toggle postpones the ask.
         # Validation/overlay already had a chance at LOOP_WARN; the 3rd repeat must ask.
         over = None
-        if not hint and not final:
+        if not hint and not toggle and not final:
             over = overlay_hint(page or "")
             if not over:
                 msgs = form_validation_messages(page or "")
                 if msgs:
                     over = "a validation or status message appeared: " + "; ".join(msgs[:6])
-        if not hint and not over:
+        if not hint and not toggle and not over:
             return None
         if final:
             tried = getattr(self, "_repeat_recover_tried", None)
@@ -1511,7 +1523,7 @@ class TesterSession:
             self.state.log_action(case_id=self.case_id, app=self.app, tool="browser_click",
                                   args=_safe_args(args, tool="browser_click"),
                                   plan_step=self.current_step, outcome="repeat_recover_reveal")
-        what = hint or over
+        what = hint or toggle or over
         return {"error": (
             f"Blocked: you already did this click and the page URL did not change. {what}. "
             f"Do not click {label!r} again — use what is now on the page. "
@@ -2059,6 +2071,26 @@ class TesterSession:
         ref = str(ref).removeprefix("ref=").strip()
         return f"ref={ref}]" in snap or f"ref={ref} " in snap or f"[ref={ref}]" in snap
 
+    def _already_checked_guidance(self, args: dict) -> dict | None:
+        """Refuse a click that would uncheck a box that is already on."""
+        page = getattr(self, "_page_state", "") or ""
+        if not isinstance(page, str) or not page:
+            snap = getattr(self, "last_snapshot", "")
+            page = snap if isinstance(snap, str) else ""
+        if not page:
+            return None
+        label = str((args or {}).get("element") or (args or {}).get("name") or "")
+        ref = str((args or {}).get("target") or (args or {}).get("ref") or "").removeprefix("ref=").strip()
+        if toggle_is_checked(page, label=label, ref=ref) is not True:
+            return None
+        hint = toggle_state_hint(page, label=label, ref=ref, already=True)
+        if not hint:
+            return None
+        self.state.log_action(case_id=self.case_id, app=self.app, tool="browser_click",
+                              args=_safe_args(args, tool="browser_click"),
+                              plan_step=self.current_step, outcome="already_checked")
+        return {"error": hint}
+
     def _control_disabled(self, label: str, snapshot: str | None = None) -> bool:
         snap = snapshot if snapshot is not None else (
             self.last_snapshot if isinstance(self.last_snapshot, str) else "")
@@ -2193,9 +2225,13 @@ class TesterSession:
         if tool.name not in ("browser_click", "browser_type", "browser_fill_form",
                              "browser_select_option", "browser_press_key"):
             return out
-        hint = reveal_hint(before_page, after_page) if tool.name == "browser_click" else None
-        over = (overlay_hint(after_page) if tool.name == "browser_click" and not hint else None)
-        note = hint or over
+        ref = str((args or {}).get("target") or (args or {}).get("ref") or "").removeprefix("ref=").strip()
+        label = str((args or {}).get("element") or (args or {}).get("name") or "")
+        toggle = (toggle_state_hint(after_page, label=label, ref=ref, before=before_page)
+                  if tool.name == "browser_click" else None)
+        hint = reveal_hint(before_page, after_page) if tool.name == "browser_click" and not toggle else None
+        over = (overlay_hint(after_page) if tool.name == "browser_click" and not hint and not toggle else None)
+        note = toggle or hint or over
         if note:
             out = append_page_note(out, note)
         changed = bool(before_h and after_h and before_h != after_h)
@@ -2412,9 +2448,10 @@ class TesterSession:
 
 
 from ..page_state import (DEFAULT_MAX_PAGE_CHARS, UNCHANGED, append_page_note,
-                          is_state_changing, merge_page_into_result, overlay_hint,
-                          page_hash, page_url, result_already_has_page, reveal_hint,
-                          trim_page)
+                          empty_required_fields, is_state_changing,
+                          merge_page_into_result, overlay_hint, page_hash, page_url,
+                          result_already_has_page, reveal_hint, toggle_is_checked,
+                          toggle_state_hint, trim_page)
 
 MAX_PAGE_CHARS = DEFAULT_MAX_PAGE_CHARS   # env TESTER_MAX_PAGE_CHARS (default 12000)
 KEEP_PAGE_READS = int(os.environ.get("TESTER_KEEP_PAGE_READS", "2"))  # last two page trees

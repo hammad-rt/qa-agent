@@ -302,8 +302,14 @@ def _drop_hidden(text: str) -> str:
     out = []
     for ln in (text or "").splitlines():
         if _HIDDEN.search(ln) and not _KEEP_INLINE.search(ln):
-            # Keep form fields even if marked readonly (DetailView values).
-            if re.search(r"(?i)\b(textbox|spinbutton|combobox|cell|gridcell|rowheader)\b", ln):
+            # Keep form fields even if marked readonly (DetailView values), and
+            # keep disabled submit/toggle controls so the model can see why
+            # Continue/Next is not clickable yet.
+            if re.search(
+                r"(?i)\b(textbox|spinbutton|combobox|cell|gridcell|rowheader|"
+                r"button|checkbox|radio|switch|menuitemcheckbox|menuitemradio)\b",
+                ln,
+            ):
                 out.append(ln)
             continue
         out.append(ln)
@@ -410,3 +416,223 @@ def form_validation_messages(snapshot: str, *, limit: int = 8) -> list[str]:
         if len(out) >= limit:
             break
     return out
+
+# Checkbox / radio / switch state (Playwright MCP aria snapshots use [checked]).
+_TOGGLE_ROLE = re.compile(
+    r"^\s*-\s+(checkbox|radio|switch|menuitemcheckbox|menuitemradio)\b", re.I)
+_CHECKED_YES = re.compile(r"\[(?:checked|selected|pressed)(?:=true)?\]", re.I)
+_CHECKED_NO = re.compile(
+    r"\[(?:unchecked|checked=false|selected=false|pressed=false)\]", re.I)
+_DISABLED_MARK = re.compile(r"\[disabled(?:[^\]]*)\]", re.I)
+_REQUIRED_FIELD = re.compile(r"\[(?:required|aria-required)(?:[^\]]*)\]", re.I)
+_INVALID_MARK = re.compile(r"\[(?:invalid|aria-invalid)(?:[^\]]*)\]", re.I)
+_SUBMIT_LABEL = re.compile(
+    r"\b(save|submit|update|apply|confirm|continue|next|create|finish|send|proceed)\b", re.I)
+_NEXTISH = re.compile(r"\b(continue|next|proceed|submit|finish|confirm)\b", re.I)
+_SUBMIT_ROLE = re.compile(r"^\s*-\s+(button|link|menuitem)\b", re.I)
+_FIELD_ROLE = re.compile(
+    r"^\s*-\s+(textbox|searchbox|combobox|spinbutton|listbox|checkbox|radio|switch|"
+    r"menuitemcheckbox|menuitemradio)\b", re.I)
+_ROLE_WORDS = re.compile(
+    r"\b(checkbox|radio|switch|button|link|menuitem|menuitemcheckbox|menuitemradio)\b", re.I)
+_UNCHECK_ROLES = frozenset({"checkbox", "switch", "menuitemcheckbox"})
+
+
+def _norm_label(text: str) -> str:
+    s = _ROLE_WORDS.sub(" ", (text or "").lower())
+    s = re.sub(r"[^\w\s]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _labels_match(a: str, b: str) -> bool:
+    na, nb = _norm_label(a), _norm_label(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    short, long = (na, nb) if len(na) <= len(nb) else (nb, na)
+    # Short generic words ("agree", "yes") must not match unrelated controls.
+    if len(short) < 8:
+        return False
+    return short in long
+
+
+def _ref_on_line(line: str, ref: str) -> bool:
+    ref = (ref or "").removeprefix("ref=").strip()
+    if not ref:
+        return False
+    return f"ref={ref}]" in line or f"ref={ref} " in line
+
+
+def _line_role(line: str) -> str:
+    m = re.match(r"\s*-\s*([\w-]+)", line or "")
+    return (m.group(1) if m else "").lower()
+
+
+def _line_checked(line: str) -> bool | None:
+    """True/False when the line is a toggle; None otherwise."""
+    if not line:
+        return None
+    if _CHECKED_NO.search(line):
+        return False
+    if _CHECKED_YES.search(line):
+        return True
+    if _TOGGLE_ROLE.search(line):
+        return False  # Playwright omits [checked] when the box is off
+    return None
+
+
+def _field_value(line: str) -> str:
+    m = re.search(r"\]:(.*)$", line or "")
+    if not m:
+        return ""
+    return m.group(1).strip().strip('"')
+
+
+def find_toggle_line(snapshot: str, *, label: str = "", ref: str = "") -> str | None:
+    """Accessibility-tree line for a checkbox/radio/switch, by ref or label.
+
+    If the ref points at a wrapper (a <label> around a visually hidden input),
+    the toggle child of that wrapper is returned.
+    """
+    rows = [(_line_depth(ln), ln) for ln in (snapshot or "").splitlines() if ln.strip()]
+    ref = (ref or "").removeprefix("ref=").strip()
+    if ref:
+        for i, (depth, ln) in enumerate(rows):
+            if not _ref_on_line(ln, ref):
+                continue
+            if _TOGGLE_ROLE.search(ln):
+                return ln
+            # Wrapper / label: first toggle descendant.
+            for depth2, child in rows[i + 1:]:
+                if depth2 <= depth:
+                    break
+                if _TOGGLE_ROLE.search(child):
+                    return child
+            break
+    if label:
+        for _depth, ln in rows:
+            if _TOGGLE_ROLE.search(ln) and _labels_match(label, _line_label(ln)):
+                return ln
+    return None
+
+
+def toggle_is_checked(snapshot: str, *, label: str = "", ref: str = "") -> bool | None:
+    """True if the named toggle is checked, False if unchecked, None if not found."""
+    line = find_toggle_line(snapshot, label=label, ref=ref)
+    if line is None:
+        return None
+    return bool(_line_checked(line))
+
+
+def submit_buttons(snapshot: str) -> list[dict]:
+    """Visible submit/next-style buttons: {label, disabled, role, line}."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for ln in (snapshot or "").splitlines():
+        if not _SUBMIT_ROLE.search(ln) or not _SUBMIT_LABEL.search(ln):
+            continue
+        lab = _line_label(ln)
+        if not lab or not _SUBMIT_LABEL.search(lab):
+            continue
+        key = lab.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "label": lab,
+            "disabled": bool(_DISABLED_MARK.search(ln)),
+            "role": _line_role(ln) or "button",
+            "line": ln,
+        })
+    return out
+
+
+def _prefer_submit(labels: list[str]) -> list[str]:
+    preferred = [x for x in labels if _NEXTISH.search(x)]
+    rest = [x for x in labels if x not in preferred]
+    return preferred + rest
+
+
+def empty_required_fields(snapshot: str, *, limit: int = 8) -> list[str]:
+    """Labels of required fields that are still empty or unchecked."""
+    lines = [ln for ln in (snapshot or "").splitlines() if ln.strip()]
+    any_radio_checked = any(
+        _line_checked(ln) is True for ln in lines if _line_role(ln) == "radio")
+    out: list[str] = []
+    seen: set[str] = set()
+    for ln in lines:
+        if not (_REQUIRED_FIELD.search(ln) or _INVALID_MARK.search(ln)):
+            continue
+        if not _FIELD_ROLE.search(ln):
+            continue
+        lab = _line_label(ln)
+        if not lab:
+            continue
+        role = _line_role(ln)
+        if role in ("checkbox", "switch", "menuitemcheckbox", "menuitemradio", "radio"):
+            if _line_checked(ln) is True:
+                continue
+            if role == "radio" and any_radio_checked:
+                continue
+            desc = f"{lab} ({role}, unchecked)"
+        else:
+            if _field_value(ln):
+                continue
+            desc = f"{lab} ({role or 'field'}, empty)"
+        key = desc.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(desc)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def toggle_state_hint(after: str, *, label: str = "", ref: str = "",
+                      before: str = "", already: bool = False) -> str | None:
+    """Tell the model the toggle's checked state and which submit control to use next."""
+    line = find_toggle_line(after or "", label=label, ref=ref)
+    if not line:
+        return None
+    role = _line_role(line) or "checkbox"
+    name = _line_label(line) or _norm_label(label) or "control"
+    checked = bool(_line_checked(line))
+    if already and not checked:
+        return None
+    if already or checked:
+        lead = f"{role} {name!r} is {'already' if already else 'now'} checked; do not click it again"
+        if role in _UNCHECK_ROLES:
+            lead += " (a second click would uncheck it)"
+    else:
+        lead = f"{role} {name!r} is now unchecked"
+    bits = [lead]
+
+    after_btns = submit_buttons(after or "")
+    enabled = [b["label"] for b in after_btns if not b["disabled"]]
+    disabled = [b["label"] for b in after_btns if b["disabled"]]
+    newly: list[str] = []
+    if before:
+        was_disabled = {b["label"].lower() for b in submit_buttons(before) if b["disabled"]}
+        newly = [b["label"] for b in after_btns
+                 if not b["disabled"] and b["label"].lower() in was_disabled]
+
+    missing = empty_required_fields(after or "")
+    if checked:
+        point = _prefer_submit(newly or enabled)
+        if point:
+            bits.append(f"The {point[0]!r} button is now enabled — click it to proceed")
+        elif disabled:
+            why = (f"{disabled[0]!r} is still disabled; required fields still empty: "
+                   + "; ".join(missing) if missing else f"{disabled[0]!r} is still disabled")
+            bits.append(why)
+        elif missing:
+            bits.append("required fields still empty: " + "; ".join(missing))
+    else:
+        if disabled:
+            bits.append(
+                f"{disabled[0]!r} is disabled until this {role} is checked again")
+        elif missing:
+            bits.append("required fields still empty: " + "; ".join(missing))
+    return ". ".join(bits) + "."

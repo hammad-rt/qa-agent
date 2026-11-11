@@ -794,6 +794,13 @@ class Handler(BaseHTTPRequestHandler):
                         only = (st.get("mode") or {}).get("cases") or []
                         if only:
                             args += ["--cases", ",".join(only)]
+                        if not _subtasks_of(d):
+                            args.append("--no-subtasks")
+                        if (d / "cases_file.md").exists():
+                            args += ["--cases-file", str(d / "cases_file.md")]
+                        # Carry --rediscover only when this run recorded it (skip if absent).
+                        if st.get("rediscover") or (st.get("mode") or {}).get("rediscover"):
+                            args.append("--rediscover")
                     else:
                         if b.get("new_run"):
                             args.append("--new-run")
@@ -827,6 +834,8 @@ class Handler(BaseHTTPRequestHandler):
                             "--from-draft", d.name]
                     if not _subtasks_of(d):
                         args.append("--no-subtasks")
+                    if (d / "cases_file.md").exists():
+                        args += ["--cases-file", str(d / "cases_file.md")]
                 elif b.get("resume"):
                     d = self._run(str(b["resume"]))
                     if not d:

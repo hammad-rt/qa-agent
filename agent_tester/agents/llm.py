@@ -65,41 +65,54 @@ def model(settings: Settings, json_mode: bool = False, max_tokens: int | None = 
     return LiteLlm(model=f"openai/{name}", api_base=base, api_key=effective_api_key(key), **extra)
 
 
+_POLL_SLICE = 5.0  # seconds between human-wait checks; never cancels the pending event
+
+
 async def _iter_events_with_idle(aiter, *, idle_sec: float, call_deadline: float | None = None):
     """Yield ADK events; fail when no event arrives within idle_sec, or past call_deadline.
 
     While ``pause_idle_for_human()`` is active (stuck ask / ask_user), keep waiting without
     counting that time as LLM idle.
+
+    The pending ``__anext__`` is polled with ``asyncio.wait`` (which never cancels it), so a
+    slow first token (> one poll slice) does not cancel the ADK runner. It is cancelled only
+    when we actually give up (idle exceeded / deadline hit) or the consumer stops iterating.
     """
-    while True:
-        # Poll in short slices so a human-wait that starts mid-timeout is noticed.
-        slice_sec = min(5.0, idle_sec)
-        waited = 0.0
-        ev = None
+    nxt = None
+    try:
         while True:
-            if human_wait_active():
-                waited = 0.0
-                slice_sec = min(5.0, idle_sec)
-            left = slice_sec
-            if call_deadline is not None and not human_wait_active():
-                left = min(left, max(0.05, call_deadline - time.monotonic()))
-            try:
-                ev = await asyncio.wait_for(aiter.__anext__(), timeout=left)
-                break
-            except StopAsyncIteration:
-                return
-            except asyncio.TimeoutError as e:
+            # Poll in short slices so a human-wait that starts mid-timeout is noticed.
+            slice_sec = min(_POLL_SLICE, idle_sec)
+            started = time.monotonic()
+            nxt = asyncio.ensure_future(aiter.__anext__())
+            while True:
+                if human_wait_active():
+                    started = time.monotonic()
+                left = slice_sec
+                if call_deadline is not None and not human_wait_active():
+                    left = min(left, max(0.05, call_deadline - time.monotonic()))
+                done, _ = await asyncio.wait({nxt}, timeout=left)
+                if done:
+                    break
                 if human_wait_active():
                     continue
-                waited += left
+                waited = time.monotonic() - started
                 if call_deadline is not None and time.monotonic() >= call_deadline:
                     raise LLMOutputError(
-                        f"LLM call hit the {LLM_TIMEOUT:.0f}s per-call timeout") from e
+                        f"LLM call hit the {LLM_TIMEOUT:.0f}s per-call timeout")
                 if waited >= idle_sec:
                     raise LLMOutputError(
-                        f"no text for {LLM_IDLE_TIMEOUT:.0f}s (stream idle / empty ADK events)") from e
-                continue
-        yield ev
+                        f"no text for {LLM_IDLE_TIMEOUT:.0f}s (stream idle / empty ADK events)")
+            try:
+                ev = nxt.result()
+            except StopAsyncIteration:
+                nxt = None
+                return
+            nxt = None
+            yield ev
+    finally:
+        if nxt is not None and not nxt.done():
+            nxt.cancel()
 
 
 async def run_agent(agent, prompt: str, settings: Settings, state: dict | None = None, app_name: str = "qa-agent",

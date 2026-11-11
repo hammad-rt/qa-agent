@@ -143,7 +143,7 @@ def reverify_data_plan(
         for cid in case_ids:
             case = next((c for c in plan.cases if c.id == cid), None)
             if case:
-                want |= {t.upper() for t in ph.tokens_in_case(case, ph.token_pattern(pack_cfg))}
+                want |= {t.upper() for t in ph.tokens_in_case(case, ph.token_pattern(pack_cfg), pack_cfg=pack_cfg)}
         tokens = [t for t in by_tok if t in want]
     else:
         tokens = list(by_tok)

@@ -109,7 +109,7 @@ helpers:
 # Placeholder tokens used in suite cases. Resolved up front (find, else create); values live in run state only.
 # Create is a sequence of app-tagged parts: customer places the order on the portal; CRM does parcel/status/invoice.
 placeholders:
-  token_pattern: '(?i)\b(?:ORDER-[A-Z][A-Z0-9_-]*|CUSTOMER|Wallet)\b'
+  token_pattern: '\b(?:ORDER-[A-Z][A-Z0-9_-]*|CUSTOMER|WALLET)\b|\{(?:ORDER-[A-Z][A-Z0-9_-]*|CUSTOMER|WALLET)\}'
   items:
     - placeholder: CUSTOMER
       description: >-

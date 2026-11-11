@@ -956,7 +956,7 @@ def _resolve_upfront(plan, state, testers, memory, data_prep, pack_cfg) -> None:
                 state.data.setdefault("notes", []).append(f"up-front contact lookup: {blocked.note}")
             break
     if data_plan:
-        resolve_data_plan(plan, state, testers, data_plan)
+        resolve_data_plan(plan, state, testers, data_plan, pack_cfg=pack_cfg)
     state.data["data_plan_resolved"] = True
     state.save()
 

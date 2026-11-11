@@ -216,7 +216,7 @@ class ProtectedStuckBasics165177(unittest.TestCase):
                 self.navigated.append(url)
 
             async def snapshot(self):
-                return 'Admin Dashboard\n- button "Log out"'
+                return 'Admin Dashboard\n- button "Log out" [ref=e1]'
 
         class Ctx:
             app = "crm"

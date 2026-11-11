@@ -336,7 +336,8 @@ def cmd_test(settings: Settings, task_id: int, case: str | None, env: str, dry_r
             plan = asyncio.run(plan_task(settings, pack, task_text, task_id, env, only_case=",".join(only) or None,
                                      lessons=_plan_lessons, trace_path=state.dir / "trace.jsonl", generate=generate,
                                      preapprovable=list(pack.config.get("preapprovable_actions", [])),
-                                     batch_ids=file_ids, run_dir=state.dir))
+                                     batch_ids=file_ids, run_dir=state.dir,
+                                     time_cap=not bool(cases_file)))
     except LLMOutputError as e:
         lessons_mem.store.close()
         print(f"\nPlanning stopped: {e}")

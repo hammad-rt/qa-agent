@@ -1036,11 +1036,12 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
 
 
 def resolve_data_plan(plan, state, testers: dict, data_plan: list[dict],
-                      *, pseudo_case=None) -> list[CaseResult]:
+                      *, pseudo_case=None, pack_cfg: dict | None = None) -> list[CaseResult]:
     """Resolve every placeholder row up front (find or create). Returns BLOCKED results for failures;
     successful rows are stored in run state only. Does not stop the run — caller continues other cases."""
     from .models import PlannedCase, CaseType
-    from .placeholders import tokens_in_case
+    from .placeholders import token_pattern, tokens_in_case
+    pat = token_pattern(pack_cfg)
     blocked: list[CaseResult] = []
     for row in data_plan or []:
         if row.get("missing"):
@@ -1066,7 +1067,7 @@ def resolve_data_plan(plan, state, testers: dict, data_plan: list[dict],
             steps=[Step(text=f"Prepare placeholder {tok}", app=rule.get("find_app") or rule.get("app") or "none")],
             expected=f"{tok} ready")
         for c in plan.cases:
-            if tok.upper() in {t.upper() for t in tokens_in_case(c)}:
+            if tok.upper() in {t.upper() for t in tokens_in_case(c, pat, pack_cfg=pack_cfg)}:
                 case = c
                 break
         err = _ensure_one(plan, case, state, testers, rule)

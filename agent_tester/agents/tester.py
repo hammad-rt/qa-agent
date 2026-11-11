@@ -1701,10 +1701,12 @@ class TesterSession:
                 kind = {"1": "chat", "2": "skip", "3": "stop"}[m.group(1)]
                 rest = (m.group(2) or "").strip()
             elif re.match(r"(?i)^\s*s([123])\b", ans):
+                from ..stuck_summary import suggestion_text
                 sm = re.match(r"(?i)^\s*s([123])\b[:\s]*(.*)$", ans)
                 idx = int(sm.group(1)) - 1 if sm else 0
                 sug = (summary.get("suggestions") or [])
-                rest = (sm.group(2) or "").strip() or (sug[idx] if idx < len(sug) else ans)
+                picked = suggestion_text(sug[idx]) if idx < len(sug) else ""
+                rest = (sm.group(2) or "").strip() or picked or ans
                 kind = "chat"
             elif re.match(r"(?i)^\s*(skip|block)\b", ans):
                 kind, rest = "skip", re.sub(r"(?i)^\s*(skip|block)\b[:\s]*", "", ans).strip()

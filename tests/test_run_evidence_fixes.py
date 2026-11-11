@@ -215,10 +215,12 @@ class JunkValidationGuess(unittest.TestCase):
     """Item 5: no 'Fix: content' junk; real validation text or no suggestion."""
 
     def test_bare_content_not_suggested(self):
+        from agent_tester.stuck_summary import suggestion_text
         guess, sug = guess_and_suggestions(
             "submit failed", {}, {"validation": ["content"], "required": [], "disabled": []}, [])
-        self.assertNotIn("Fix: content", " ".join(sug))
-        self.assertFalse(any(s.lower().startswith("fix:") for s in sug))
+        blob = " ".join(suggestion_text(s) for s in sug)
+        self.assertNotIn("Fix: content", blob)
+        self.assertFalse(any(suggestion_text(s).lower().startswith("fix:") for s in sug))
 
     def test_real_validation_used(self):
         guess, sug = guess_and_suggestions(

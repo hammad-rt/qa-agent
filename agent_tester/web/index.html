@@ -94,6 +94,9 @@ button.ghost{background:transparent;border-color:transparent;color:var(--mute)}b
 .ask .stuck-grid{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(140px,.7fr);gap:12px;align-items:start}
 .ask .stuck-meta{display:grid;gap:6px;font-size:13.5px}
 .ask .stuck-meta b{color:var(--text)}.ask .stuck-meta .k{color:var(--mute);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.ask .ask-question{font-size:15px;line-height:1.4;font-weight:600;color:var(--text);margin-bottom:2px}
+.ask .intent-lines{display:grid;gap:6px;padding:8px 10px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--panel2)}
+.ask .tried-list{margin:2px 0 0 18px;padding:0}.ask .tried-list li{margin:2px 0}
 .ask .shot-thumb{width:100%;max-height:140px;object-fit:cover;object-position:top;border-radius:var(--r-sm);border:1px solid var(--line);cursor:zoom-in;background:#0B1220}
 .ask .sugs{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .ask .sugs button{font-size:12.5px;min-height:32px;padding:4px 10px}
@@ -325,19 +328,31 @@ function approvalCard(p,meta){if(!/\[y\/N\]:?\s*$/i.test(p||''))return '';
 function stuckShotUrl(name){if(!name||!cur)return'';return `/api/runs/${cur}/file?path=shots/${encodeURIComponent(name)}`}
 function chatHtml(thread){const rows=(thread||[]);if(!rows.length)return'<div class="mute">No messages yet — ask a question or pick a suggestion. The agent will not continue until you press Continue.</div>';
  return rows.map(m=>`<div class="m ${esc(m.role||'')}"><div class="who">${esc(m.role==='user'?'You':'Agent')}</div>${esc(m.text||'')}</div>`).join('')}
+function sugText(s){return (s&&typeof s==='object')?(s.text||''):String(s||'')}
+function sugInferred(s){return !!(s&&typeof s==='object'&&s.inferred)}
 function stuckCard(p,meta,stuck){
  stuck=stuck||{};
  const shot=stuck.screenshot?`<img class="shot-thumb" alt="Latest page" src="${esc(stuckShotUrl(stuck.screenshot))}" onclick="zoom(this.src)"><div class="mute" style="margin-top:4px;font-size:11px">shots/${esc(stuck.screenshot)}</div>`:'<div class="mute">No screenshot yet</div>';
- const tried=(stuck.tried||[]).map(t=>esc(t)).join('; ')||'—';
+ const triedList=(stuck.tried||[]).filter(Boolean);
+ const tried=triedList.length?`<ul class="tried-list">${triedList.map(t=>`<li>${esc(t)}</li>`).join('')}</ul>`:'<span class="mute">—</span>';
  const seeing=(stuck.seeing||[]).map(t=>esc(t)).join('; ')||'—';
- const sugs=(stuck.suggestions||[]).map((s,i)=>`<button class="sec" onclick="stuckSug(${i})">${esc(s)}</button>`).join('');
+ const sugs=(stuck.suggestions||[]).map((s,i)=>{
+  const t=sugText(s);if(!t)return'';
+  const badge=sugInferred(s)?'<span class="inf" title="Generated from the situation, not read from the page">inferred</span>':'';
+  return `<button class="sec" onclick="stuckSug(${i})">${esc(t)}${badge}</button>`;
+ }).join('');
  const body=stuck.case_id?'' : esc((p||'').replace(/\s*Reply with[\s\S]*$/i,'').trim());
+ const question=stuck.question||stuck.guess||'';
  const metaHtml=stuck.case_id?`<div class="stuck-meta">
-   <div><div class="k">Goal</div><b>${esc(stuck.case_id)}</b> · ${esc(stuck.step_label||'before step 1')}<div>${esc(stuck.goal||'')}</div></div>
-   <div><div class="k">Where</div>${esc(stuck.app||'')} · ${esc(stuck.page_title||'')} <code>${esc(stuck.page_path||'')}</code>${stuck.wizard_heading?` · Wizard: <b>${esc(stuck.wizard_heading)}</b>`:''}</div>
+   ${question?`<div class="ask-question">${esc(question)}</div>`:''}
+   <div class="intent-lines">
+     <div><div class="k">Outcome</div>${esc(stuck.outcome||stuck.goal||'')}</div>
+     <div><div class="k">Doing now</div>${esc(stuck.doing_now||stuck.guess||stuck.why||'')}</div>
+     <div><div class="k">Need from you</div>${esc(stuck.need_from_user||'Tell me how to continue, then press Continue.')}</div>
+   </div>
+   <div><div class="k">Where</div>${esc(stuck.app||'')} · ${esc(stuck.page_title||'')} <code>${esc(stuck.page_path||'')}</code>${stuck.wizard_heading?` · Wizard: <b>${esc(stuck.wizard_heading)}</b>`:''} · <b>${esc(stuck.case_id)}</b> · ${esc(stuck.step_label||'before step 1')}</div>
    <div><div class="k">Tried</div>${tried}</div>
    <div><div class="k">Sees</div>${seeing}</div>
-   <div><div class="k">Likely issue</div>${esc(stuck.guess||stuck.why||'')}</div>
   </div>`:`<div class="ask-body">${body}</div>`;
  return `<div class="ask stuck" style="flex-direction:column;align-items:stretch"><div class="ask-head">${ic('alert')}${(meta&&meta.title)||'Stuck — waiting for your answer'}<span class="cd" id="askCd"></span></div>
   <div class="stuck-grid">${metaHtml}<div>${shot}</div></div>
@@ -387,7 +402,7 @@ function renderPrompt(j){const pin=$('#promptPin'),banner=$('#waitBanner');
    const focusEl=$('#stuckGuide')||$('#ans');if(focusEl)try{focusEl.focus({preventScroll:true})}catch(e){}})}}
 async function decide(v){if(!job)return;try{await api(`/api/jobs/${job.id}/input`,{text:v,ask_id:askIdOf(job)});clearPromptUi()}catch(e){alert(e.message||e)}}
 async function answer(){if(!job)return;const i=$('#ans');try{await api(`/api/jobs/${job.id}/input`,{text:i?i.value:'',ask_id:askIdOf(job)});clearPromptUi()}catch(e){alert(e.message||e)}}
-async function stuckSug(i){const s=((job&&job.stuck&&job.stuck.suggestions)||[])[i];if(!s)return;const g=$('#stuckGuide');if(g)g.value=s;stuckAct('chat')}
+async function stuckSug(i){const s=((job&&job.stuck&&job.stuck.suggestions)||[])[i];const t=sugText(s);if(!t)return;const g=$('#stuckGuide');if(g)g.value=t;stuckAct('chat')}
 async function stuckAct(kind){if(!job)return;let text='';
  if(kind==='chat'||kind==='guide'){const g=($('#stuckGuide')||{}).value||'';if(!g.trim()){($('#stuckGuide')||{focus(){}}).focus();return}text=g.trim()}
  else if(kind==='go'){text='go'}

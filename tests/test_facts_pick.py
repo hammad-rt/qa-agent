@@ -28,6 +28,27 @@ class FactsPick(unittest.TestCase):
     def test_empty(self):
         self.assertEqual(relevant("", "x"), "")
 
+    def test_shipment_protection_case_gets_mandatory_threshold_rule(self):
+        out = relevant(
+            FACTS.read_text(),
+            "TC2 Shipment Value read-only shipment protection mandatory threshold "
+            "declared value Admin Shipment Protection",
+        )
+        self.assertIn("Shipment Protection behaviour", out)
+        self.assertIn("Admin > Shipment Protection", out)
+        self.assertIn("Mandatory Shipment Protection Threshold (USD)", out)
+        self.assertIn("above that threshold", out)
+        self.assertIn("At or below the threshold", out)
+        self.assertIn("do not assume an amount", out)
+        # The rule lives in the area-selected Shipment Protection section (not only
+        # the always-on Business rules block), so a lean shipment-protection case
+        # still sees it under the default facts budget.
+        section = next(body for head, body in sections(FACTS.read_text())
+                       if head.startswith("Shipment Protection behaviour"))
+        self.assertIn("Admin > Shipment Protection", section)
+        self.assertIn(section, out)
+        self.assertLessEqual(len(out), 9000)
+
 
 if __name__ == "__main__":
     unittest.main()

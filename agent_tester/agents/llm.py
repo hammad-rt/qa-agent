@@ -2,6 +2,7 @@
 deterministic core works (and is tested) without it."""
 from __future__ import annotations
 
+import logging
 import asyncio
 import json
 import os
@@ -12,6 +13,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 from ..config import Settings, job_model
+
+log = logging.getLogger(__name__)
 
 _sem: asyncio.Semaphore | None = None
 
@@ -330,7 +333,7 @@ async def run_json(agent, prompt: str, settings: Settings, *, validate=None, lab
                 try:
                     on_attempt(n, attempts, last_err, raw or "")
                 except Exception:  # noqa: BLE001
-                    pass
+                    log.debug("LLM retry on_attempt callback failed", exc_info=True)
             elif empty or label == "planner":
                 # Keep non-planner jobs quiet (old behaviour); planner empty/{} stalls must be visible.
                 print(f"{label}: attempt {n}/{attempts} failed ({empty or last_err})")

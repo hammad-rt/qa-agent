@@ -9,6 +9,7 @@ reuse rules. Deploy-marker changes trigger a code-driven spot check, not blind r
 """
 from __future__ import annotations
 
+import logging
 import hashlib
 import json
 import os
@@ -21,6 +22,8 @@ from urllib.parse import urljoin, urlparse
 
 from .memory.env_guard import EnvDetailError, assert_safe_lasting, scrub_env_details
 from .memory.store import now as _now
+
+log = logging.getLogger(__name__)
 
 # ---- schema --------------------------------------------------------------------
 
@@ -281,6 +284,7 @@ def compute_deploy_marker(
             with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — run-start marker only
                 page = resp.read(400_000).decode("utf-8", errors="replace")
         except Exception:  # noqa: BLE001
+            log.debug("deploy marker page fetch failed", exc_info=True)
             page = ""
     assets = extract_asset_urls(page, url)
     versions = extract_version_meta(page)
@@ -315,7 +319,7 @@ def markers_for_plan(plan, state, *, fetch: bool = True) -> dict[str, str]:
     try:
         state.save()
     except Exception:  # noqa: BLE001
-        pass
+        log.warning("failed to save run state while recording deploy markers", exc_info=True)
     return markers
 
 
@@ -728,7 +732,7 @@ def buffer_pending(state, entry: dict) -> None:
     try:
         state.save()
     except Exception:  # noqa: BLE001
-        pass
+        log.warning("failed to save run state while buffering discovery map writes", exc_info=True)
 
 
 def flush_pending(state, memory) -> int:
@@ -755,12 +759,13 @@ def flush_pending(state, memory) -> int:
         except EnvDetailError:
             continue
         except Exception:  # noqa: BLE001
+            log.warning("failed to upsert buffered discovery route", exc_info=True)
             continue
     state.data["_discovery_map_pending"] = []
     try:
         state.save()
     except Exception:  # noqa: BLE001
-        pass
+        log.warning("failed to save run state after flushing discovery map writes", exc_info=True)
     return n
 
 
@@ -833,7 +838,7 @@ def _load_yaml_synonyms(path: Path, _add) -> None:
         cfg = yaml.safe_load(path.read_text()) or {}
         _add(cfg.get("route_synonyms"))
     except Exception:  # noqa: BLE001
-        pass
+        log.debug("failed to load route synonyms yaml", exc_info=True)
 
 
 def load_route_synonym_groups(

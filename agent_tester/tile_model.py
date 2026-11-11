@@ -4,6 +4,7 @@ overrides). Returns None whenever it can't answer (no model, no onnxruntime, 4x4
 caller asks the vision LLM instead."""
 from __future__ import annotations
 
+import logging
 import base64
 import io
 import os
@@ -11,6 +12,8 @@ import re
 from pathlib import Path
 
 from .config import ROOT
+
+log = logging.getLogger(__name__)
 
 CLASSES = ["Bicycle", "Bridge", "Bus", "Car", "Chimney", "Crosswalk", "Hydrant", "Motorcycle", "Mountain",
            "Other", "Palm", "Stair", "Tractor", "Traffic Light"]
@@ -61,6 +64,7 @@ def classify(image_b64: str, tiles: int, desc: str, threshold: float | None = No
         from PIL import Image
         sess = _load()
     except Exception:  # noqa: BLE001
+        log.debug("local captcha tile model unavailable", exc_info=True)
         return None
     threshold = threshold if threshold is not None else float(os.environ.get("CAPTCHA_TILE_THRESHOLD", "0.5"))
     img = Image.open(io.BytesIO(base64.b64decode(image_b64)))

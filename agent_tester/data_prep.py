@@ -4,11 +4,14 @@ Rules come from the pack's `data_prep` list. Card pay (4242) is allowed on stagi
 production never pays. M-Pesa only with an explicit phone on the case."""
 from __future__ import annotations
 
+import logging
 import os
 import json
 import re
 
 from .models import CaseResult, PlannedCase, Step
+
+log = logging.getLogger(__name__)
 
 
 PREP_MAX_ACTIONS = int(os.environ.get("PREP_MAX_ACTIONS", "120"))
@@ -212,7 +215,7 @@ def _deterministic_contact(plan, case, state, testers: dict, app: str, email: st
             try:
                 close()
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("data-prep browser close failed", exc_info=True)
     if res is None or not res.ok or not res.record_id:
         return False
     store = state.data.setdefault("contact", {})
@@ -238,6 +241,7 @@ def _mcp_browser_for_lookup(run_dir, app: str):
         from .helpers import McpBrowser
         import asyncio
     except Exception:  # noqa: BLE001
+        log.warning("data-prep MCP browser imports failed", exc_info=True)
         return None, None
     storage = storage_state_path(run_dir, app)
     out = run_dir / "shots"
@@ -295,17 +299,17 @@ def _mcp_browser_for_lookup(run_dir, app: str):
                 if self._sess is not None:
                     await self._sess.call_tool("browser_close", {})
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("data-prep MCP browser_close failed", exc_info=True)
             try:
                 if self._sess_cm is not None:
                     await self._sess_cm.__aexit__(None, None, None)
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("data-prep MCP session close failed", exc_info=True)
             try:
                 if self._stdio is not None:
                     await self._stdio.__aexit__(None, None, None)
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("data-prep MCP stdio close failed", exc_info=True)
 
     b = _SessionBrowser()
 
@@ -313,7 +317,7 @@ def _mcp_browser_for_lookup(run_dir, app: str):
         try:
             asyncio.run(b.aclose())
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("data-prep browser aclose failed", exc_info=True)
 
     return b, close
 
@@ -556,7 +560,7 @@ def _deterministic_prep_find(plan, case, state, testers: dict, rule: dict, *,
             try:
                 close()
             except Exception:  # noqa: BLE001
-                pass
+                log.debug("data-prep browser close failed", exc_info=True)
     if res is None or not res.ok or not res.record_id:
         state.checkpoint(f"data prep {rule.get('id')}: deterministic find → not_found "
                          f"({getattr(res, 'notes', '') or 'no match'})")
@@ -822,7 +826,7 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
                     state.checkpoint(f"data prep {key}: saved where it got stuck to the pack")
                     break
         except Exception:  # noqa: BLE001
-            pass
+            log.warning("failed to record data-prep stuck note in the pack", exc_info=True)
         # Persist a stuck_summary-shaped evidence blob so the web card / next run can see
         # what PREP tried (shots, recent actions) — not only a checkpoint line.
         try:
@@ -845,7 +849,7 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
                 f"PREP-{key} stuck evidence: " + "; ".join(humanize_tried(recent)[:4] or [why[:120]]))
             state.save()
         except Exception:  # noqa: BLE001
-            pass
+            log.warning("failed to persist data-prep stuck evidence", exc_info=True)
         return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,
                           note=f"test data not ready ({key}): {why}")
 
@@ -956,6 +960,7 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
                               "how": "approved", "via": "read_only_prep_gate"},
                         plan_step=None, approval="approved")
                 except Exception:  # noqa: BLE001 — thin test fakes may omit log_action
+                    log.debug("data-prep read-only approval log_action unavailable; using fallback", exc_info=True)
                     state.data.setdefault("action_log", []).append({
                         "case_id": case.id, "tool": "request_approval",
                         "args": {"action_type": "prep_create", "via": "read_only_prep_gate"},

@@ -2,11 +2,14 @@
 Set QA_INTERACTIVE=1 to get the old prompts (plan gate, approvals, questions)."""
 from __future__ import annotations
 
+import logging
 import json
 import os
 import select
 import sys
 import uuid
+
+log = logging.getLogger(__name__)
 
 ASK_MARK = "\x1eASK "   # web UI: a line starting with this is a question waiting for an answer on stdin
 
@@ -36,6 +39,7 @@ def flush_stdin() -> int:
                 break
             dropped += 1
     except Exception:  # noqa: BLE001
+        log.debug("stdin flush failed", exc_info=True)
         return dropped
     return dropped
 

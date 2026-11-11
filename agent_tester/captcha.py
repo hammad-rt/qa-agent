@@ -3,11 +3,14 @@ challenge frame and clicks tiles; the model only says which tile numbers match. 
 the caller falls back to manual login."""
 from __future__ import annotations
 
+import logging
 import asyncio
 import json
 import os
 
 import re
+
+log = logging.getLogger(__name__)
 
 _BFRAME = r"page.frames().find(f => /recaptcha\/(api2|enterprise)\/bframe/.test(f.url()))"
 
@@ -89,5 +92,6 @@ async def solve(browser, env: str = "staging", ask=None, rounds: int | None = No
             if (await _js(browser, VERIFY_JS)).get("passed"):
                 return True
         except Exception:  # noqa: BLE001  (model down, frame changed, ...): give up and let a person do it
+            log.warning("captcha auto-solve failed; falling back to manual login", exc_info=True)
             return False
     return False

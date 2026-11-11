@@ -1,7 +1,10 @@
 """Seed lasting lessons. Core + domain are app-agnostic; platform packs and project packs hold the rest."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 CORE_LESSONS: list[dict] = [
     {
@@ -126,6 +129,7 @@ def load_platform_seeds(platform_id: str, platforms_dir: Path | None = None) -> 
         import yaml
         data = yaml.safe_load(path.read_text()) or []
     except Exception:  # noqa: BLE001
+        log.debug("failed to load platform seed yaml", exc_info=True)
         return []
     out = []
     for row in data if isinstance(data, list) else data.get("lessons") or []:

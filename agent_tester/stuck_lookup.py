@@ -5,12 +5,15 @@ cached by query, kept inside the memory token budget. Never approves or changes 
 """
 from __future__ import annotations
 
+import logging
 import hashlib
 import os
 import re
 import time
 from pathlib import Path
 from urllib.parse import quote_plus, urlencode
+
+log = logging.getLogger(__name__)
 
 # Caps (also documented in .env.example)
 DEFAULT_TIMEOUT = float(os.environ.get("STUCK_LOOKUP_TIMEOUT_SEC", "8"))
@@ -125,7 +128,7 @@ def search_docs_provider(query: str, *, site: str | None = None, limit: int = 3,
                     "trust": "untrusted",
                 })
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("stuck-lookup docs/web search failed", exc_info=True)
         if out:
             return out[:limit]
 
@@ -148,7 +151,7 @@ def search_docs_provider(query: str, *, site: str | None = None, limit: int = 3,
                     "trust": "untrusted",
                 })
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("stuck-lookup context7 search failed", exc_info=True)
     return out[:limit]
 
 
@@ -168,6 +171,7 @@ def platform_docs_site(platform_id: str | None, packs_dir: Path | None = None) -
             from urllib.parse import urlparse
             return urlparse(docs[0]).netloc or None
     except Exception:  # noqa: BLE001
+        log.debug("failed to read platform docs site from pack yaml", exc_info=True)
         return None
     return None
 
@@ -214,7 +218,7 @@ def run_ladder(*, query: str, memory=None, pack=None, platform_id: str | None = 
                 if len(snippets) >= max_snippets or _room() <= 0:
                     break
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("stuck-lookup memory recall failed", exc_info=True)
 
     # 2) Code (optional)
     steps.append("code")
@@ -312,6 +316,7 @@ def _save_unconfirmed(memory, hits: list[dict], *, scope_kind: str, platform_id:
                     status="proposed", confirm_count=1, evidence=str(h.get("path") or ""),
                 )
         except Exception:  # noqa: BLE001
+            log.warning("failed to save unconfirmed stuck-lookup lesson to memory", exc_info=True)
             continue
 
 

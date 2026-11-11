@@ -475,6 +475,7 @@ def _guide_targets(text: str, state) -> set[str]:
     try:
         ids = [c.id for c in state.plan.cases] if state.plan else []
     except Exception:
+        log.debug("failed to read plan case ids for guidance targeting", exc_info=True)
         ids = []
     return {i for i in ids if re.search(rf"(?<![A-Za-z0-9]){re.escape(i)}(?![A-Za-z0-9])", text, re.I)}
 
@@ -806,7 +807,7 @@ class TesterSession:
                     if scores is not None:
                         scores.mark_stall_fix(c.id, getattr(s, "_step_type", "general"))
                 except Exception:  # noqa: BLE001
-                    pass
+                    log.debug("context stall-fix score update failed", exc_info=True)
             record_usage_signals(s.state, case_id=s.case_id,
                                  used_chunk_ids=[c.id for c in found],
                                  resolved_by=found[0].id)
@@ -827,7 +828,7 @@ class TesterSession:
                 try:
                     _persist_discovery_recipe(s, text, area or s.brief.get("area"))
                 except Exception:  # noqa: BLE001
-                    pass
+                    log.warning("failed to persist discovery recipe", exc_info=True)
             return {"proposed": mid}
 
         def ledger_record(record: str, action: str, final_state: str = "", note: str = "") -> dict:
@@ -1964,7 +1965,7 @@ class TesterSession:
                 try:
                     await call("browser_wait_for", {"time": AUTO_SHOT_SETTLE})
                 except Exception:
-                    pass
+                    log.debug("auto-shot settle wait failed", exc_info=True)
                 before = str(await call("browser_snapshot", {}) or "")
                 await call("browser_take_screenshot", {"filename": str(png.resolve()), "type": "png"})
                 after = str(await call("browser_snapshot", {}) or "")
@@ -2023,7 +2024,7 @@ class TesterSession:
             by_app = self.state.data.setdefault("_page_state_by_app", {})
             by_app[self.app or ""] = trimmed
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("failed to cache page state for app", exc_info=True)
         if prev and h and prev != h:
             # Page body changed: same-element clicks on the *new* page are not a true repeat.
             self._sig_page = {}
@@ -2048,7 +2049,7 @@ class TesterSession:
             self.state.data["now_doing"] = info
             self.state.save()
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("failed to publish now_doing status", exc_info=True)
 
     def _ref_in_snapshot(self, ref: str, snapshot: str | None = None) -> bool:
         snap = snapshot if snapshot is not None else (
@@ -2176,6 +2177,7 @@ class TesterSession:
                     try:
                         out = asyncio.run(_capture_and_finish())
                     except Exception:  # noqa: BLE001
+                        log.warning("evidence capture after tool failed", exc_info=True)
                         out = _after_capture("")
             elif tool.name == "browser_snapshot":
                 trimmed = getattr(self, "_page_state", "") or trim_page(text, MAX_PAGE_CHARS)
@@ -2247,6 +2249,7 @@ class TesterSession:
         try:
             return asyncio.run(self._capture_page_async(tool_context))
         except Exception:  # noqa: BLE001
+            log.warning("sync page capture failed", exc_info=True)
             return ""
 
     def before_model(self, callback_context, llm_request):
@@ -2308,7 +2311,7 @@ class TesterSession:
         try:
             self.state.save()
         except Exception:  # noqa: BLE001
-            pass
+            log.warning("failed to save run state after model turn", exc_info=True)
         return fixed
 
     def _check_page_site(self, tool_name: str, text: str) -> str | None:
@@ -2738,6 +2741,7 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
             try:
                 ctx_scores = ContextScores(settings.memory_db)
             except Exception:  # noqa: BLE001
+                log.debug("ContextScores db open failed; using default store", exc_info=True)
                 ctx_scores = ContextScores()
             selector = ContextSelector(pack_cfg, scores=ctx_scores.as_dict())
             selector.register(safety_chunks_from_pack(pack_cfg))
@@ -2824,7 +2828,7 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
                     try:
                         await toolset.close()
                     except Exception:  # noqa: BLE001
-                        pass
+                        log.debug("MCP toolset close failed", exc_info=True)
                     # MCP close returns before Chrome drops SingletonLock; wait so manual_login
                     # (or the next case) does not open a second Chrome on the same profile.
                     release_profile(profile_path(run_dir, app), timeout=25.0)

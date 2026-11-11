@@ -1,6 +1,7 @@
 """Reliability helpers: LLM retries with backoff, one-run-at-a-time lock, disk check, run retention."""
 from __future__ import annotations
 
+import logging
 import asyncio
 import fcntl
 import os
@@ -8,6 +9,8 @@ import random
 import shutil
 import time
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 RETRYABLE_HINTS = ("timeout", "timed out", "connection", "502", "503", "504", "429", "rate limit", "overloaded",
                    "temporarily", "reset by peer", "server disconnected")
@@ -51,7 +54,7 @@ def wait_for_model(max_wait: float | None = None, every: float = 10.0, sleep=tim
             if probe():
                 return True
         except Exception:  # noqa: BLE001
-            pass
+            log.debug("model-server probe failed while waiting", exc_info=True)
         if waited >= max_wait:
             return False
         sleep(every)

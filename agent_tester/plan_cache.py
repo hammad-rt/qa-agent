@@ -1,10 +1,13 @@
 """Reuse an approved plan/draft when ticket text + selected cases + pack version are unchanged."""
 from __future__ import annotations
 
+import logging
 import hashlib
 import json
 import re
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 def _norm(text: str) -> str:
@@ -53,6 +56,7 @@ def load_cached_plan(run_dir: Path, fingerprint: str):
     try:
         return TestPlan.model_validate(plan_data)
     except Exception:  # noqa: BLE001
+        log.debug("cached plan failed validation", exc_info=True)
         return None
 
 

@@ -106,6 +106,30 @@ def _live(d: Path) -> bool:
     return _job_on(d.name) or _cli_on(d)
 
 
+def save_guide(d: Path, text: str) -> dict:
+    """Store a guidance note. Live runs read it at the next model call; idle notes wait for resume/rerun."""
+    from ..redact import redact, scrub_secrets
+    text = scrub_secrets(redact(str(text or "").strip()))[:2000]
+    if not text:
+        return {"error": "write something for the agent first", "status": 400}
+    live = _live(d)
+    from datetime import datetime
+    with open(d / "guidance.jsonl", "a") as f:
+        f.write(json.dumps({
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "text": text,
+            "when": "live" if live else "queued",
+        }) + "\n")
+    return {"ok": True, "queued": not live}
+
+
+def apply_headed(args: list[str], headed: bool) -> list[str]:
+    """Append --headed once when the UI asks to show the browser."""
+    if headed and "--headed" not in args:
+        return [*args, "--headed"]
+    return args
+
+
 def knowledge() -> list[dict]:
     """Each pack's self-built knowledge base (learned.md) plus its hand-written facts.md, read-only facts."""
     out = []
@@ -137,6 +161,9 @@ class Job:
         self.run_hint = Path(args[1]).name if len(args) > 1 and args[0] == "resume" else None
         self.lock = threading.Lock()
         env = {**os.environ, "PYTHONUNBUFFERED": "1", "QA_WEB": "1"}
+        # Headed browser: CLI flag wins; else honor QA_HEADED already in the environment.
+        if "--headed" in args:
+            env["QA_HEADED"] = "1"
         self.proc = subprocess.Popen([sys.executable, "-u", "-m", "agent_tester", *args], cwd=ROOT,
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                      env=env, start_new_session=True)
@@ -394,17 +421,9 @@ class Handler(BaseHTTPRequestHandler):
                 d = self._run(parts[2])
                 if not d:
                     return self._send(404, {"error": "no such run"})
-                if parts[3] == "guide":            # a note for the agent while the run goes; read at its next model call
-                    from ..redact import redact, scrub_secrets
-                    text = scrub_secrets(redact(str(b.get("text", "")).strip()))[:2000]
-                    if not text:
-                        return self._send(400, {"error": "write something for the agent first"})
-                    if not _live(d):
-                        return self._send(409, {"error": "this run isn't going, so nothing would read it"})
-                    from datetime import datetime
-                    with open(d / "guidance.jsonl", "a") as f:
-                        f.write(json.dumps({"at": datetime.now().isoformat(timespec="seconds"), "text": text}) + "\n")
-                    return self._send(200, {"ok": True})
+                if parts[3] == "guide":            # note for the agent; live → next model call; idle → next resume/rerun
+                    r = save_guide(d, b.get("text", ""))
+                    return self._send(r.pop("status", 200) if "error" in r else 200, r)
                 if _live(d):
                     return self._send(409, {"error": "this run is still going; stop it first"})
                 if parts[3] == "delete":
@@ -521,6 +540,9 @@ class Handler(BaseHTTPRequestHandler):
                         if p.suffix.lower() not in (".md", ".txt", ".markdown") or not p.is_file():
                             return self._send(400, {"error": f"no .md or .txt file at {cf}"})
                         args += ["--cases-file", str(p.resolve())]
+                if b.get("headed"):
+                    # Safe on resume/rerun/start: Playwright MCP relaunches; falls back to headless if no display.
+                    args = apply_headed(args, True)
                 j = Job(args)
                 JOBS[j.id] = j
                 return self._send(200, j.info())

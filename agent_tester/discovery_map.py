@@ -109,9 +109,72 @@ def reuse_max_days() -> int:
         return DEFAULT_REUSE_MAX_DAYS
 
 
-def item_key(checklist_item: str) -> str:
-    """Stable key for a checklist line (normalized, no env noise)."""
+_STUCK_ROUTE = re.compile(
+    r"(?i)\bstuck\s*\(|\bkept repeating\b|\bwithout progress\b|\balready tried:\b|"
+    r"\bnext time:\s*do not repeat\b|\bdiscovery failed\b|\bBLOCKED:\b|"
+    r"\bagent incomplete\b|\bmaximum repeated\b|\bloop_detected\b"
+)
+_PREP_BLOB = re.compile(
+    r"^(?:WALLET|ORDER|CUSTOMER|PREP|CONTACT)\b.*\bcreate:\s*|"
+    r"\bcreate:\s*.{40,}",
+    re.I,
+)
+_GARBAGE_LABEL = re.compile(
+    r"(?i)(?:\*\*|Path:\s*`|Rewards\*\*|```|\{[\"']content)"
+)
+
+
+def screen_name(checklist_item: str, limit: int = 60) -> str:
+    """Normalized checklist screen name — never a PREP create instruction blob."""
     t = scrub_env_details(checklist_item or "")
+    t = re.sub(r"\s+", " ", t).strip()
+    if _PREP_BLOB.search(t) or len(t) > 80:
+        # Prefer leading screen-ish phrase before create/instruction prose.
+        m = re.match(r"(?i)^(?:WALLET|ORDER|CUSTOMER|PREP|CONTACT)\s+(\w[\w /&-]{2,40})", t)
+        if m:
+            t = m.group(1).strip(" -/")
+        else:
+            m = re.match(r"^([^:]{3,50})", t)
+            t = (m.group(1) if m else t[:limit]).strip(" -")
+    t = re.sub(r"\s+", " ", t).strip(" -:.")
+    return (t or "screen")[:limit]
+
+
+def is_prep_instruction(text: str | None) -> bool:
+    return bool(text) and bool(_PREP_BLOB.search(text or ""))
+
+
+def is_stuck_or_failed_route(text: str | None) -> bool:
+    """True for stuck/loop/failed traces that must never be stored as routes."""
+    t = text or ""
+    if not t.strip():
+        return True
+    if _STUCK_ROUTE.search(t):
+        return True
+    if re.search(r"(?i)^stuck\b", t.strip()):
+        return True
+    return False
+
+
+def route_is_savable(route_text: str | None, key_labels: list[str] | None = None) -> bool:
+    """Concrete menu/click path only — refuse stuck prose and garbage label blobs."""
+    if is_stuck_or_failed_route(route_text):
+        return False
+    t = (route_text or "").strip()
+    if len(t) < 8:
+        return False
+    # click / menu arrows, helper runs, or pack ## Routes breadcrumb paths (Home > Login).
+    if not re.search(r"(?i)(click|menu|→|->|open\s+/|run helper|\s>\s)", t):
+        return False
+    for lab in key_labels or []:
+        if _GARBAGE_LABEL.search(str(lab or "")):
+            return False
+    return True
+
+
+def item_key(checklist_item: str) -> str:
+    """Stable key for a checklist screen (normalized screen name, no env / PREP noise)."""
+    t = screen_name(checklist_item)
     t = re.sub(r"\s+", " ", t).strip().lower()
     t = re.sub(r"[^a-z0-9 :._/-]+", "", t)
     return hashlib.sha1(t.encode()).hexdigest()[:16] if t else "empty"
@@ -362,15 +425,23 @@ class DiscoveryMapStore:
         platform_version: str | None = None,
         status: str = "proposed",
         source: str | None = None,
+        last_success_at: str | None = None,
+        success_count: int | None = None,
     ) -> dict:
-        """Atomic write of a scrubbed route. Never stores env-bound identity."""
+        """Atomic write of a scrubbed route. Never stores env-bound identity or stuck traces."""
         assert status in STATUSES, status
+        if is_stuck_or_failed_route(route_text) or is_prep_instruction(checklist_item):
+            raise EnvDetailError("discovery_map: refused stuck/failed or PREP-instruction route")
         route = _safe_route(route_text)
         labels = _safe_labels(key_labels) or labels_from_route(route)
-        ik = item_key(checklist_item)
+        if not route_is_savable(route, labels):
+            raise EnvDetailError("discovery_map: refused non-route or garbage labels")
+        # Always key and store under the normalized screen name.
+        item = screen_name(checklist_item)
+        ik = item_key(item)
         area_s = area or "general"
         ts = _now()
-        existing = self.get(scope, area_s, app, checklist_item, env_fingerprint)
+        existing = self.get(scope, area_s, app, item, env_fingerprint)
         if existing:
             self.db.execute(
                 """UPDATE discovery_maps SET route_text=?, key_labels=?, deploy_marker=COALESCE(?, deploy_marker),
@@ -380,31 +451,39 @@ class DiscoveryMapStore:
                    WHERE id=?""",
                 (route, json.dumps(labels), deploy_marker or None, platform, platform_version,
                  status if existing["status"] != "verified" or status == "verified" else existing["status"],
-                 source, ts, scrub_env_details(checklist_item)[:200], existing["id"]),
+                 source, ts, scrub_env_details(item)[:200], existing["id"]),
             )
             # Keep verified if already verified unless explicitly stale.
             if existing["status"] == "verified" and status == "proposed":
                 self.db.execute("UPDATE discovery_maps SET status='verified' WHERE id=?", (existing["id"],))
-            if status == "verified":
+            if status == "verified" or last_success_at or success_count is not None:
+                sc = success_count if success_count is not None else (1 if status == "verified" else None)
                 self.db.execute(
                     """UPDATE discovery_maps SET verified_at=COALESCE(verified_at, ?),
-                       last_success_at=COALESCE(last_success_at, ?),
-                       success_count=CASE WHEN success_count < 1 THEN 1 ELSE success_count END
+                       last_success_at=COALESCE(?, last_success_at),
+                       success_count=CASE
+                         WHEN ? IS NOT NULL THEN MAX(success_count, ?)
+                         WHEN success_count < 1 AND ? = 'verified' THEN 1
+                         ELSE success_count END
                        WHERE id=?""",
-                    (ts, ts, existing["id"]),
+                    (last_success_at or ts, last_success_at or (ts if status == "verified" else None),
+                     sc, int(sc or 0), status, existing["id"]),
                 )
             self.db.commit()
             return self.get_by_id(existing["id"])  # type: ignore[return-value]
-        verified_at = ts if status == "verified" else None
+        verified_at = (last_success_at or ts) if status == "verified" else None
+        sc = int(success_count if success_count is not None else (1 if status == "verified" else 0))
         cur = self.db.execute(
             """INSERT INTO discovery_maps(
                  scope, area, app, checklist_item, item_key, env_fingerprint, platform, platform_version,
                  route_text, key_labels, deploy_marker, status, source, verified_at, last_success_at,
                  success_count, created_at, updated_at)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (scope, area_s, app, scrub_env_details(checklist_item)[:200], ik, env_fingerprint,
+            (scope, area_s, app, scrub_env_details(item)[:200], ik, env_fingerprint,
              platform, platform_version, route, json.dumps(labels), deploy_marker or None,
-             status, source, verified_at, verified_at, 1 if status == "verified" else 0, ts, ts),
+             status, source, verified_at,
+             last_success_at if status == "verified" else (verified_at if status == "verified" else None),
+             sc, ts, ts),
         )
         self.db.commit()
         return self.get_by_id(cur.lastrowid)  # type: ignore[return-value]
@@ -467,6 +546,33 @@ class DiscoveryMapStore:
             row = dict(row)
             row["stale_why"] = why
         return row
+
+    def mark_bad_rows_stale(self, scope: str, env_fingerprint: str | None = None) -> int:
+        """Mark stuck/garbage/PREP-blob rows stale so they are never reused. Returns count marked."""
+        sql = "SELECT id, route_text, key_labels, checklist_item, status FROM discovery_maps WHERE scope=?"
+        args: list = [scope]
+        if env_fingerprint is not None:
+            sql += " AND env_fingerprint=?"
+            args.append(env_fingerprint)
+        n = 0
+        for r in self.db.execute(sql, args):
+            d = dict(r)
+            if d.get("status") == "stale":
+                continue
+            labels = []
+            try:
+                labels = json.loads(d.get("key_labels") or "[]")
+            except (TypeError, ValueError):
+                labels = []
+            bad = (
+                is_stuck_or_failed_route(d.get("route_text"))
+                or is_prep_instruction(d.get("checklist_item"))
+                or not route_is_savable(d.get("route_text"), labels)
+            )
+            if bad:
+                self.mark_stale(d["id"], "bad route (stuck/garbage/PREP)")
+                n += 1
+        return n
 
     def mark_partial_coverage(self, scope: str, area: str | None, app: str, env_fingerprint: str,
                               covered_item_keys: list[str]) -> None:
@@ -553,15 +659,17 @@ def is_reusable(row: dict, *, force: bool = False, change_text: str = "",
         return "discover"
 
     status = row.get("status") or ""
+    # Stuck/garbage never reuse (route_is_savable). Verified successes skip live discovery.
+    # Savable proposed/partial rows from a mid-discovery stop also reuse so the next run
+    # only discovers the remaining checklist items (lazy / incremental).
+    if not route_is_savable(row.get("route_text"), row.get("key_labels")):
+        return "discover"
     if status == "verified" and int(row.get("success_count") or 0) >= 1:
         age = age_days(row.get("last_success_at") or row.get("verified_at"))
-        if age is not None and age <= reuse_max_days():
+        if age is None or age <= reuse_max_days():
             return "reuse"
         return "discover"
-
-    # Covered by a prior discovery pass (proposed/partial) — reusable for skipping rediscovery
-    # when there is a route and no failures (mid-run stop / partial map).
-    if status in ("proposed", "partial") and row.get("route_text") and int(row.get("fail_count") or 0) == 0:
+    if status in ("proposed", "partial"):
         return "reuse"
     return "discover"
 

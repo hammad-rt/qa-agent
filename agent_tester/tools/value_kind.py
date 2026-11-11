@@ -17,7 +17,14 @@ KINDS = ("record_id", "email", "order_number", "money", "status", "yes_no", "fre
 _REDACTION_TOKEN = re.compile(
     r"\[[A-Z][A-Z0-9_]*(?:PASSWORD|TOKEN|API[_-]?KEY|SECRET|KEY)[A-Z0-9_]*\]"
     r"|\[[A-Z][A-Z0-9_]{4,}\]"
+    r"|\[(?:phone|email|token|card[^\]]*)\]",
+    re.I,
 )
+# SuiteCRM / Sugar record ids are UUID-shaped (optional dashes).
+_CRM_UUID = re.compile(
+    r"^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$"
+)
+_CRM_PLATFORMS = frozenset({"suitecrm7", "suitecrm", "suitecrm8", "sugar", "sugarcrm"})
 _EMAIL = re.compile(r"^[\w.+-]+@[\w.-]+\.\w{2,}$")
 _UUID = re.compile(r"^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$")
 _HEX_ID = re.compile(r"^[0-9a-fA-F]{8,36}$")
@@ -114,17 +121,40 @@ def looks_like_placeholder_literal(raw: Any, *, name: str = "", tokens: set[str]
     return False
 
 
+def record_id_from_url(text: str) -> str | None:
+    """Parse the ``record=`` query param from a URL or raw_text that contains one."""
+    if not text:
+        return None
+    m = re.search(r"(?:[?&#]|^|[^\w])record=([0-9a-fA-F-]{8,}|\d{3,})", str(text), re.I)
+    return m.group(1) if m else None
+
+
 def validate_value(name: str, raw: Any, *, kind: str | None = None,
                    pack_kinds: dict[str, str] | None = None,
-                   tokens: set[str] | None = None) -> dict:
+                   tokens: set[str] | None = None,
+                   platform: str | None = None,
+                   source: str | None = None) -> dict:
     """Return {ok, value, reason, not_found, kind}.
 
     ``not_found=True`` means the model signalled absence (none/not found) — never store it,
     but callers (find prep) may treat the turn as not_found.
+    For URL-sourced record ids, prefer the ``record=`` query value over the whole string.
+    SuiteCRM/Sugar platforms require a UUID-shaped id (reject bare phone-looking digits).
     """
     declared = (pack_kinds or {}).get(name) if pack_kinds else None
     k = infer_kind(name, kind or declared)
     text = str(raw if raw is not None else "").strip()
+    if k == "record_id" and (source and re.search(r"(?i)url|record", source) or "record=" in text.lower()):
+        parsed = record_id_from_url(text)
+        if parsed:
+            text = parsed
+        elif source and re.search(r"(?i)url|record", source) and "record=" not in text.lower():
+            # Claimed URL source but no record= — refuse phone-looking leftovers / markers.
+            if has_redaction_token(text) or not (_UUID.match(text) or _HEX_ID.match(text) or _CRM_UUID.match(text)):
+                return {"ok": False, "value": None,
+                        "reason": f"{name}: URL record id must come from the record= query param "
+                                  f"(got {text!r})",
+                        "not_found": False, "kind": k}
     if has_redaction_token(text):
         return {"ok": False, "value": None, "reason": "value contains a redaction token; read the real page text",
                 "not_found": False, "kind": k}
@@ -145,7 +175,14 @@ def validate_value(name: str, raw: Any, *, kind: str | None = None,
             return {"ok": False, "value": None, "reason": f"{name} must be an email address",
                     "not_found": False, "kind": k}
     elif k == "record_id":
-        if not (_UUID.match(text) or _HEX_ID.match(text) or re.fullmatch(r"\d{3,}", text)):
+        plat = (platform or "").strip().lower()
+        if plat in _CRM_PLATFORMS or plat.startswith("suite") or plat.startswith("sugar"):
+            if not _CRM_UUID.match(text):
+                return {"ok": False, "value": None,
+                        "reason": f"{name} must be a UUID record id for {plat or 'CRM'} "
+                                  f"(got {text!r}); open the contact URL and copy record=",
+                        "not_found": False, "kind": k}
+        elif not (_UUID.match(text) or _HEX_ID.match(text) or re.fullmatch(r"\d{3,}", text)):
             return {"ok": False, "value": None,
                     "reason": f"{name} must be a CRM record id (uuid/hex/digits from the URL)",
                     "not_found": False, "kind": k}

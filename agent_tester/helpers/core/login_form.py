@@ -134,6 +134,33 @@ async def run(browser, ctx, account: str, path: str = ""):
         return res
 
 
+async def _session_already_valid(browser, ctx, account: str, acc: dict) -> dict | None:
+    """If the current page already shows a signed-in session, skip login (saves a turn + tokens)."""
+    try:
+        form = await analyze(browser)
+    except Exception:  # noqa: BLE001
+        return None
+    if form.get("has_password"):
+        return None  # signed out / on a login form
+    page = ""
+    try:
+        page = await browser.snapshot() or ""
+    except Exception:  # noqa: BLE001
+        page = ""
+    markers = list(acc.get("role_markers") or [])
+    role_ok = (not markers) or all(m.lower() in page.lower() for m in markers)
+    vals = getattr(getattr(ctx, "state", None), "values", None) or {}
+    prev = vals.get("login_form.logged_in") or {}
+    prev_ok = isinstance(prev, dict) and prev.get("value") == "yes" and str(prev.get("source", "")).endswith(f"/{ctx.app}")
+    # No password field + (role markers match OR we already logged in this run) → stay put.
+    if role_ok or prev_ok or (not form.get("has_password") and page and "logout" in page.lower()):
+        return {"values": {"logged_in": "yes",
+                           "role_ok": "yes" if role_ok else "skipped (no markers)"},
+                "screenshots": [],
+                "notes": f"Already logged in on {ctx.app}; skipped login_form (session valid)"}
+    return None
+
+
 async def _attempt(browser, ctx, account: str, path: str = ""):
     acc = ctx.account(account)
     env_name = acc.get("password_env")
@@ -141,8 +168,15 @@ async def _attempt(browser, ctx, account: str, path: str = ""):
     if not password:
         raise HelperError(f"password not set: add {env_name} through the masked prompt")
     cfg = ctx.config or {}
-    await browser.navigate(ctx.url(path or cfg.get("path", "")))
+    # Check the current session first — do not navigate to /login when already signed in.
+    already = await _session_already_valid(browser, ctx, account, acc)
+    if already is not None:
+        return already
+    # If we are already on a login form, fill it in place (no extra navigate).
     form = await analyze(browser)
+    if not form.get("has_password"):
+        await browser.navigate(ctx.url(path or cfg.get("path", "")))
+        form = await analyze(browser)
     if not form.get("has_password"):
         vals = getattr(getattr(ctx, "state", None), "values", None) or {}
         prev = vals.get("login_form.logged_in") or {}

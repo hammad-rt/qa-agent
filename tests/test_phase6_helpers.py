@@ -133,7 +133,11 @@ class LoginHelper(unittest.TestCase):
             self.assertNotIn("s3cret-pw", str(out) + str(b.calls) + (st.dir / "state.json").read_text())
             typed = [a for t, a in fake.calls if t == "browser_type"]
             self.assertEqual(typed[1]["text"], "s3cret-pw")                 # the browser did get it
-            self.assertEqual(fake.calls[0], ("browser_navigate", {"url": "https://staging5.rolustech.com:4220/"}))
+            # Session check analyzes the current page first; fill in place when a login form is already open
+            # (no navigate). If the page had no form, login_form would navigate to the pack login URL.
+            self.assertEqual(fake.calls[0][0], "browser_evaluate")
+            self.assertFalse(any(t == "browser_navigate" for t, _ in fake.calls),
+                             "already on login form — must not navigate away")
             self.assertEqual(st.data["action_log"][-1]["tool"], "helper:login_form")
 
     def test_missing_password_is_a_clear_error(self):

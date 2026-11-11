@@ -140,6 +140,101 @@ class ProtectedCoreAgnostic(unittest.TestCase):
         self.assertEqual(hits, [], "project names in core seeds: " + ", ".join(hits))
 
 
+class ProtectedStuckBasics165177(unittest.TestCase):
+    """Locked behaviours from run 165177 10:45–10:55 PKT (items 13–16)."""
+
+    def test_ids_not_redacted_as_phones(self):
+        from agent_tester.redact import redact
+        from agent_tester.tools.value_kind import validate_value
+        url = "index.php?module=Contacts&action=DetailView&record=c717b126-aaaa-bbbb-cccc-ddddeeeeffff"
+        self.assertIn("c717b126", redact(url))
+        self.assertNotIn("[phone]", redact(url))
+        self.assertFalse(validate_value("crm_contact_id", "[phone]", source="URL record id",
+                                        platform="suitecrm7")["ok"])
+        self.assertTrue(validate_value("crm_contact_id", url, source="URL record id",
+                                       platform="suitecrm7")["ok"])
+
+    def test_no_find_miss_navigate_thrash(self):
+        import tempfile
+        from types import SimpleNamespace
+        from agent_tester.agents.tester import FIND_MISS_READ_MSG, TesterSession
+        from agent_tester.preflight.pack_loader import load_pack
+        from agent_tester.run_state import RunState
+        from agent_tester.tools.policy import from_pack
+        from agent_tester.tools.screenshots import Evidence
+
+        with tempfile.TemporaryDirectory() as t:
+            st = RunState(Path(t) / "run")
+            pol = from_pack(load_pack(ROOT / "packs/savostore"), "staging", approver=lambda *a: False)
+            s = TesterSession("crm", {"case_id": "PREP-wallet-find", "title": "find", "steps": [{"n": 1, "text": "x", "app": "crm"}]},
+                              st, pol, Evidence(st.dir), max_calls=40, max_minutes=5)
+            s.current_step = 1
+            s.after_tool(SimpleNamespace(name="browser_find"), {"query": "Current Rewards"}, None, "not found")
+            out = s.before_tool(SimpleNamespace(name="browser_navigate"),
+                                {"url": "https://crm.example/"}, None)
+            self.assertIsNotNone(out)
+            self.assertIn("Do not navigate", out["error"])
+
+    def test_no_blind_repeat_click_after_no_change(self):
+        import tempfile
+        from types import SimpleNamespace
+        from agent_tester.agents.tester import NO_CHANGE_CLICK_MSG, TesterSession
+        from agent_tester.preflight.pack_loader import load_pack
+        from agent_tester.run_state import RunState
+        from agent_tester.tools.policy import from_pack
+        from agent_tester.tools.screenshots import Evidence
+
+        with tempfile.TemporaryDirectory() as t:
+            st = RunState(Path(t) / "run")
+            pol = from_pack(load_pack(ROOT / "packs/savostore"), "staging", approver=lambda *a: False)
+            snap = (
+                "Page URL: https://staging5.rolustech.com:4225/ship\nPage Title: Shipping\n"
+                '- button "Create a New Shipment" [ref=f1e59]\n'
+            )
+            s = TesterSession("portal", {"case_id": "PREP-wallet-create-0", "title": "create",
+                                         "steps": [{"n": 1, "text": "x", "app": "portal"}]},
+                              st, pol, Evidence(st.dir), max_calls=40, max_minutes=5)
+            s.current_step = 1
+            s._remember_page(snap)
+            args = {"element": "Create a New Shipment", "target": "f1e59"}
+            s.after_tool(SimpleNamespace(name="browser_click"), args, None, snap)
+            out = s.before_tool(SimpleNamespace(name="browser_click"), args, None)
+            self.assertIsNotNone(out)
+            self.assertIn("did not change the page", out["error"])
+
+    def test_no_login_when_session_valid(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest import mock
+        from agent_tester.helpers.core import login_form as LF
+
+        class FakeBrowser:
+            def __init__(self):
+                self.navigated = []
+
+            async def navigate(self, url):
+                self.navigated.append(url)
+
+            async def snapshot(self):
+                return 'Admin Dashboard\n- button "Log out"'
+
+        class Ctx:
+            app = "crm"
+            state = SimpleNamespace(values={})
+            config = {}
+            def account(self, _a):
+                return {"username": "u", "password_env": "PW", "role_markers": ["Admin Dashboard"]}
+            def url(self, p=""):
+                return f"https://crm.example/{p}"
+
+        browser = FakeBrowser()
+        with mock.patch.dict("os.environ", {"PW": "longsecret1"}):
+            with mock.patch.object(LF, "analyze", return_value={"has_password": False}):
+                out = asyncio.run(LF.run(browser, Ctx(), "admin"))
+        self.assertEqual(browser.navigated, [])
+        self.assertIn("skipped", out["notes"].lower())
+
+
 class GoldenTraceReplay(unittest.TestCase):
     """Replay redacted fixtures: loops caught at STUCK_MAX; discovery must not write data."""
 

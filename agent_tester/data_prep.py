@@ -413,12 +413,16 @@ def ensure_contact(plan, case, state, testers: dict, rules: list[dict]) -> CaseR
         return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,
                           note=f"CRM contact {rec} email {shown!r} does not match portal {email!r}")
 
-    store.update({"email": email, "record_id": rec, "email_on_record": shown or email,
+    # Record ids are always strings (never float — SuiteCRM UUIDs / numeric ids alike).
+    rec_s = str(rec).strip() if rec is not None else ""
+    if rec_s.endswith(".0") and rec_s.replace(".", "", 1).isdigit():
+        rec_s = rec_s[:-2]
+    store.update({"email": email, "record_id": rec_s, "email_on_record": shown or email,
                   "app": app, "failed": False})
-    state.values[LOOKUP_VALUE] = {"value": rec, "source": "contact_lookup"}
+    state.values[LOOKUP_VALUE] = {"value": rec_s, "source": "contact_lookup"}
     state.values[LOOKUP_EMAIL_VALUE] = {"value": shown or email, "source": "contact_lookup"}
     state.save()
-    state.checkpoint(f"contact lookup: {email} -> record {rec}")
+    state.checkpoint(f"contact lookup: {email} -> record {rec_s}")
     return None
 
 
@@ -817,6 +821,29 @@ def _ensure_one(plan, case, state, testers: dict, rule: dict) -> CaseResult | No
                                                  turn, why, why, acts):
                     state.checkpoint(f"data prep {key}: saved where it got stuck to the pack")
                     break
+        except Exception:  # noqa: BLE001
+            pass
+        # Persist a stuck_summary-shaped evidence blob so the web card / next run can see
+        # what PREP tried (shots, recent actions) — not only a checkpoint line.
+        try:
+            from .stuck_summary import build_stuck_summary, humanize_tried
+            recent = []
+            for a in (state.data.get("action_log") or [])[-12:]:
+                if str(a.get("case_id") or "").startswith(f"PREP-{key}"):
+                    tool = a.get("tool") or ""
+                    el = (a.get("args") or {}).get("element") or (a.get("args") or {}).get("url") or ""
+                    recent.append(f"{tool}:{el}" if el else tool)
+            brief = {"case_id": f"PREP-{key}", "title": f"data prep {key}", "data_prep": True,
+                     "steps": [{"n": 1, "text": why[:200]}]}
+            summary = build_stuck_summary(
+                brief=brief, case_id=f"PREP-{key}", app=app or find_app or "",
+                current_step=1, why=why, recent=recent, snapshot="",
+                run_dir=state.dir, screenshots=[],
+            )
+            state.data.setdefault("prep_stuck", {})[key] = summary
+            state.data.setdefault("notes", []).append(
+                f"PREP-{key} stuck evidence: " + "; ".join(humanize_tried(recent)[:4] or [why[:120]]))
+            state.save()
         except Exception:  # noqa: BLE001
             pass
         return CaseResult(case_id=case.id, verdict="BLOCKED", expected=case.expected,

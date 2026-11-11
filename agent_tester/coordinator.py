@@ -439,13 +439,24 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory,
     need_live: list[str] = []
     spot_n = 0
     map_store = DiscoveryMapStore.from_memory(memory) if memory is not None else None
+    sc = scope_for(memory) if memory is not None else "project"
+    # Drop stuck/garbage rows so they never get reused (and never block lazy skip).
+    if map_store is not None and not state.data.get("_discovery_bad_staled"):
+        try:
+            n_bad = map_store.mark_bad_rows_stale(sc, fp)
+            if n_bad:
+                state.data.setdefault("notes", []).append(
+                    f"discovery_map: marked {n_bad} stuck/garbage route(s) stale")
+            state.data["_discovery_bad_staled"] = True
+        except Exception:  # noqa: BLE001
+            pass
     # Once per run: import pack ## Routes as verified (source=pack); skip env-bound lines.
     if map_store is not None and not state.data.get("_learned_routes_backfilled"):
         warnings: list[str] = []
         try:
             backfill_from_learned(
                 state.data.get("pack_root"), map_store,
-                scope=scope_for(memory), env_fingerprint=fp,
+                scope=sc, env_fingerprint=fp,
                 platform=state.data.get("detected_platform"),
                 platform_version=plat_ver,
                 warn=warnings.append,
@@ -466,7 +477,6 @@ def ensure_discovery(plan, case, app: str, state, testers: dict, memory,
         platform_id=state.data.get("detected_platform") if state else None,
     )
     if map_store is not None:
-        sc = scope_for(memory)
         known_rows = map_store.list_for(sc, case.area, app, fp)
         for r in map_store.list_for(sc, "general", app, fp):
             if r not in known_rows and not any(

@@ -259,5 +259,197 @@ class OtelDetachNoise(unittest.TestCase):
             self.assertIn("real failure here", text)
 
 
+class RecordIdNotPhone(unittest.TestCase):
+    """Items 9/13: record= ids survive redact; CRM UUID required; never float."""
+
+    def test_redact_keeps_record_param(self):
+        from agent_tester.redact import redact
+        url = "https://crm.example/index.php?module=Contacts&action=DetailView&record=c717b126-aaaa-bbbb-cccc-ddddeeeeffff"
+        out = redact(url)
+        self.assertIn("c717b126-aaaa-bbbb-cccc-ddddeeeeffff", out)
+        self.assertNotIn("[phone]", out)
+
+    def test_record_value_rejects_phone_marker_and_digits_on_crm(self):
+        from agent_tester.tools.value_kind import validate_value
+        bad = validate_value("crm_contact_id", "[phone]", source="URL record id",
+                             platform="suitecrm7")
+        self.assertFalse(bad["ok"])
+        digits = validate_value("crm_contact_id", "67071257880822", source="URL record id",
+                                platform="suitecrm7")
+        self.assertFalse(digits["ok"])
+        ok = validate_value(
+            "crm_contact_id",
+            "https://crm.example/index.php?module=Contacts&action=DetailView&record=c717b126-aaaa-bbbb-cccc-ddddeeeeffff",
+            source="URL record id", platform="suitecrm7")
+        self.assertTrue(ok["ok"])
+        self.assertEqual(ok["value"], "c717b126-aaaa-bbbb-cccc-ddddeeeeffff")
+
+    def test_record_value_keeps_string_not_float(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = _sess(Path(d) / "run", case_id="PREP-CUSTOMER-find", app="crm", discovery=False)
+            s.state.data["detected_platform"] = "suitecrm7"
+            rv = next(t for t in s.tools() if getattr(t, "__name__", "") == "record_value")
+            out = rv("crm_contact_id",
+                     "index.php?module=Contacts&action=DetailView&record=c717b126-aaaa-bbbb-cccc-ddddeeeeffff",
+                     "URL record id")
+            self.assertEqual(out.get("recorded"), "crm_contact_id")
+            self.assertIsInstance(out["value"], str)
+            self.assertEqual(out["value"], "c717b126-aaaa-bbbb-cccc-ddddeeeeffff")
+
+
+class FindMissNavigateThrash(unittest.TestCase):
+    """Items 10/14: after find miss, refuse navigate; consecutive navigates stall."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.s = _sess(Path(self.tmp.name) / "run", case_id="PREP-wallet-find", app="crm",
+                       discovery=False)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _tool(self, name):
+        return SimpleNamespace(name=name)
+
+    def test_find_miss_blocks_navigate_until_snapshot(self):
+        from agent_tester.agents.tester import FIND_MISS_READ_MSG
+        self.s.after_tool(self._tool("browser_find"), {"query": "Current Rewards"}, None,
+                          "Error: not found")
+        self.assertTrue(self.s._find_miss_need_read)
+        denied = self.s.before_tool(self._tool("browser_navigate"),
+                                    {"url": "https://crm.example/index.php?module=Contacts"}, None)
+        self.assertIsNotNone(denied)
+        self.assertIn("Do not navigate", denied["error"])
+        # Snapshot clears the gate.
+        self.s.after_tool(self._tool("browser_snapshot"), {}, None,
+                          "Page URL: https://crm.example/\n- heading \"Contacts\"")
+        self.assertFalse(self.s._find_miss_need_read)
+
+    def test_navigate_thrash_explores(self):
+        from agent_tester.agents.tester import NAV_THRASH_MAX
+        self.s._explored = False
+        # Alternating list ↔ detail (the PREP-wallet-find pattern) without a read.
+        list_u = "https://staging5.rolustech.com:4220/index.php?module=Contacts&action=index"
+        detail_u = "https://staging5.rolustech.com:4220/index.php?module=Contacts&action=DetailView&record=x"
+        outs = []
+        for i in range(NAV_THRASH_MAX * 3):
+            outs.append(self.s.before_tool(
+                self._tool("browser_navigate"),
+                {"url": list_u if i % 2 == 0 else detail_u}, None))
+        self.assertTrue(any(o and "error" in o for o in outs if o))
+
+
+class NoChangeClickRepeat(unittest.TestCase):
+    """Item 15: identical click after no page change is refused with modal/tab guidance."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.s = _sess(Path(self.tmp.name) / "run", case_id="PREP-wallet-create-0", app="portal",
+                       discovery=False)
+        self.s.last_snapshot = (
+            "Page URL: https://staging5.rolustech.com:4225/ship\nPage Title: Shipping\n"
+            '- button "Create a New Shipment" [ref=f1e59]\n'
+            '- button "Shipping Only Order" [ref=f1e9]\n'
+        )
+        self.s._remember_page(self.s.last_snapshot)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_second_identical_no_change_click_refused(self):
+        from agent_tester.agents.tester import NO_CHANGE_CLICK_MSG
+        tool = SimpleNamespace(name="browser_click")
+        args = {"element": "Create a New Shipment", "target": "f1e59"}
+        # Simulate click that left the page hash unchanged.
+        before = self.s._page_hash
+        self.s.after_tool(tool, args, None, self.s.last_snapshot)
+        self.assertEqual(self.s._page_hash, before)
+        self.assertIsNotNone(self.s._no_change_click)
+        self.assertTrue(self.s._need_fresh_snap)
+        # Without a fresh snapshot, the same click is refused.
+        denied = self.s.before_tool(tool, args, None)
+        self.assertIsNotNone(denied)
+        self.assertIn("did not change the page", denied["error"])
+        self.assertIn("browser_tabs", denied["error"])
+
+
+class LoginOnlyWhenSignedOut(unittest.TestCase):
+    """Item 16: login_form checks session before navigating to /login."""
+
+    def test_session_valid_skips_login(self):
+        from agent_tester.helpers.core import login_form as LF
+        import asyncio
+
+        class FakeBrowser:
+            def __init__(self):
+                self.navigated = []
+
+            async def navigate(self, url):
+                self.navigated.append(url)
+
+            async def snapshot(self):
+                return 'Page Title: Home\n- button "Log out" [ref=e1]\nAdmin Dashboard'
+
+        class Ctx:
+            app = "portal"
+            state = SimpleNamespace(values={"login_form.logged_in": {"value": "yes", "source": "x/portal"}})
+            def account(self, _a):
+                return {"username": "u", "password_env": "P", "role_markers": ["Admin Dashboard"]}
+            config = {}
+            def url(self, p=""):
+                return f"https://portal.example/{p}"
+
+        browser = FakeBrowser()
+        with mock.patch.dict("os.environ", {"P": "longsecret1"}):
+            with mock.patch.object(LF, "analyze", return_value={"has_password": False}):
+                out = asyncio.run(LF.run(browser, Ctx(), "customer"))
+        self.assertEqual(out["values"]["logged_in"], "yes")
+        self.assertIn("skipped login_form", out["notes"].lower())
+        self.assertEqual(browser.navigated, [])
+
+
+class IdlePausesForHuman(unittest.TestCase):
+    """Item 8: human wait pauses LLM idle clock."""
+
+    def test_pause_context(self):
+        from agent_tester.agents import llm as L
+        self.assertFalse(L.human_wait_active())
+        with L.pause_idle_for_human():
+            self.assertTrue(L.human_wait_active())
+        self.assertFalse(L.human_wait_active())
+
+
+class PrepStuckEvidence(unittest.TestCase):
+    """Item 12: PREP blocked path stores stuck evidence in state."""
+
+    def test_blocked_writes_prep_stuck(self):
+        from agent_tester import data_prep as D
+        from agent_tester.models import PlannedCase, Step
+
+        with tempfile.TemporaryDirectory() as d:
+            st = RunState(Path(d) / "run")
+            st.data["action_log"] = [
+                {"case_id": "PREP-wallet-find", "tool": "browser_navigate",
+                 "args": {"url": "https://crm.example/"}, "seq": 1},
+                {"case_id": "PREP-wallet-find", "tool": "browser_click",
+                 "args": {"element": "Search"}, "seq": 2},
+            ]
+            case = PlannedCase(id="C1", title="t", expected="e",
+                               steps=[Step(text="x", app="crm")])
+            plan = TestPlan(task_id="1", title="t", env="staging", cases=[case],
+                            requirements=[])
+            # Call blocked via a tiny wrapper by invoking _ensure_one's path is heavy;
+            # exercise the nested blocked by patching create/find to fail early.
+            rule = {"id": "wallet", "value": "wallet_ready", "app": "crm",
+                    "find": "read", "envs": ["prod"],  # wrong env → blocked immediately
+                    "blocked_note": "not on staging", "test_client": "H"}
+            plan.env = "staging"
+            # envs gate: rule only allows prod
+            out = D._ensure_one(plan, case, st, {}, rule)
+            self.assertIsNotNone(out)
+            self.assertEqual(out.verdict, "BLOCKED")
+            self.assertIn("wallet", st.data.get("prep_stuck") or {})
+
+
 if __name__ == "__main__":
     unittest.main()

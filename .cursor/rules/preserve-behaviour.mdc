@@ -1,0 +1,13 @@
+---
+description: Never silently remove or replace working behaviour; keep PRs scoped
+alwaysApply: true
+---
+
+# Preserve behaviour
+
+- **Do not** remove or alter an existing feature, UI element, CLI flag, env switch, or user-visible behaviour unless the task **explicitly** asks for that change.
+- Prefer **building alongside** existing UI (extra lines, fields, guards) over replacing cards, tabs, or flows.
+- Keep each PR to **one concern**. Do not bundle unrelated refactors, renames, or cleanups.
+- Scope the diff to files required for the task. If `git diff --stat origin/fixes...HEAD` shows unrelated paths, revert them before opening the PR.
+- Before opening a PR, run skill **`pr-gate`** (`.cursor/skills/pr-gate/SKILL.md`): regression-auditor, env-leak-checker, ui-invariants-checker, full suite both modes, Regression audit in the PR body.
+- When unsure whether something is protected, check `.cursor/rules/protected-behaviours.mdc` and `tests/test_protected_behaviours.py`.

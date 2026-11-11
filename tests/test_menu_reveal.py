@@ -194,13 +194,18 @@ class RepeatRecoveryAndStuck(unittest.TestCase):
             asks.append(kw)
             return {"error": "STUCK_ASK"}
 
-        self.s._remember_page(OPEN)
+        # First click is counted while the menu is still closed, so recover can
+        # compare before vs after (menu newly opened by this click streak).
+        self.s._remember_page(CLOSED)
         with mock.patch.object(self.s, "_maybe_stuck_ask", side_effect=fake_ask):
+            out = self.s._budget_check(
+                "browser_click", {"element": "Orders", "target": "f1e11"})
+            self.s._remember_page(OPEN)
             out = None
-            for i in range(STUCK_MAX_ATTEMPTS):
+            for i in range(STUCK_MAX_ATTEMPTS - 1):
                 out = self.s._budget_check(
                     "browser_click", {"element": "Orders", "target": "f1e11"})
-            # 3rd attempt surfaces the open menu instead of asking.
+            # Last attempt surfaces the newly opened menu instead of asking.
             self.assertIsNotNone(out)
             self.assertIn("the menu opened; pick one of:", out["error"])
             self.assertIn("Shipping Only Orders", out["error"])
@@ -210,6 +215,34 @@ class RepeatRecoveryAndStuck(unittest.TestCase):
                 "browser_click", {"element": "Orders", "target": "f1e11"})
         self.assertEqual(out, {"error": "STUCK_ASK"}, out)
         self.assertEqual(len(asks), 1)
+
+    def test_already_open_unrelated_menu_does_not_recover(self):
+        """A user menu that was already expanded must not postpone the stuck ask."""
+        asks = []
+
+        def fake_ask(**kw):
+            asks.append(kw)
+            return {"error": "STUCK_ASK"}
+
+        already = (
+            "Page URL: https://example.test/admin\n"
+            "Page Title: Administration\n"
+            '- button "Administrator" [expanded] [ref=e33]:\n'
+            '  - menuitem "Profile" [ref=e40]\n'
+            '- link "Repair" [ref=f2e267]\n'
+        )
+        self.s._remember_page(already)
+        with mock.patch.object(self.s, "_maybe_stuck_ask", side_effect=fake_ask):
+            out = None
+            for i in range(STUCK_MAX_ATTEMPTS + 1):
+                out = self.s._budget_check(
+                    "browser_click", {"element": "Repair", "target": "f2e267"})
+                if out and out.get("error") == "STUCK_ASK":
+                    break
+        self.assertEqual(out, {"error": "STUCK_ASK"}, out)
+        self.assertEqual(len(asks), 1)
+        if out and "menu opened" in (out.get("error") or "").lower():
+            self.fail(out)
 
 
 class CaptureAndNoStaleReattach(unittest.TestCase):

@@ -255,7 +255,8 @@ def _finish_plan(plan: TestPlan, pack, task_text: str, repair: bool) -> TestPlan
         from ..casegen import add_repair_case
         plan = add_repair_case(plan, pack)
     from ..case_source import apply_source_case_markers
-    return apply_source_case_markers(plan, task_text)
+    from ..plan_checks import strip_run_handled_auth_steps
+    return strip_run_handled_auth_steps(apply_source_case_markers(plan, task_text))
 
 
 async def plan_in_batches(settings, pack, task_text: str, task_id: int, env: str, ids: list[str], repair: bool = True,
@@ -476,11 +477,12 @@ async def plan_task(settings: Settings, pack, task_text: str, task_id: int, env:
             plan = mark_generated(plan)
         review = await run_json(reviewer, plan.model_dump_json(indent=1), settings, label="reviewer",
                                 raw_dir=raw_dir, trace_path=trace_path)
-        from ..plan_checks import autofix, check_plan
+        from ..plan_checks import autofix, check_plan, strip_run_handled_auth_steps
         plan = autofix(plan, preapprovable)
         from ..casegen import add_repair_case  # SuiteCRM/SugarCRM projects always start with QRR
         if repair:                             # feature mode adds it once for the merged plan instead
             plan = add_repair_case(plan, pack)
+        plan = strip_run_handled_auth_steps(plan)
         fixed_issues = [i for i in check_plan(plan) if not i.startswith("requirement ")]
         problems = ([] if review.get("ok") else list(review.get("problems", []))) + fixed_issues
         if not problems:

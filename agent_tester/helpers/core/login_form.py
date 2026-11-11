@@ -156,6 +156,89 @@ def _control_name_matches(name: str, marker: str) -> bool:
     return bool(re.search(rf"(?i)\b{re.escape(m)}\b", n))
 
 
+def _control_name_prefix_match(name: str, marker: str) -> bool:
+    """True when the marker is a word-prefix of a token in the control name (Admin → Administrator)."""
+    n, m = (name or "").strip(), (marker or "").strip()
+    if not n or not m:
+        return False
+    if _control_name_matches(n, m):
+        return True
+    return bool(re.search(rf"(?i)\b{re.escape(m)}\w+", n))
+
+
+# Login URL/path (app-agnostic). Does not match words like "catalog".
+_LOGIN_URL = re.compile(
+    r"(?i)(?:^|[?#&/=])(?:action=login\b|log[-_]?in(?:\.[a-z0-9]+)?(?:[/?#]|$)|sign[-_]?in(?:\.[a-z0-9]+)?(?:[/?#]|$))"
+)
+_PASSWORD_FIELD = re.compile(
+    r'(?i)(?:type\s*=\s*"password"|\b(?:textbox|searchbox|input)\b[^\n]*password|password[^\n]*\b(?:textbox|searchbox|input)\b)'
+)
+
+
+def page_has_password_field(page: str) -> bool:
+    """Whether the accessibility tree looks like it still shows a password input."""
+    return bool(_PASSWORD_FIELD.search(page or ""))
+
+
+def is_login_path(page: str, cfg: dict | None = None, url: str = "") -> bool:
+    """True when the current URL (or the pack login path) looks like a login screen."""
+    if not url:
+        m = re.search(r"(?im)^(?:- )?Page URL:\s*(\S+)", page or "")
+        url = (m.group(1) if m else "").strip()
+    if url and _LOGIN_URL.search(url):
+        return True
+    path = str((cfg or {}).get("path") or "").strip()
+    if path and url and path.lower() not in ("/", "") and "login" in path.lower() and path.lower() in url.lower():
+        return True
+    return False
+
+
+def logged_in_this_run(ctx, app: str | None = None) -> bool:
+    """True when login_form already recorded a signed-in session for this app in this run."""
+    state = getattr(ctx, "state", None)
+    values = getattr(state, "values", None) or {}
+    app = (app or getattr(ctx, "app", "") or "").strip()
+    keys = []
+    if app:
+        keys.append(f"login_form.logged_in.{app}")
+    keys.append("login_form.logged_in")
+    for key in keys:
+        entry = values.get(key)
+        if not entry:
+            continue
+        if isinstance(entry, dict):
+            val, src = str(entry.get("value") or ""), str(entry.get("source") or "")
+        else:
+            val, src = str(entry), ""
+        if val.strip().lower() not in ("yes", "true", "1"):
+            continue
+        if app and key == f"login_form.logged_in.{app}":
+            return True
+        if not app:
+            return True
+        src_l = src.lower()
+        app_l = app.lower()
+        if not src or src_l.endswith(f"/{app_l}") or src_l.endswith(f":{app_l}") or f"/{app_l}" in src_l or src_l.endswith(app_l):
+            return True
+    return False
+
+
+def record_logged_in(ctx, app: str | None = None) -> None:
+    """Persist a per-app signed-in flag on the run state (never an identity)."""
+    state = getattr(ctx, "state", None)
+    if state is None or not hasattr(state, "values"):
+        return
+    if not isinstance(getattr(state, "values", None), dict):
+        return
+    app = (app or getattr(ctx, "app", "") or "").strip() or "app"
+    try:
+        from agent_tester.tools.values import record
+        record(state.values, "login_form.logged_in", "yes", source=f"login_form/{app}")
+        record(state.values, f"login_form.logged_in.{app}", "yes", source=f"login_form/{app}")
+    except Exception:  # noqa: BLE001
+        log.debug("failed to record login_form.logged_in", exc_info=True)
+
+
 def _snapshot_controls(page: str):
     return [e for e in parse_snapshot(page or "") if e.role in _SIGNED_IN_ROLES]
 
@@ -168,13 +251,22 @@ def _markers_on_controls(page: str, markers: list) -> bool:
     return all(any(_control_name_matches(e.name, m) for e in controls) for m in markers)
 
 
-def _signed_in_evidence(page: str, markers: list) -> str | None:
-    """Why the accessibility tree shows a signed-in session, or None if unsure."""
+def _signed_in_evidence(page: str, markers: list, *, allow_role_prefix: bool = False) -> str | None:
+    """Why the accessibility tree shows a signed-in session, or None if unsure.
+
+    ``allow_role_prefix`` (Admin → Administrator) is only for a session this run already
+    logged in, on a page with no password field that is not the login path. Free-text
+    'Admin' on a signed-out page never counts.
+    """
     controls = _snapshot_controls(page)
     if any(_LOGOUT_CTRL.search(e.name or "") for e in controls):
         return "logout control"
     if _markers_on_controls(page, markers):
         return "role markers"
+    if allow_role_prefix:
+        wanted = [str(m).strip() for m in (markers or []) if str(m).strip()]
+        if wanted and all(any(_control_name_prefix_match(e.name, m) for e in controls) for m in wanted):
+            return "role marker prefix"
     return None
 
 
@@ -202,10 +294,15 @@ async def _session_already_valid(browser, ctx, account: str, acc: dict) -> dict 
         log.warning("login session snapshot failed", exc_info=True)
         page = ""
     markers = [m for m in (acc.get("role_markers") or []) if str(m).strip()]
-    how = _signed_in_evidence(page, markers)
+    allow_prefix = (
+        logged_in_this_run(ctx, getattr(ctx, "app", ""))
+        and not is_login_path(page, getattr(ctx, "config", None) or acc)
+    )
+    how = _signed_in_evidence(page, markers, allow_role_prefix=allow_prefix)
     if not how:
         return None
     markers_ok = _markers_on_controls(page, markers)
+    record_logged_in(ctx)
     return {"values": {"logged_in": "yes",
                        "role_ok": "yes" if markers_ok else f"skipped ({how})"},
             "screenshots": [],
@@ -236,9 +333,14 @@ async def _attempt(browser, ctx, account: str, path: str = ""):
         except Exception:  # noqa: BLE001
             log.warning("login page snapshot failed after navigate", exc_info=True)
             page = ""
-        how = _signed_in_evidence(page, acc.get("role_markers") or [])
+        allow_prefix = (
+            logged_in_this_run(ctx, getattr(ctx, "app", ""))
+            and not is_login_path(page, getattr(ctx, "config", None) or acc)
+        )
+        how = _signed_in_evidence(page, acc.get("role_markers") or [], allow_role_prefix=allow_prefix)
         if how:
             markers_ok = _markers_on_controls(page, acc.get("role_markers") or [])
+            record_logged_in(ctx)
             return {"values": {"logged_in": "yes",
                                "role_ok": "yes" if markers_ok else f"skipped ({how})"},
                     "screenshots": [],
@@ -288,6 +390,7 @@ async def _attempt(browser, ctx, account: str, path: str = ""):
                           "Do not retry by hand.")
     _save_learned(ctx, {"user": _fdesc(form["user"]), "password": _fdesc(form["password"]),
                         "submit": _fdesc(sub) if sub else "Enter"})
+    record_logged_in(ctx)
     return {"values": {"logged_in": "yes",
                        "role_ok": "yes" if role_ok else f"no (missing {', '.join(markers)})"},
             "screenshots": [shot], "notes": f"Logged in as {account} using {used}"}

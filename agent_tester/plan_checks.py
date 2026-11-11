@@ -1,8 +1,75 @@
 """Deterministic plan validation before the approval gate (tech spec section 5)."""
 from __future__ import annotations
 
+import re
+
 from .field_text import field_text
 from .models import CaseType, TestPlan
+
+# A step whose whole text is logging in or out (optional leading filler). Not "after login, do X".
+_AUTH_VERB = re.compile(
+    r"(?i)^\s*((please|then|first|now|next)\s+)*"
+    r"(?P<verb>(log|sign)\s*[-]?(?P<dir>in|out)|logout|signin|signout|logon)\b"
+)
+_ENSURE_LOGGED_IN = re.compile(
+    r"(?i)^\s*(ensure|make sure|verify|confirm|be)\s+(that\s+)?"
+    r"(you\s+are\s+|you're\s+)?(logged|signed)\s+in\b"
+)
+_AUTH_TOPIC = re.compile(
+    r"(?i)\b((log|sign)\s*[-]?(in|out)|logout|signin|signout|authentication|credentials?)\b"
+)
+
+
+def is_login_step(text: str) -> bool:
+    """True when the step itself is a login / sign-in (the run usually handles this)."""
+    t = (text or "").strip()
+    if _ENSURE_LOGGED_IN.match(t):
+        return True
+    m = _AUTH_VERB.match(t)
+    if not m:
+        return False
+    verb = re.sub(r"[\s-]+", "", (m.group("verb") or "").lower())
+    return "out" not in verb
+
+
+def is_logout_step(text: str) -> bool:
+    m = _AUTH_VERB.match((text or "").strip())
+    if not m:
+        return False
+    verb = re.sub(r"[\s-]+", "", (m.group("verb") or "").lower())
+    return "out" in verb
+
+
+def is_auth_step(text: str) -> bool:
+    return is_login_step(text) or is_logout_step(text)
+
+
+def case_is_about_auth(case) -> bool:
+    """True when the case itself tests login/logout, so explicit ticket steps should be kept."""
+    heading = f"{getattr(case, 'title', None) or ''} {field_text(getattr(case, 'expected', None))}"
+    if _AUTH_TOPIC.search(heading):
+        return True
+    explicit = [s for s in (getattr(case, "steps", None) or []) if not getattr(s, "inferred", False)]
+    if not explicit:
+        return False
+    auth = [s for s in explicit if is_auth_step(getattr(s, "text", "") or "")]
+    return bool(auth) and len(auth) >= max(1, (len(explicit) + 1) // 2)
+
+
+def strip_run_handled_auth_steps(plan: TestPlan) -> TestPlan:
+    """Drop inferred login/logout steps (the run logs in itself).
+
+    Explicit ticket login/logout steps are kept only when the case is itself about login
+    or logout. Other setup logins are stripped so the tester does not repeat them.
+    """
+    plan = plan.model_copy(deep=True)
+    for c in plan.cases:
+        if case_is_about_auth(c):
+            c.steps = [s for s in c.steps if not (s.inferred and is_auth_step(s.text))]
+        else:
+            c.steps = [s for s in c.steps if not is_auth_step(s.text)]
+    return plan
+
 
 
 def check_plan(plan: TestPlan) -> list[str]:
@@ -97,7 +164,7 @@ def autofix(plan: TestPlan, preapprovable: list[str] | None = None) -> TestPlan:
             text="Put every setting changed in this run back to its recorded original value, re-read it and call record_restored",
             app=app, changes_data=True, action_type="change_settings", restores=True, inferred=True,
             inferred_reason="settings changed by the run must be restored", inferred_source="core rule"))
-    return plan
+    return strip_run_handled_auth_steps(plan)
 
 
 def execution_order(plan: TestPlan) -> list[str]:

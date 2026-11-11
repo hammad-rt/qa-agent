@@ -168,6 +168,10 @@ def resolve_step(brief: dict | None, current_step: int | None, case_id: str = ""
     step_n = current_step
     step_text = ""
     total = len(steps) or None
+    done = set(brief.get("steps_done") or [])
+    # A just-completed login (or any marked step) must not stay as the stuck outcome.
+    if step_n is not None and step_n in done:
+        step_n = None
     if step_n is not None:
         for st in steps:
             if isinstance(st, dict) and st.get("n") == step_n:

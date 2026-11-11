@@ -21,6 +21,10 @@ LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", os.environ.get("LLM_CALL_TIMEO
 LLM_STREAM_TIMEOUT = float(os.environ.get("LLM_STREAM_TIMEOUT", "60"))
 # No usable text from ADK events for this long → fail the attempt (empty keepalive events don't count).
 LLM_IDLE_TIMEOUT = float(os.environ.get("LLM_IDLE_TIMEOUT", "90"))
+# Optional whole-session cap (seconds) for a tester/discovery turn. 0 = off (default).
+# Pauses while pause_idle_for_human() is active; does not apply to a single LiteLLM request
+# (those already use timeout / stream_timeout).
+TESTER_SESSION_MAX_SEC = float(os.environ.get("TESTER_SESSION_MAX_SEC", "0"))
 
 # When the tester is blocked on a person (stuck ask / ask_user / approval), pause the idle clock
 # so a long human answer does not fail the LLM turn with "no text for 90s".
@@ -68,17 +72,70 @@ def model(settings: Settings, json_mode: bool = False, max_tokens: int | None = 
 _POLL_SLICE = 5.0  # seconds between human-wait checks; never cancels the pending event
 
 
-async def _iter_events_with_idle(aiter, *, idle_sec: float, call_deadline: float | None = None):
+def _event_starts_tool(ev) -> bool:
+    """True when this ADK event carries a function/tool call (start of tool execution).
+
+    ``unittest.mock.Mock`` parts are ignored: a Mock ``function_call.name`` is not a str.
+    """
+    content = getattr(ev, "content", None)
+    parts = getattr(content, "parts", None) if content is not None else None
+    if not parts:
+        return False
+    for p in parts:
+        fc = getattr(p, "function_call", None)
+        if not fc:
+            continue
+        name = fc.get("name") if isinstance(fc, dict) else getattr(fc, "name", None)
+        if isinstance(name, str) and name:
+            return True
+    return False
+
+
+def _session_cap_error(session_cap_sec: float | None) -> LLMOutputError:
+    if session_cap_sec and session_cap_sec > 0:
+        return LLMOutputError(
+            f"agent session hit the {session_cap_sec:.0f}s session cap")
+    return LLMOutputError("agent session hit the session cap")
+
+
+async def _iter_events_with_idle(aiter, *, idle_sec: float, call_deadline: float | None = None,
+                                 session_cap_sec: float | None = None):
     """Yield ADK events; fail when no event arrives within idle_sec, or past call_deadline.
 
-    While ``pause_idle_for_human()`` is active (stuck ask / ask_user), keep waiting without
-    counting that time as LLM idle.
+    Idle measures gaps between events, excluding tool execution (the wait after a
+    function_call event) and human waits (``pause_idle_for_human()``).
+
+    ``call_deadline`` is an optional session cap (see TESTER_SESSION_MAX_SEC), not a
+    per-call LiteLLM timeout. Time spent in a human wait is added back to the deadline.
 
     The pending ``__anext__`` is polled with ``asyncio.wait`` (which never cancels it), so a
     slow first token (> one poll slice) does not cancel the ADK runner. It is cancelled only
     when we actually give up (idle exceeded / deadline hit) or the consumer stops iterating.
     """
     nxt = None
+    pause_idle = False  # True while waiting for the event that follows a function_call
+    deadline = call_deadline
+    human_paused_at = None
+
+    def _sync_human_pause() -> bool:
+        """Apply / release a human-wait pause; return True while a person is answering.
+
+        Must run both before and after each poll slice: a stuck-card wait can end
+        while ``asyncio.wait`` is in flight, and the deadline has to be extended
+        before we decide the session cap has expired.
+        """
+        nonlocal deadline, human_paused_at, started
+        if human_wait_active():
+            if human_paused_at is None:
+                human_paused_at = time.monotonic()
+            started = time.monotonic()
+            return True
+        if human_paused_at is not None:
+            if deadline is not None:
+                deadline += time.monotonic() - human_paused_at
+            human_paused_at = None
+        return False
+
     try:
         while True:
             # Poll in short slices so a human-wait that starts mid-timeout is noticed.
@@ -86,20 +143,21 @@ async def _iter_events_with_idle(aiter, *, idle_sec: float, call_deadline: float
             started = time.monotonic()
             nxt = asyncio.ensure_future(aiter.__anext__())
             while True:
-                if human_wait_active():
+                waiting_human = _sync_human_pause()
+                if pause_idle:
                     started = time.monotonic()
                 left = slice_sec
-                if call_deadline is not None and not human_wait_active():
-                    left = min(left, max(0.05, call_deadline - time.monotonic()))
+                if deadline is not None and not waiting_human:
+                    left = min(left, max(0.05, deadline - time.monotonic()))
                 done, _ = await asyncio.wait({nxt}, timeout=left)
                 if done:
                     break
-                if human_wait_active():
+                waiting_human = _sync_human_pause()
+                if waiting_human or pause_idle:
                     continue
                 waited = time.monotonic() - started
-                if call_deadline is not None and time.monotonic() >= call_deadline:
-                    raise LLMOutputError(
-                        f"LLM call hit the {LLM_TIMEOUT:.0f}s per-call timeout")
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise _session_cap_error(session_cap_sec)
                 if waited >= idle_sec:
                     raise LLMOutputError(
                         f"no text for {LLM_IDLE_TIMEOUT:.0f}s (stream idle / empty ADK events)")
@@ -110,9 +168,11 @@ async def _iter_events_with_idle(aiter, *, idle_sec: float, call_deadline: float
                 return
             nxt = None
             yield ev
+            pause_idle = _event_starts_tool(ev)
     finally:
         if nxt is not None and not nxt.done():
             nxt.cancel()
+
 
 
 async def run_agent(agent, prompt: str, settings: Settings, state: dict | None = None, app_name: str = "qa-agent",
@@ -120,8 +180,12 @@ async def run_agent(agent, prompt: str, settings: Settings, state: dict | None =
     """Run one agent to completion and return its final text. retry=True only for agents without side
     effects (planner, reviewer, judge); testers are never replayed automatically.
 
-    Each turn is bounded by LLM_TIMEOUT (LiteLLM + asyncio) and LLM_IDLE_TIMEOUT (no text in events).
-    Cancellation releases the shared LLM semaphore so retries are not starved behind hung calls.
+    A single LiteLLM request is bounded by LLM_TIMEOUT / LLM_STREAM_TIMEOUT (passed to LiteLLM).
+    LLM_IDLE_TIMEOUT fails the attempt when the model is silent (no events, and empty keepalives
+    do not reset the clock). Idle does not count tool execution or human waits. There is no
+    whole-turn cap at LLM_TIMEOUT: a tester/discovery turn may contain many tool calls.
+    TESTER_SESSION_MAX_SEC (default 0 = off) is an optional session cap that pauses during
+    human waits. Cancellation releases the shared LLM semaphore so retries are not starved.
     """
     if retry:
         from ..reliability import with_retries
@@ -140,19 +204,26 @@ async def run_agent(agent, prompt: str, settings: Settings, state: dict | None =
     final = ""
     msg, left = prompt, max_follow_ups
     idle = max(0.05, LLM_IDLE_TIMEOUT)
-    call_cap = max(idle + 0.05, LLM_TIMEOUT)
+    session_cap = max(0.0, TESTER_SESSION_MAX_SEC)
 
     async def _one_turn(user_msg: str) -> str:
         turn_final = ""
         saw_text = False
         last_text_at = time.monotonic()
-        deadline = time.monotonic() + call_cap
+        pending_tool = False
+        deadline = (time.monotonic() + session_cap) if session_cap > 0 else None
         stream = runner.run_async(
             user_id="qa", session_id=sid,
             new_message=types.Content(role="user", parts=[types.Part(text=user_msg)]))
-        async for ev in _iter_events_with_idle(stream.__aiter__(), idle_sec=idle, call_deadline=deadline):
+        async for ev in _iter_events_with_idle(
+                stream.__aiter__(), idle_sec=idle, call_deadline=deadline,
+                session_cap_sec=session_cap if session_cap > 0 else None):
             if trace_path:
                 _trace(trace_path, ev)
+            # Tool execution and human waits must not count as "empty event" idle.
+            if human_wait_active() or pending_tool:
+                last_text_at = time.monotonic()
+                pending_tool = False
             text = ""
             if ev.content and ev.content.parts:
                 text = "".join(p.text or "" for p in ev.content.parts if getattr(p, "text", None))
@@ -168,6 +239,7 @@ async def run_agent(agent, prompt: str, settings: Settings, state: dict | None =
                     f"no text for {LLM_IDLE_TIMEOUT:.0f}s (empty ADK events)")
             elif human_wait_active():
                 last_text_at = time.monotonic()
+            pending_tool = _event_starts_tool(ev)
         if not saw_text and not (turn_final or "").strip():
             # Completed with only empty keepalive-style events.
             raise LLMOutputError("no text for the whole LLM call (empty ADK events)")
@@ -177,10 +249,7 @@ async def run_agent(agent, prompt: str, settings: Settings, state: dict | None =
         async with _sem:
             while msg:
                 try:
-                    final = await asyncio.wait_for(_one_turn(msg), timeout=call_cap)
-                except asyncio.TimeoutError as e:
-                    raise LLMOutputError(
-                        f"LLM call hit the {LLM_TIMEOUT:.0f}s per-call timeout") from e
+                    final = await _one_turn(msg)
                 except asyncio.CancelledError:
                     # Propagate so plan deadline / SIGINT can free the semaphore promptly.
                     raise

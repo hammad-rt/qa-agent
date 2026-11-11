@@ -427,6 +427,8 @@ def playwright_toolset(run_dir: Path, app: str):
 
 
 AUTO_SHOT_SETTLE = float(os.environ.get("AUTO_SHOT_SETTLE", "1.5"))
+# Bound for a live stuck-ask screenshot on the existing session; never a 45s second browser.
+_STUCK_SHOT_WAIT = float(os.environ.get("STUCK_SHOT_WAIT", "8"))
 
 
 def _page_body(snap: str) -> str:
@@ -1470,37 +1472,82 @@ class TesterSession:
         return bool(sys.stdin and sys.stdin.isatty())
 
     def _capture_stuck_ask_shot(self) -> str | None:
-        """Fresh PNG under run shots/ at ask time (never reuse login helper shots)."""
-        tc = getattr(self, "_tool_context", None)
-        if self.toolset is None or tc is None:
-            return None
-        import asyncio
-        import concurrent.futures
+        """PNG basename for the stuck card, without a second browser or a long block.
 
-        async def _go():
-            # Refresh page text so title/path are current before the card renders.
-            try:
-                from ..helpers import adk_caller
-                call = adk_caller(self.toolset, tc)
-                snap = str(await call("browser_snapshot", {}) or "")
-                if snap:
-                    self._remember_page(snap)
-            except Exception:  # noqa: BLE001
-                pass
-            return await self.auto_shot("stuck-ask", tc)
+        Prefers a shot taken on the existing MCP session just before the ask
+        (``_fresh_stuck_shot``, filled by ``before_tool_async``). Falls back
+        immediately to the last screenshot of this case. Never starts a new
+        event loop or Playwright profile (that fights the running browser).
+        """
+        fresh = getattr(self, "_fresh_stuck_shot", None)
+        self._fresh_stuck_shot = None  # one prefetch per ask; never reuse a stale card shot
+        if fresh:
+            name = Path(str(fresh)).name
+            if (self.ev.shots / name).is_file():
+                return name
+        return self._last_case_shot()
 
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            try:
-                return asyncio.run(_go())
-            except Exception:  # noqa: BLE001
-                return None
-        try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                return pool.submit(asyncio.run, _go()).result(timeout=45)
-        except Exception:  # noqa: BLE001
+    def _last_case_shot(self) -> str | None:
+        """Latest PNG for this case, skipping login helper shots for another app."""
+        from ..stuck_summary import latest_shot
+        shots = list(getattr(self.result, "screenshots", None) or [])
+        return latest_shot(self.state.dir, shots, app=self.app or "")
+
+    def _stuck_ask_is_likely(self, tool, args) -> bool:  # noqa: ARG002
+        """True when this tool call is about to open a stuck ask (prefetch a live shot)."""
+        if int(getattr(self, "_stuck_asks", 0)) >= STUCK_ASK_MAX_PER_CASE:
+            return False
+        if self.toolset is None:
+            return False
+        name = getattr(tool, "name", "") or ""
+        # Last LOOP_WARN actions were identical — this call may be the one that asks.
+        if self._identical_action_tail(LOOP_WARN):
+            return True
+        if (name == "browser_navigate"
+                and int(getattr(self, "_nav_without_read", 0) or 0) >= NAV_THRASH_MAX - 1):
+            return True
+        return False
+
+    async def _prepare_stuck_ask_shot(self, tool_context) -> str | None:
+        """Snapshot + PNG on the existing MCP session (same event loop). Never raises."""
+        if self.toolset is None or tool_context is None:
             return None
+        from ..helpers import adk_caller
+        call = adk_caller(self.toolset, tool_context)
+        try:
+            snap = str(await call("browser_snapshot", {}) or "")
+            if snap:
+                self._remember_page(snap)
+            png, txt = self.ev.paths(self.case_id, "stuck-ask")
+            self.ev.shots.mkdir(parents=True, exist_ok=True)
+            await call("browser_take_screenshot", {"filename": str(png.resolve()), "type": "png"})
+            if self.last_snapshot:
+                self.ev.save_snapshot(txt, self.last_snapshot, keep_emails=self.keep_emails)
+                if txt.name not in self.result.snapshots:
+                    self.result.snapshots.append(txt.name)
+            if png.is_file():
+                if png.name not in self.result.screenshots:
+                    self.result.screenshots.append(png.name)
+                self._fresh_stuck_shot = png.name
+                return png.name
+        except Exception as e:  # noqa: BLE001
+            log.warning("stuck-ask live screenshot failed: %s", e)
+        return None
+
+    async def _prefetch_stuck_ask_shot(self, tool, args, tool_context) -> None:
+        if not self._stuck_ask_is_likely(tool, args):
+            return
+        try:
+            await asyncio.wait_for(
+                self._prepare_stuck_ask_shot(tool_context), timeout=max(0.5, _STUCK_SHOT_WAIT))
+        except Exception as e:  # noqa: BLE001
+            log.warning("stuck-ask live screenshot skipped: %s", e or type(e).__name__)
+
+    async def before_tool_async(self, tool, args, tool_context):
+        """ADK callback: live-capture on this session, then the sync before_tool (may stuck-ask)."""
+        self._tool_context = tool_context
+        await self._prefetch_stuck_ask_shot(tool, args, tool_context)
+        return self.before_tool(tool, args, tool_context)
 
     def _stuck_summary(self, why: str, thread: list | None = None,
                        *, fresh_shot: str | None = None, ask_at: float | None = None) -> dict:
@@ -1508,7 +1555,7 @@ class TesterSession:
         brief = dict(self.brief or {})
         if getattr(self, "result", None) is not None:
             brief["steps_done"] = list(self.result.steps_done or [])
-        return build_stuck_summary(
+        built = build_stuck_summary(
             brief=brief, case_id=self.case_id, app=self.app or "",
             current_step=self.current_step, why=why,
             recent=list(getattr(self, "_recent", []) or []),
@@ -1517,6 +1564,7 @@ class TesterSession:
             timeout_sec=STUCK_ASK_TIMEOUT_SEC, thread=thread or [],
             fresh_shot=fresh_shot, ask_at=ask_at,
         )
+        return _apply_page_title_fallback(built, self.last_snapshot)
 
     def _action_match_keys(self, name: str, args: dict) -> set[str]:
         """Canonical keys for an action so click:button X and click:X compare equal."""
@@ -2465,6 +2513,34 @@ def _redact_obj(o, keep):
     return o
 
 
+def _apply_page_title_fallback(summary: dict, snapshot: str | dict | None = None) -> dict:
+    """If the snapshot has no title, show the URL path on the stuck card instead of '(untitled)'.
+
+    ``page_location`` can also absorb the next accessibility line when ``Page Title:`` is
+    blank (the regex allows the following line to become the title). Treat that as empty
+    and fall back to the URL path.
+    """
+    if not summary:
+        return summary
+    title = str(summary.get("page_title") or "").strip()
+    raw_empty = False
+    if isinstance(snapshot, dict):
+        text = str(snapshot.get("text") or snapshot.get("page_state") or "")
+        if not str(snapshot.get("title") or "").strip():
+            raw_empty = True
+    else:
+        text = str(snapshot or "")
+    if text:
+        m = re.search(r"(?im)^Page Title:[^\S\n]*(.*)$", text)
+        if m is None or not m.group(1).strip():
+            raw_empty = True
+    if not title or title == "(untitled)" or raw_empty:
+        path = str(summary.get("page_path") or "").strip()
+        if path and path != "(unknown page)":
+            summary["page_title"] = path
+    return summary
+
+
 def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Path, memory=None):
     """Returns tester(app, brief, state) -> StepResult for the coordinator."""
     evidence = Evidence(run_dir)
@@ -2576,7 +2652,7 @@ def make_tester(settings: Settings, pack, env: str, policy: Policy, run_dir: Pat
                 instr += "\nThis turn is READ-ONLY: log in and read values only. Never change anything."
             agent = LlmAgent(name=f"tester_{app}", model=model(settings, max_tokens=TESTER_MAX_TOKENS),
                              instruction=lambda _c: instr, tools=[toolset, *sess.tools()],
-                             before_tool_callback=sess.before_tool, after_tool_callback=sess.after_tool,
+                             before_tool_callback=sess.before_tool_async, after_tool_callback=sess.after_tool,
                              before_model_callback=sess.before_model, after_model_callback=sess.after_model)
             prompt = "Your steps:\n" + json.dumps(brief, indent=1, default=str)
 

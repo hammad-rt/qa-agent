@@ -55,3 +55,106 @@ class StuckKB(unittest.TestCase):
             self.assertIn("already tried", line)
             self.assertIn("reached", line)
             self.assertTrue(any("Stuck" in x for x in learned.read(Path(d), "rewards", "crm")))
+
+
+class ConfirmedRoutesSection(unittest.TestCase):
+    """## Routes lines from any pack learned.md → verified pack routes (env lines skipped)."""
+
+    SAMPLE = """# What the agent learned
+
+## Routes
+- route: login | app: crm | path: Home > Login
+- route: Buy & Ship quote | app: portal | path: Buy & Ship > Request a purchase quote | notes: open form only
+- route: wallet | app: crm | path: https://crm.example/index.php?module=Users | notes: bad
+- route: contact | app: crm | path: Contacts > List | notes: email me@example.com
+- route: order A1158 | app: portal | path: Shipping Only > Open A1158
+- route: Repair | app: crm | path: Admin > Repair > Quick Repair and Rebuild
+- not a route line at all
+
+## parcel_value:portal
+- Route: click 'Continue' (legacy shape — ignored by ## Routes parser)
+"""
+
+    def test_parse_routes_section_sample_lines(self):
+        warnings = []
+        routes = learned.parse_routes_section(self.SAMPLE, warn=warnings.append)
+        screens = {r["screen"] for r in routes}
+        self.assertEqual(screens, {"login", "Buy & Ship quote", "Repair"})
+        by_screen = {r["screen"]: r for r in routes}
+        self.assertEqual(by_screen["login"]["app"], "crm")
+        self.assertEqual(by_screen["login"]["path"], "Home > Login")
+        self.assertEqual(by_screen["login"]["source"], "pack")
+        self.assertEqual(by_screen["login"]["status"], "verified")
+        self.assertEqual(by_screen["Buy & Ship quote"]["notes"], "open form only")
+        self.assertEqual(by_screen["Repair"]["path"],
+                         "Admin > Repair > Quick Repair and Rebuild")
+        # Env-bound lines skipped with warnings (host/url, email, record id).
+        blob = " ".join(warnings).lower()
+        self.assertIn("url", blob)
+        self.assertIn("email", blob)
+        self.assertTrue(any("a1158" in w.lower() or "record id" in w.lower() for w in warnings))
+        self.assertTrue(any("bad format" in w.lower() for w in warnings))
+        for r in routes:
+            self.assertNotIn("https://", r["path"])
+            self.assertNotIn("@", r.get("notes", ""))
+            self.assertNotRegex(r["screen"] + r["path"], r"\bA\d{3,}\b")
+
+    def test_backfill_writes_verified_pack_source(self):
+        from agent_tester.discovery_map import DiscoveryMapStore, backfill_from_learned
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "learned.md").write_text(self.SAMPLE)
+            store = DiscoveryMapStore(root / "map.db")
+            warnings = []
+            written = backfill_from_learned(
+                root, store, scope="project:demo", env_fingerprint="preprod",
+                warn=warnings.append,
+            )
+            self.assertEqual(len(written), 3)
+            for row in written:
+                self.assertEqual(row["status"], "verified")
+                self.assertEqual(row["source"], "pack")
+                self.assertEqual(row["env_fingerprint"], "preprod")
+            login = store.get("project:demo", "general", "crm", "login", "preprod")
+            self.assertIsNotNone(login)
+            self.assertIn("Login", login["route_text"])
+            store.close()
+
+    def test_routes_section_does_not_break_area_app_parsing(self):
+        """## Routes is additive; ## area:app lines still feed learned.read()."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "learned.md").write_text(self.SAMPLE)
+            area_lines = learned.read(root, "parcel_value", "portal")
+            self.assertTrue(any("Continue" in x for x in area_lines))
+            routes = learned.parse_confirmed_routes(root)
+            self.assertTrue(any(r["screen"] == "login" for r in routes))
+            # area:app Route lines are not ## Routes confirmed rows
+            self.assertFalse(any("Continue" in (r.get("path") or "") for r in routes))
+
+
+class RouteSynonymMatch(unittest.TestCase):
+    """Screen↔checklist matching via pack fixture synonyms (no product labels in the test body)."""
+
+    FIXTURE = Path(__file__).resolve().parent / "fixtures" / "packs" / "route_synonyms"
+
+    def test_fixture_pairs_match_via_pack_synonyms(self):
+        import yaml
+        from agent_tester.discovery_map import (
+            load_route_synonym_groups, match_item_to_rows, route_match_score,
+        )
+        pack_cfg = yaml.safe_load((self.FIXTURE / "pack.yaml").read_text()) or {}
+        pairs = (yaml.safe_load((self.FIXTURE / "pairs.yaml").read_text()) or {}).get("pairs") or []
+        self.assertGreaterEqual(len(pairs), 3)
+        groups = load_route_synonym_groups(pack_cfg)
+        self.assertTrue(groups)
+        rows = [{"checklist_item": p["screen"], "item_key": f"k{i}", "route_text": p["screen"]}
+                for i, p in enumerate(pairs)]
+        for p in pairs:
+            score = route_match_score(p["screen"], p["checklist"], groups)
+            self.assertGreaterEqual(
+                score, 0.5,
+                f"{p['screen']!r} vs {p['checklist']!r} score={score}")
+            hit = match_item_to_rows(rows, p["checklist"], synonym_groups=groups)
+            self.assertIsNotNone(hit, f"no row for checklist {p['checklist']!r}")
+            self.assertEqual(hit["checklist_item"], p["screen"])

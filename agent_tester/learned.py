@@ -206,3 +206,81 @@ def scrub_file(pack_root) -> int:
     if changed:
         p.write_text("\n".join(out_lines) + ("\n" if text.endswith("\n") else ""))
     return changed
+
+
+# Confirmed routes hand-written under ``## Routes`` (any pack). Exact line shape:
+# ``- route: <screen name> | app: <crm|portal> | path: <Menu> > <Item> > <Button or tab> | notes: <optional>``
+_CONFIRMED_ROUTE = re.compile(
+    r"(?i)^route:\s*(?P<screen>.+?)\s*\|\s*app:\s*(?P<app>[^|]+?)\s*\|\s*path:\s*(?P<path>.+?)"
+    r"(?:\s*\|\s*notes:\s*(?P<notes>.*))?$"
+)
+
+
+def parse_routes_section(text: str, *, warn=None) -> list[dict]:
+    """Parse a ``## Routes`` section into confirmed pack routes.
+
+    Returns dicts with ``screen``, ``app``, ``path``, ``notes``, ``source='pack'``,
+    ``status='verified'``. Lines with a host, URL, email, or id are skipped (and
+    ``warn`` is called when provided). Generic for any pack — not Savostore-specific.
+    """
+    from .memory.env_guard import find_env_details
+
+    warn = warn or (lambda _m: None)
+    sections = _sections(text or "")
+    # Accept "## Routes" / "## routes" (section key is the heading after "## ").
+    lines: list[str] = []
+    for key, body in sections.items():
+        if key.strip().lower() == "routes":
+            lines.extend(body)
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in lines:
+        line = (raw or "").strip()
+        if not line:
+            continue
+        hits = find_env_details(line)
+        if hits:
+            warn(f"skipping Routes line (env detail: {', '.join(dict.fromkeys(hits))}): {line[:160]}")
+            continue
+        m = _CONFIRMED_ROUTE.match(line)
+        if not m:
+            warn(f"skipping Routes line (bad format): {line[:160]}")
+            continue
+        screen = re.sub(r"\s+", " ", m.group("screen")).strip()
+        app = re.sub(r"\s+", " ", m.group("app")).strip().lower()
+        path = re.sub(r"\s+", " ", m.group("path")).strip()
+        notes = re.sub(r"\s+", " ", (m.group("notes") or "")).strip()
+        if not screen or not app or not path:
+            warn(f"skipping Routes line (empty field): {line[:160]}")
+            continue
+        # Path must look like a menu trail (labels / >), not a URL leftover.
+        if re.search(r"(?i)https?://|www\.", path) or "@" in path:
+            warn(f"skipping Routes line (path looks like url/email): {line[:160]}")
+            continue
+        key = (app, screen.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "screen": screen,
+            "app": app,
+            "path": path,
+            "notes": notes,
+            "source": "pack",
+            "status": "verified",
+            "checklist_item": screen,
+            "route_text": path,
+        })
+    return out
+
+
+def parse_confirmed_routes(pack_root, *, warn=None) -> list[dict]:
+    """Read ``packs/<slug>/learned.md`` and parse the ``## Routes`` section (if present)."""
+    p = path_for(pack_root)
+    if not p or not p.is_file():
+        return []
+    try:
+        text = p.read_text()
+    except OSError:
+        return []
+    return parse_routes_section(text, warn=warn)

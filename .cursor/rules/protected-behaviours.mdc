@@ -1,0 +1,38 @@
+---
+description: Behaviours locked by laptop smoke; breaking these must fail CI
+alwaysApply: true
+---
+
+# Protected behaviours
+
+Do not regress these. `tests/test_protected_behaviours.py` (and related gates) must stay green.
+
+## Web console
+1. **Classic tabs** sit directly under the run title (before phase / Now doing / wait / guidance).
+2. **Guidance box** (`#guideIn` / `#guideRow`) is always visible on the run page (not gated by a pane).
+3. **Equal card heights**; action icons stay inside run cards (kebab / overflow menu), not fighting the title row.
+4. **Live polling** never steals focus or wipes typed text in `#guideIn`, `#stuckGuide`, or `#ans`.
+5. **Asks** (stuck / question / approval) show, in plain words: (1) outcome the case is working towards, (2) what it is doing now and why, (3) what it needs from the user.
+6. **Stuck ask**: Continue, Skip, and Stop work (`stuckAct('go'|'skip'|'stop')`).
+
+## Tester / stuck / discovery
+7. **Stuck ask** fires on the **3rd** identical action (`STUCK_MAX_ATTEMPTS=3`), then the lookup ladder — including after need_fresh_snap / stale-ref / policy-deny early returns.
+8. After stuck **guidance + go**, the next action must change (identical action that caused the stuck is forbidden).
+9. **Discovery is read-only**: never submit / create / pay / save; may open forms and go back.
+10. **Read-only cases** come from the cases-file section heading (e.g. `## Final checks (read-only)`), not from the LLM title alone.
+11. **PREP create** on a read-only case needs explicit approval (auto must not silently approve).
+
+## Plan / pack / payments
+12. **TC0 Quick Repair and Rebuild** is injected for SuiteCRM/SugarCRM packs on task-sourced plans.
+13. **Card pay** allowed on staging and preprod; **M-Pesa** only when a phone number is available.
+14. **Core stays app-agnostic**; Savostore (and any client) material lives only under `packs/<slug>/`.
+
+## Identity & secrets
+15. **No environment-bound identity** (clients, emails, logins, record/order/invoice ids, hosts/URLs) in facts, memory, `discovery_maps`, `learned.md`, settings, or **golden-trace fixtures**.
+16. **Secrets** only in `.env` (or the secret store); never printed to console, reports, or committed files.
+    Mask **by context**, not by replacing every short secret string globally (see 80e1321 / PR #10 — that blanked ordinary words):
+    - Mask text typed into a password/secret field (`browser_type` / `fill_form` into `type=password`, or `login_form` / `_secret`).
+    - Mask values read from a secret env var **when passed to a tool** (args and results that carry them).
+    - Keep length-gated global `scrub_secrets` as-is; leave other text alone.
+
+When backfilling routes from old runs, every imported route must pass the same env-identity filter / redaction used elsewhere (`memory.env_guard` / `_safe_route`).

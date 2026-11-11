@@ -1,0 +1,22 @@
+---
+description: Graph-first code navigation — query before grep; keep graph fresh; check callers before editing shared code
+alwaysApply: true
+---
+
+# Graphify (graph first, grep last)
+
+This repo has a local, code-only knowledge graph at `graphify-out/` (rebuilt by `graphify update .`; not committed).
+
+**Default order for every code question:**
+
+1. **Graph** — `graphify explain`, `graphify path`, or `graphify query` (see skill `graphify-code-nav`).
+2. **Open only the lines** the graph returns — never whole files by default.
+3. **Grep last** — only for exact literals the graph cannot answer (error string, CSS id, env var name).
+
+**Keep the graph fresh:** run `graphify update .` after editing code and before an audit. Local clones may also run `graphify hook install` so updates happen on commit.
+
+**Before changing a shared function:** `graphify explain "<symbol>"` and list every caller in the PR **Regression audit** section. Do not edit shared helpers without that caller check.
+
+This applies to you and to every subagent that explores code. Include this rule in subagent prompts. Do not skip the graph because files are "already known".
+
+Only skip graphify when `graphify-out/graph.json` does not exist yet — then run `graphify update .` first.

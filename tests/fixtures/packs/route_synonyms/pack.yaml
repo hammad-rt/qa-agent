@@ -1,0 +1,7 @@
+# Demo pack fixture for route↔checklist synonym matching (not a real product pack).
+slug: route_synonyms_demo
+name: Route synonyms demo
+route_synonyms:
+  - ["client wallet", "open wallet", "wallet", "rewards"]
+  - ["order payments subpanel", "order payments", "record payment", "payment", "payments"]
+  - ["receive package", "parcel", "package"]

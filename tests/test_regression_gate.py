@@ -76,6 +76,16 @@ class StuckAskContinueGate(unittest.TestCase):
         # Continue sends 'go' so the tester gate advances.
         self.assertIn("kind==='go'){text='go'}", html.replace(" ", ""))
 
+    def test_render_prompt_keeps_stuck_inputs_across_polls(self):
+        """Stuck asks must early-return without wiping #stuckGuide; focus key omits stuck JSON."""
+        html = HTML.read_text()
+        self.assertIn("function typingInField", html)
+        # Old bug: `&&!j.stuck` forced a full pin rewrite every poll while stuck.
+        self.assertNotIn("&&!j.stuck", html.replace(" ", ""))
+        self.assertNotIn("JSON.stringify(j.stuck", html)
+        self.assertIn("if(typingInField(document.activeElement))return", html.replace(" ", ""))
+        self.assertIn("Same ask (incl. stuck): never rewrite pin", html)
+
     def test_tester_continue_after_guidance_go(self):
         from agent_tester.agents.tester import TesterSession
         from agent_tester.preflight.pack_loader import load_pack

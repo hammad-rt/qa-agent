@@ -81,6 +81,13 @@ risky_patterns:
 
 memory_areas: [rewards, protection, parcels, orders, payments, ui]
 
+# Synonym groups for matching ## Routes screen names to discovery checklist items.
+# Core only expands these tokens/phrases — product labels stay in the pack.
+route_synonyms:
+  - ["client wallet", "open wallet", "wallet", "rewards"]
+  - ["order payments subpanel", "order payments", "record payment", "payment", "payments"]
+  - ["receive package", "parcel", "package"]
+
 # Helpers (phase 6). Core helpers login_form and read_table need no setup. Project helpers stay disabled
 # until their path and labels are confirmed on the real UI (fill these from a live run, never guessed).
 helpers:

@@ -2300,9 +2300,9 @@ def _persist_discovery_recipe(sess: "TesterSession", text: str, area: str | None
 
 
 def _safe_args(args: dict) -> dict:
-    out = {}
-    for k, v in (args or {}).items():
-        out[k] = "[masked]" if k in ("text", "value") and isinstance(v, str) and len(v) > 0 and "password" in str(args.get("element", "")).lower() else v
+    """Action-log args: context-mask password/secret fields and secret-env values, then redact patterns."""
+    from ..redact import mask_tool_args
+    out = mask_tool_args(args)
     return json.loads(redact(json.dumps(out, default=str)))
 
 

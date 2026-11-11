@@ -80,11 +80,11 @@ async def _iter_events_with_idle(aiter, *, idle_sec: float, call_deadline: float
         while True:
             # Poll in short slices so a human-wait that starts mid-timeout is noticed.
             slice_sec = min(5.0, idle_sec)
-            waited = 0.0
+            started = time.monotonic()
             nxt = asyncio.ensure_future(aiter.__anext__())
             while True:
                 if human_wait_active():
-                    waited = 0.0
+                    started = time.monotonic()
                 left = slice_sec
                 if call_deadline is not None and not human_wait_active():
                     left = min(left, max(0.05, call_deadline - time.monotonic()))
@@ -93,7 +93,7 @@ async def _iter_events_with_idle(aiter, *, idle_sec: float, call_deadline: float
                     break
                 if human_wait_active():
                     continue
-                waited += left
+                waited = time.monotonic() - started
                 if call_deadline is not None and time.monotonic() >= call_deadline:
                     raise LLMOutputError(
                         f"LLM call hit the {LLM_TIMEOUT:.0f}s per-call timeout")
